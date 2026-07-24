@@ -45,24 +45,17 @@
 @media(max-width:1220px){.hero-v2{grid-template-columns:1fr;padding-top:70px}.hero-v2-copy{text-align:center}.hero-v2-copy h1,.hero-v2-copy>p,.trust-cards{margin-left:auto;margin-right:auto}.hero-v2-copy .hero-actions{justify-content:center}.hero-v2-visual{min-height:720px}.dashboard-shell{left:50%;right:auto;transform:translateX(-43%);width:min(760px,92vw)}.mascot-stage-v2{left:3%;width:350px}}
 @media(max-width:760px){.hero-v2{padding:52px 18px 30px}.hero-v2-copy h1{font-size:48px}.trust-cards{grid-template-columns:1fr;max-width:260px}.hero-v2-visual{min-height:540px;margin-top:20px}.dashboard-shell{width:96vw;height:500px;grid-template-columns:92px 1fr;transform:translateX(-50%)}.dash-sidebar{padding:15px 7px}.dash-nav{font-size:0}.dash-nav i{width:13px;height:13px}.dash-main{padding:16px 10px}.dash-head h3{font-size:17px}.dash-kpis{grid-template-columns:1fr 1fr}.dash-kpis article:nth-child(3){display:none}.dash-charts{grid-template-columns:1fr}.ad-chart{display:none}.ai-list{display:none}.mascot-stage-v2{width:220px;left:-18px;bottom:-22px}.hero-ring{display:none}}
 
-/* ELISEI v1.2 — signature hero refinement */
-.landing-v1{background:linear-gradient(180deg,#090717 0%,#100b27 27%,#171038 56%,#f7f6fb 56.1%,#f7f6fb 74%,#0c091b 74.1%,#080713 100%)}
-.public-header{max-width:1540px;background:rgba(9,7,23,.7);border:1px solid rgba(255,255,255,.06);border-radius:0 0 18px 18px;backdrop-filter:blur(24px)}
-.hero-v2{max-width:1540px;min-height:900px;padding-top:54px;grid-template-columns:.7fr 1.3fr}
-.hero-v2-copy h1{font-size:clamp(64px,5.45vw,94px);line-height:.97}
-.hero-v2-copy>p{font-size:19px;max-width:650px}
-.hero-v2-visual{min-height:770px}
-.dashboard-shell{top:22px;width:785px;height:650px;border-radius:30px;border-color:rgba(173,136,255,.62);box-shadow:0 50px 130px rgba(2,1,14,.82),0 0 80px rgba(105,62,255,.2);transform:perspective(1600px) rotateY(-2deg) rotateX(.35deg)}
-.dashboard-shell:before{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(125deg,rgba(255,255,255,.08),transparent 18%,transparent 74%,rgba(129,84,255,.08));z-index:8}
-.mascot-stage-v2{left:-124px;bottom:-28px;width:470px;filter:drop-shadow(0 52px 70px rgba(31,10,91,.72));z-index:9}
-.mascot-stage-v2:after{content:"";position:absolute;left:16%;right:14%;bottom:3%;height:22px;border-radius:50%;background:rgba(105,63,255,.58);filter:blur(18px);z-index:-1}
-.hero-ring.ring-one{width:560px;height:315px;left:-168px;bottom:148px;border-color:rgba(151,104,255,.5);box-shadow:0 0 34px rgba(112,64,255,.16) inset}
-.hero-ring.ring-two{width:650px;height:370px;left:-214px;bottom:112px;border-color:rgba(74,145,255,.28)}
-.hero-v2-visual:before{content:"";position:absolute;width:580px;height:580px;left:-90px;top:120px;background:radial-gradient(circle,rgba(99,63,255,.2),rgba(99,63,255,.06) 40%,transparent 70%);filter:blur(10px);pointer-events:none}
-.hero-v2-visual:after{content:"ЭЛ нашёл +66 800 ₽ потенциальной прибыли";position:absolute;right:48px;bottom:62px;z-index:11;padding:12px 16px;border-radius:12px;background:rgba(23,17,53,.86);border:1px solid rgba(163,126,255,.34);box-shadow:0 16px 50px rgba(0,0,0,.35);font-size:11px;color:#d9d3ec;backdrop-filter:blur(16px)}
-.dash-main{padding:25px 20px 19px}.dash-kpis article,.dash-charts>article,.ai-list{box-shadow:inset 0 1px rgba(255,255,255,.035),0 14px 30px rgba(0,0,0,.12)}
-.dash-kpis svg path,.chart-lines .line{stroke-dasharray:600;stroke-dashoffset:600;animation:drawChart 2.2s .35s ease forwards}
-.el{animation:elFloat 5.6s ease-in-out infinite}.el svg{overflow:visible}.el-orbit{box-shadow:0 0 24px rgba(122,74,255,.12)}
-@keyframes drawChart{to{stroke-dashoffset:0}}@keyframes elFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-9px)}}
-@media(max-width:1220px){.dashboard-shell{width:min(800px,94vw)}.mascot-stage-v2{left:1%;width:420px}.hero-v2{min-height:auto}.hero-v2-visual:after{right:8%;bottom:30px}}
-@media(max-width:760px){.hero-v2-copy h1{font-size:50px}.hero-v2-visual{min-height:610px}.dashboard-shell{height:520px}.mascot-stage-v2{width:260px;left:-34px;bottom:-10px}.hero-v2-visual:after{display:none}}
+/* ELISEI v1.3 — exact approved hero reference */
+.reference-header{display:none!important}
+.reference-hero{position:relative;width:100%;max-width:1536px;margin:0 auto;background:#050611;overflow:hidden;line-height:0}
+.reference-hero img{display:block;width:100%;height:auto;object-fit:contain;user-select:none;-webkit-user-drag:none}
+.hero-hotspot{position:absolute;z-index:4;border:0;background:transparent;cursor:pointer;border-radius:16px}
+.hero-hotspot:focus-visible{outline:3px solid rgba(167,139,250,.95);outline-offset:3px;background:rgba(124,58,237,.08)}
+.login-hotspot{left:73.4%;top:2.4%;width:7.1%;height:5.2%}
+.top-register-hotspot{left:81.1%;top:2.35%;width:16.4%;height:5.35%}
+.main-register-hotspot{left:2.45%;top:72.3%;width:16.2%;height:5.4%}
+.demo-hotspot{left:19.7%;top:72.3%;width:12.1%;height:5.4%}
+@media(max-width:900px){
+  .reference-hero{min-height:100vh;display:flex;align-items:flex-start;overflow:auto;background:#050611}
+  .reference-hero img{width:1536px;max-width:none;height:auto;transform-origin:top left}
+}
