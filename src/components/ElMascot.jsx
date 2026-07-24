@@ -1,86 +1,37 @@
-export default function ElMascot({ compact = false, mood = 'welcome' }) {
+export default function ElMascot({ compact=false, mood='happy' }) {
   return (
-    <div className={`el el-${mood}${compact ? ' compact' : ''}`} aria-label="ЭЛ — AI-директор ELISEI">
-      <div className="el-orbit orbit-one" />
-      <div className="el-orbit orbit-two" />
-      <div className="el-glow" />
-      <svg viewBox="0 0 420 470" role="img" aria-hidden="true">
+    <div className={`${compact?'el compact':'el'} el-${mood}`} aria-label="ЭЛ — AI-директор ELISEI">
+      <div className="el-orbit orbit-one"/><div className="el-orbit orbit-two"/>
+      <div className="el-glow"/>
+      <svg viewBox="0 0 360 390" role="img" aria-hidden="true">
         <defs>
-          <linearGradient id="elShell" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stopColor="#f2e9ff" />
-            <stop offset=".14" stopColor="#c4a7ff" />
-            <stop offset=".48" stopColor="#7c3aed" />
-            <stop offset=".78" stopColor="#43208f" />
-            <stop offset="1" stopColor="#211049" />
-          </linearGradient>
-          <linearGradient id="elShellDark" x1="0" y1="0" x2="0" y2="1">
-            <stop stopColor="#8054d9" />
-            <stop offset="1" stopColor="#25123f" />
-          </linearGradient>
-          <radialGradient id="elFace" cx="50%" cy="35%" r="85%">
-            <stop stopColor="#2c2547" />
-            <stop offset=".48" stopColor="#11101c" />
-            <stop offset="1" stopColor="#05050a" />
-          </radialGradient>
-          <radialGradient id="elCore" cx="50%" cy="42%" r="60%">
-            <stop stopColor="#ffffff" />
-            <stop offset=".22" stopColor="#b8fff7" />
-            <stop offset=".55" stopColor="#8b7cff" />
-            <stop offset="1" stopColor="#4d1fb6" />
-          </radialGradient>
-          <linearGradient id="elGlass" x1="0" y1="0" x2="1" y2="1">
-            <stop stopColor="#ffffff" stopOpacity=".42" />
-            <stop offset=".28" stopColor="#ffffff" stopOpacity=".05" />
-            <stop offset="1" stopColor="#9eeeff" stopOpacity=".02" />
-          </linearGradient>
-          <filter id="softGlow" x="-80%" y="-80%" width="260%" height="260%">
-            <feGaussianBlur stdDeviation="12" result="b" />
-            <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-          </filter>
-          <filter id="deepShadow" x="-40%" y="-40%" width="180%" height="180%">
-            <feDropShadow dx="0" dy="20" stdDeviation="20" floodColor="#15052f" floodOpacity=".75" />
-          </filter>
+          <linearGradient id="shell" x1="0" y1="0" x2="1" y2="1"><stop stopColor="#f4ecff"/><stop offset=".28" stopColor="#b794f6"/><stop offset=".62" stopColor="#7c3aed"/><stop offset="1" stopColor="#312e81"/></linearGradient>
+          <linearGradient id="shellDark" x1="0" y1="0" x2="1" y2="1"><stop stopColor="#312e81"/><stop offset="1" stopColor="#111827"/></linearGradient>
+          <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1"><stop stopColor="#302651"/><stop offset=".5" stopColor="#171329"/><stop offset="1" stopColor="#080711"/></linearGradient>
+          <radialGradient id="core" cx="50%" cy="45%" r="55%"><stop stopColor="#ffffff"/><stop offset=".22" stopColor="#a7f3d0"/><stop offset=".55" stopColor="#67e8f9"/><stop offset="1" stopColor="#7c3aed"/></radialGradient>
+          <filter id="soft"><feGaussianBlur stdDeviation="11"/></filter>
+          <filter id="shine"><feGaussianBlur stdDeviation="2"/></filter>
         </defs>
-
-        <ellipse cx="210" cy="428" rx="126" ry="27" fill="#6d28d9" opacity=".25" filter="url(#softGlow)" />
-
-        <g className="el-antenna">
-          <path d="M210 77V38" stroke="#8d64df" strokeWidth="11" strokeLinecap="round" />
-          <circle cx="210" cy="30" r="14" fill="url(#elCore)" filter="url(#softGlow)" />
-          <circle cx="206" cy="25" r="4" fill="white" opacity=".9" />
+        <ellipse cx="180" cy="350" rx="104" ry="22" fill="#6d5dfc" opacity=".26" filter="url(#soft)"/>
+        <path d="M104 188c0-69 30-106 76-106s76 37 76 106v75c0 62-31 99-76 99s-76-37-76-99z" fill="url(#shell)"/>
+        <path d="M120 242c22 15 98 15 120 0v34c0 51-25 80-60 80s-60-29-60-80z" fill="url(#shellDark)" opacity=".92"/>
+        <rect x="109" y="75" width="142" height="119" rx="48" fill="url(#glass)" stroke="#ede9fe" strokeOpacity=".55" strokeWidth="2"/>
+        <path d="M128 98c18-12 36-17 54-17" stroke="#fff" strokeOpacity=".3" strokeWidth="5" strokeLinecap="round"/>
+        <g className="el-eyes">
+          <rect x="135" y="128" width="31" height="14" rx="7" fill="#d9fbff"/>
+          <rect x="194" y="128" width="31" height="14" rx="7" fill="#d9fbff"/>
         </g>
-
-        <g className="el-body" filter="url(#deepShadow)">
-          <path d="M105 230c0-74 45-119 105-119s105 45 105 119v73c0 86-43 132-105 132s-105-46-105-132z" fill="url(#elShell)" />
-          <path d="M121 274c13 81 46 127 89 127 44 0 77-46 90-127-10 95-43 144-90 144-46 0-79-49-89-144Z" fill="#170d2c" opacity=".18" />
-          <path d="M121 229c0-61 37-100 89-100 51 0 89 39 89 100v64c0 10-1 20-3 29-9-70-41-105-86-105-46 0-78 35-87 105-2-9-2-19-2-29z" fill="url(#elGlass)" opacity=".45" />
-        </g>
-
-        <g className="el-arms">
-          <path d="M111 239 68 273c-17 13-14 40 5 49l37 17" fill="none" stroke="url(#elShellDark)" strokeWidth="28" strokeLinecap="round" />
-          <path d="M309 239 352 273c17 13 14 40-5 49l-37 17" fill="none" stroke="url(#elShellDark)" strokeWidth="28" strokeLinecap="round" />
-          <circle cx="66" cy="321" r="17" fill="url(#elShell)" />
-          <circle cx="354" cy="321" r="17" fill="url(#elShell)" />
-        </g>
-
-        <g className="el-face-panel">
-          <rect x="128" y="126" width="164" height="148" rx="55" fill="url(#elFace)" stroke="#e1d9ff" strokeOpacity=".3" strokeWidth="3" />
-          <path d="M147 142c36-21 91-21 126 0" fill="none" stroke="white" strokeOpacity=".14" strokeWidth="7" strokeLinecap="round" />
-          <path d="M150 135c24-8 48-11 72-9" fill="none" stroke="white" strokeOpacity=".35" strokeWidth="4" strokeLinecap="round" />
-          <g className="el-eyes" filter="url(#softGlow)">
-            <rect x="158" y="184" width="34" height="16" rx="8" fill="#b8fff7" />
-            <rect x="228" y="184" width="34" height="16" rx="8" fill="#b8fff7" />
-          </g>
-          <path className="el-smile" d="M179 228c17 13 45 13 62 0" fill="none" stroke="#b8fff7" strokeWidth="7" strokeLinecap="round" filter="url(#softGlow)" />
-        </g>
-
-        <g className="el-core" filter="url(#softGlow)">
-          <circle cx="210" cy="336" r="42" fill="#120b22" stroke="#dacdff" strokeOpacity=".45" strokeWidth="3" />
-          <circle cx="210" cy="336" r="30" fill="url(#elCore)" opacity=".95" />
-          <path d="m210 314 8 12 15 4-10 11 1 16-14-6-14 6 1-16-10-11 15-4z" fill="white" opacity=".96" />
-        </g>
-
-        <path d="M137 301c9 27 18 45 30 57" fill="none" stroke="white" strokeOpacity=".12" strokeWidth="8" strokeLinecap="round" />
+        <path className="el-smile" d="M150 158c17 13 43 13 60 0" fill="none" stroke="#b8fff4" strokeWidth="6" strokeLinecap="round"/>
+        <circle cx="180" cy="59" r="8" fill="#b8fff4"/>
+        <path d="M180 60V35" stroke="#c4b5fd" strokeWidth="7" strokeLinecap="round"/>
+        <circle cx="180" cy="33" r="6" fill="#f5f3ff"/>
+        <path d="M102 205 62 231c-16 11-14 35 4 43l35 15" fill="none" stroke="url(#shell)" strokeWidth="23" strokeLinecap="round"/>
+        <path d="m258 205 40 26c16 11 14 35-4 43l-35 15" fill="none" stroke="url(#shell)" strokeWidth="23" strokeLinecap="round"/>
+        <circle cx="58" cy="270" r="15" fill="#8b5cf6"/><circle cx="302" cy="270" r="15" fill="#8b5cf6"/>
+        <circle cx="180" cy="285" r="34" fill="#0f0d1c" stroke="#ddd6fe" strokeOpacity=".7" strokeWidth="2"/>
+        <circle className="el-core" cx="180" cy="285" r="23" fill="url(#core)"/>
+        <path d="m180 269 7 11 13 4-9 10 1 14-12-6-12 6 1-14-9-10 13-4z" fill="#fff" opacity=".94"/>
+        <path d="M126 214c14 9 28 12 54 12s40-3 54-12" fill="none" stroke="#fff" strokeOpacity=".16" strokeWidth="4" strokeLinecap="round"/>
       </svg>
     </div>
   )

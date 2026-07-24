@@ -1,6 +1,6 @@
-# ELISEI v0.7 — Public Landing
+# ELISEI v1.0 Premium
 
-Чистый React/Vite-проект без вложенных дублей.
+Публичный SaaS-фронтенд ELISEI: лендинг, регистрация, вход и демонстрационный кабинет.
 
 Маршруты:
 - `/` — публичный лендинг
@@ -8,19 +8,7 @@
 - `/register` — регистрация
 - `/app` — кабинет
 
-## Локальный запуск
-
-```bash
-npm install
-npm run dev
-```
-
-## Сборка
-
-```bash
-npm run build
-```
-
-## Render
-
-Проект готов для Static Site. Файл `render.yaml` находится в корне, SPA rewrite настроен на `/index.html`.
+Render Static Site:
+- Build command: `npm install && npm run build`
+- Publish directory: `dist`
+- Rewrite: `/*` → `/index.html`
