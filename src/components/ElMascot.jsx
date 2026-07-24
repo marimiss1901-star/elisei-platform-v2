@@ -2,36 +2,30 @@ export default function ElMascot({ compact=false, mood='happy' }) {
   return (
     <div className={`${compact?'el compact':'el'} el-${mood}`} aria-label="ЭЛ — AI-директор ELISEI">
       <div className="el-orbit orbit-one"/><div className="el-orbit orbit-two"/>
-      <div className="el-glow"/>
-      <svg viewBox="0 0 360 390" role="img" aria-hidden="true">
+      <svg viewBox="0 0 430 560" role="img" aria-hidden="true">
         <defs>
-          <linearGradient id="shell" x1="0" y1="0" x2="1" y2="1"><stop stopColor="#f4ecff"/><stop offset=".28" stopColor="#b794f6"/><stop offset=".62" stopColor="#7c3aed"/><stop offset="1" stopColor="#312e81"/></linearGradient>
-          <linearGradient id="shellDark" x1="0" y1="0" x2="1" y2="1"><stop stopColor="#312e81"/><stop offset="1" stopColor="#111827"/></linearGradient>
-          <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1"><stop stopColor="#302651"/><stop offset=".5" stopColor="#171329"/><stop offset="1" stopColor="#080711"/></linearGradient>
-          <radialGradient id="core" cx="50%" cy="45%" r="55%"><stop stopColor="#ffffff"/><stop offset=".22" stopColor="#a7f3d0"/><stop offset=".55" stopColor="#67e8f9"/><stop offset="1" stopColor="#7c3aed"/></radialGradient>
-          <filter id="soft"><feGaussianBlur stdDeviation="11"/></filter>
-          <filter id="shine"><feGaussianBlur stdDeviation="2"/></filter>
+          <linearGradient id="whiteShell" x1="0" y1="0" x2="1" y2="1"><stop stopColor="#ffffff"/><stop offset=".28" stopColor="#e9e7ff"/><stop offset=".63" stopColor="#a99cff"/><stop offset="1" stopColor="#4b3f91"/></linearGradient>
+          <linearGradient id="darkJoint" x1="0" y1="0" x2="1" y2="1"><stop stopColor="#251d52"/><stop offset="1" stopColor="#080611"/></linearGradient>
+          <linearGradient id="faceGlass" x1="0" y1="0" x2="0" y2="1"><stop stopColor="#1a1440"/><stop offset=".55" stopColor="#080718"/><stop offset="1" stopColor="#020208"/></linearGradient>
+          <radialGradient id="brandCore"><stop stopColor="#fff"/><stop offset=".22" stopColor="#c4b5fd"/><stop offset=".58" stopColor="#7c3aed"/><stop offset="1" stopColor="#271458"/></radialGradient>
+          <filter id="blur"><feGaussianBlur stdDeviation="18"/></filter><filter id="glow"><feGaussianBlur stdDeviation="4"/></filter>
         </defs>
-        <ellipse cx="180" cy="350" rx="104" ry="22" fill="#6d5dfc" opacity=".26" filter="url(#soft)"/>
-        <path d="M104 188c0-69 30-106 76-106s76 37 76 106v75c0 62-31 99-76 99s-76-37-76-99z" fill="url(#shell)"/>
-        <path d="M120 242c22 15 98 15 120 0v34c0 51-25 80-60 80s-60-29-60-80z" fill="url(#shellDark)" opacity=".92"/>
-        <rect x="109" y="75" width="142" height="119" rx="48" fill="url(#glass)" stroke="#ede9fe" strokeOpacity=".55" strokeWidth="2"/>
-        <path d="M128 98c18-12 36-17 54-17" stroke="#fff" strokeOpacity=".3" strokeWidth="5" strokeLinecap="round"/>
-        <g className="el-eyes">
-          <rect x="135" y="128" width="31" height="14" rx="7" fill="#d9fbff"/>
-          <rect x="194" y="128" width="31" height="14" rx="7" fill="#d9fbff"/>
-        </g>
-        <path className="el-smile" d="M150 158c17 13 43 13 60 0" fill="none" stroke="#b8fff4" strokeWidth="6" strokeLinecap="round"/>
-        <circle cx="180" cy="59" r="8" fill="#b8fff4"/>
-        <path d="M180 60V35" stroke="#c4b5fd" strokeWidth="7" strokeLinecap="round"/>
-        <circle cx="180" cy="33" r="6" fill="#f5f3ff"/>
-        <path d="M102 205 62 231c-16 11-14 35 4 43l35 15" fill="none" stroke="url(#shell)" strokeWidth="23" strokeLinecap="round"/>
-        <path d="m258 205 40 26c16 11 14 35-4 43l-35 15" fill="none" stroke="url(#shell)" strokeWidth="23" strokeLinecap="round"/>
-        <circle cx="58" cy="270" r="15" fill="#8b5cf6"/><circle cx="302" cy="270" r="15" fill="#8b5cf6"/>
-        <circle cx="180" cy="285" r="34" fill="#0f0d1c" stroke="#ddd6fe" strokeOpacity=".7" strokeWidth="2"/>
-        <circle className="el-core" cx="180" cy="285" r="23" fill="url(#core)"/>
-        <path d="m180 269 7 11 13 4-9 10 1 14-12-6-12 6 1-14-9-10 13-4z" fill="#fff" opacity=".94"/>
-        <path d="M126 214c14 9 28 12 54 12s40-3 54-12" fill="none" stroke="#fff" strokeOpacity=".16" strokeWidth="4" strokeLinecap="round"/>
+        <ellipse cx="216" cy="526" rx="155" ry="28" fill="#6d4aff" opacity=".42" filter="url(#blur)"/>
+        <path d="M145 224c12-65 131-65 143 0l13 110c8 67-35 129-85 129s-93-62-85-129z" fill="url(#whiteShell)" stroke="#fff" strokeOpacity=".45" strokeWidth="3"/>
+        <path d="M162 363c27 18 81 18 108 0l-3 59c-12 28-29 42-51 42s-39-14-51-42z" fill="url(#darkJoint)"/>
+        <path d="M122 125c0-72 42-111 94-111s94 39 94 111v36c0 65-42 105-94 105s-94-40-94-105z" fill="url(#whiteShell)" stroke="#fff" strokeOpacity=".55" strokeWidth="3"/>
+        <path d="M143 100c0-42 30-65 73-65s73 23 73 65v61c0 44-31 70-73 70s-73-26-73-70z" fill="url(#faceGlass)" stroke="#9b87ff" strokeWidth="4"/>
+        <path d="M160 72c24-18 62-22 91-10" fill="none" stroke="#fff" strokeOpacity=".45" strokeWidth="8" strokeLinecap="round"/>
+        <g className="el-eyes"><path d="M169 139c9-13 23-13 32 0" fill="none" stroke="#dcd7ff" strokeWidth="9" strokeLinecap="round"/><path d="M231 139c9-13 23-13 32 0" fill="none" stroke="#dcd7ff" strokeWidth="9" strokeLinecap="round"/></g>
+        <path className="el-smile" d="M176 174c23 23 57 23 80 0" fill="none" stroke="#fff" strokeWidth="9" strokeLinecap="round"/>
+        <circle cx="216" cy="13" r="10" fill="#8b5cf6"/><path d="M216 24v-17" stroke="#ddd6fe" strokeWidth="7" strokeLinecap="round"/>
+        <path d="M139 270 87 300c-27 16-35 48-16 72l18 23" fill="none" stroke="url(#whiteShell)" strokeWidth="34" strokeLinecap="round"/>
+        <path d="m292 270 54 26c26 13 36 43 22 68l-17 28" fill="none" stroke="url(#whiteShell)" strokeWidth="34" strokeLinecap="round"/>
+        <circle cx="84" cy="391" r="22" fill="url(#darkJoint)" stroke="#b8adff" strokeWidth="3"/><circle cx="353" cy="390" r="22" fill="url(#darkJoint)" stroke="#b8adff" strokeWidth="3"/>
+        <path d="M75 377c-20-16-28-42-18-66" fill="none" stroke="#e9e7ff" strokeWidth="13" strokeLinecap="round"/><path d="M58 313l-13-5M63 302l-5-16M72 298l5-15" stroke="#fff" strokeWidth="7" strokeLinecap="round"/>
+        <circle cx="216" cy="330" r="49" fill="#0a0717" stroke="#cabfff" strokeWidth="4"/><circle className="el-core" cx="216" cy="330" r="34" fill="url(#brandCore)"/>
+        <path d="m216 304 9 15 17 5-12 13 2 18-16-8-16 8 2-18-12-13 17-5z" fill="#fff"/>
+        <path d="M142 252c36 16 112 16 148 0" fill="none" stroke="#fff" strokeOpacity=".34" strokeWidth="6" strokeLinecap="round"/>
       </svg>
     </div>
   )

@@ -34,33 +34,45 @@ export default function LandingPage({ onNavigate, isAuthenticated }) {
       </header>
 
       <main>
-        <section className="landing-hero hero-v1">
-          <div className="hero-aura aura-left"/><div className="hero-aura aura-right"/>
-          <div className="landing-copy">
-            <div className="eyebrow"><Sparkles size={15}/> Ваш AI-директор для маркетплейсов</div>
-            <h1>Пока вы развиваете бизнес,<br/><em>ЭЛ увеличивает прибыль.</em></h1>
-            <p>ELISEI ежедневно анализирует продажи, рекламу, остатки и финансы — и превращает данные в понятные действия.</p>
+        <section className="landing-hero hero-v2">
+          <div className="hero-grid-glow"/>
+          <div className="hero-v2-copy">
+            <div className="eyebrow"><Sparkles size={15}/> Ваш AI-директор для роста прибыли</div>
+            <h1>Пока вы<br/>развиваете бизнес,<br/><em>ЭЛ увеличивает<br/>прибыль.</em></h1>
+            <p>AI анализирует продажи, рекламу, остатки и финансы каждый день и предлагает конкретные действия, которые увеличивают вашу прибыль.</p>
             <div className="hero-actions">
-              <button className="primary-btn large" onClick={() => onNavigate('/register')}>Попробовать 3 дня бесплатно <ArrowRight size={18}/></button>
-              <button className="secondary-btn large" onClick={() => onNavigate('/app')}>Посмотреть кабинет <ChevronRight size={18}/></button>
+              <button className="primary-btn large" onClick={() => onNavigate('/register')}>Попробовать бесплатно <ArrowRight size={18}/></button>
+              <button className="secondary-btn large" onClick={() => onNavigate('/app')}>Посмотреть демо <ChevronRight size={18}/></button>
             </div>
-            <div className="trust-row"><span><Check size={15}/> Без банковской карты</span><span><Clock3 size={15}/> Подключение за несколько минут</span><span><ShieldCheck size={15}/> Официальный API</span></div>
+            <div className="trust-cards">
+              <span><Sparkles size={15}/><b>3 дня бесплатно</b><small>Без ограничений</small></span>
+              <span><ShieldCheck size={15}/><b>Без карты</b><small>Никаких платежей</small></span>
+              <span><Check size={15}/><b>Безопасно</b><small>Данные под защитой</small></span>
+            </div>
           </div>
 
-          <div className="hero-product-stage">
-            <div className="dashboard-preview">
-              <div className="preview-top"><span/><span/><span/><small>ELISEI · Сегодня</small></div>
-              <div className="preview-body">
-                <div className="preview-greeting"><small>ЭЛ уже всё проверил</small><strong>Доброе утро, Мария</strong><p>Сегодня есть три возможности увеличить прибыль.</p></div>
-                <div className="preview-actions">
-                  {actions.map(([title,count,effect,Icon])=><article key={title}><div><Icon size={16}/></div><small>{title}</small><strong>{count}</strong><em>{effect}</em></article>)}
+          <div className="hero-v2-visual">
+            <div className="dashboard-shell">
+              <aside className="dash-sidebar">
+                <div className="dash-brand"><span>E</span><b>ELISEI</b></div>
+                {['Главная','Аналитика','Товары','Реклама','Финансы','Остатки','Отчёты','Настройки'].map((item,i)=><div className={i===0?'dash-nav active':'dash-nav'} key={item}><i/>{item}</div>)}
+              </aside>
+              <div className="dash-main">
+                <div className="dash-head"><div><h3>Доброе утро, Мария! 👋</h3><p>Сегодня 22 мая, четверг</p></div><span>Обновлено 5 мин назад <i/></span></div>
+                <div className="dash-kpis">
+                  <article><small>Прибыль за сегодня</small><strong>+42 800 ₽</strong><em>↑ 18% к вчера</em><svg viewBox="0 0 120 35"><path d="M2 30 L18 25 L29 29 L43 18 L57 22 L70 12 L83 17 L98 7 L118 10"/></svg></article>
+                  <article><small>Выручка за сегодня</small><strong>286 740 ₽</strong><em>↑ 12% к вчера</em><svg viewBox="0 0 120 35"><path d="M2 28 L16 22 L28 26 L42 16 L54 20 L67 11 L82 15 L96 5 L118 8"/></svg></article>
+                  <article><small>Заказы за сегодня</small><strong>156 шт.</strong><em>↑ 9% к вчера</em><svg viewBox="0 0 120 35"><path d="M2 29 L15 24 L28 27 L41 17 L53 22 L68 13 L81 16 L96 8 L118 4"/></svg></article>
                 </div>
-                <div className="preview-chart"><div className="chart-copy"><small>Потенциал на 30 дней</small><strong>+340 000 ₽</strong></div><svg viewBox="0 0 420 120" preserveAspectRatio="none"><defs><linearGradient id="area" x1="0" y1="0" x2="0" y2="1"><stop stopColor="#8b5cf6" stopOpacity=".45"/><stop offset="1" stopColor="#8b5cf6" stopOpacity="0"/></linearGradient></defs><path d="M0 100 C55 94,62 70,110 75 S170 55,215 60 S275 22,330 32 S380 18,420 8 L420 120 L0 120Z" fill="url(#area)"/><path d="M0 100 C55 94,62 70,110 75 S170 55,215 60 S275 22,330 32 S380 18,420 8" fill="none" stroke="#8b5cf6" strokeWidth="4"/></svg></div>
+                <div className="dash-charts">
+                  <article className="profit-chart"><small>Динамика прибыли</small><strong>1 172 230 ₽</strong><div className="chart-lines"><span/><span/><span/><svg viewBox="0 0 420 130" preserveAspectRatio="none"><defs><linearGradient id="heroArea" x1="0" y1="0" x2="0" y2="1"><stop stopColor="#9f67ff" stopOpacity=".42"/><stop offset="1" stopColor="#9f67ff" stopOpacity="0"/></linearGradient></defs><path className="area" d="M0 115 C45 108,55 92,95 98 S155 72,195 80 S245 52,292 60 S352 20,420 26 L420 130 L0 130Z"/><path className="line" d="M0 115 C45 108,55 92,95 98 S155 72,195 80 S245 52,292 60 S352 20,420 26"/></svg></div></article>
+                  <article className="ad-chart"><small>Расходы на рекламу</small><strong>28 540 ₽</strong><div className="donut"><div/><ul><li>Wildberries <b>48%</b></li><li>Ozon <b>28%</b></li><li>Яндекс <b>16%</b></li></ul></div></article>
+                </div>
+                <div className="ai-list"><div><b>AI-рекомендации на сегодня</b><small>Все рекомендации →</small></div>{[['Поднять цену на 4 модели','Ожидаемая доп. прибыль','+27 000 ₽'],['Пополнить остатки на 3 складах','Упущенная выручка','+31 200 ₽'],['Отключить неэффективную рекламу','Экономия бюджета','+8 600 ₽']].map(([a,b,c],i)=><article key={a}><span className={`rec-dot r${i}`}/><p><b>{a}</b><small>{b}</small></p><em>{c}</em><button>Применить</button></article>)}</div>
               </div>
             </div>
-            <div className="mascot-stage"><ElMascot mood="happy"/></div>
-            <div className="signal-card signal-profit"><span>Прибыль</span><strong>+47 200 ₽</strong><small>найдено сегодня</small></div>
-            <div className="signal-card signal-risk"><span>Риск</span><strong>7 товаров</strong><small>нужно пополнить</small></div>
+            <div className="mascot-stage-v2"><ElMascot mood="happy"/></div>
+            <div className="hero-ring ring-one"/><div className="hero-ring ring-two"/>
           </div>
         </section>
 
