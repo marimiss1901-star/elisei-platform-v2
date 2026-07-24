@@ -16,6 +16,14 @@ const actions = [
 
 export default function LandingPage({ onNavigate, isAuthenticated }) {
   const [menuOpen, setMenuOpen] = useState(false)
+
+  const scrollToSection = (id) => {
+    const element = document.getElementById(id)
+    if (element) element.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  const openApp = () => onNavigate(isAuthenticated ? '/app' : '/login')
+
   return (
     <div className="landing landing-v1">
       <header className="public-header reference-header">
@@ -36,13 +44,25 @@ export default function LandingPage({ onNavigate, isAuthenticated }) {
       <main>
         <section className="reference-hero" aria-label="ELISEI — AI-директор для маркетплейсов">
           <img src="/elisei-reference-hero.png" alt="ELISEI — AI-директор для маркетплейсов" />
-          <button className="hero-hotspot login-hotspot" aria-label="Войти" onClick={() => onNavigate(isAuthenticated ? '/app' : '/login')} />
+          <button className="hero-hotspot brand-hotspot" aria-label="На главную" onClick={() => onNavigate('/')} />
+          <button className="hero-hotspot product-hotspot" aria-label="Продукт" onClick={() => scrollToSection('product')} />
+          <button className="hero-hotspot how-hotspot" aria-label="Как работает" onClick={() => scrollToSection('how')} />
+          <button className="hero-hotspot pricing-hotspot" aria-label="Тарифы" onClick={() => scrollToSection('pricing')} />
+          <button className="hero-hotspot integrations-hotspot" aria-label="Интеграции" onClick={() => scrollToSection('integrations')} />
+          <button className="hero-hotspot resources-hotspot" aria-label="Ресурсы" onClick={() => scrollToSection('resources')} />
+          <button className="hero-hotspot faq-hotspot" aria-label="FAQ" onClick={() => scrollToSection('faq')} />
+          <button className="hero-hotspot login-hotspot" aria-label="Войти" onClick={openApp} />
           <button className="hero-hotspot top-register-hotspot" aria-label="Попробовать бесплатно" onClick={() => onNavigate('/register')} />
           <button className="hero-hotspot main-register-hotspot" aria-label="Попробовать бесплатно" onClick={() => onNavigate('/register')} />
-          <button className="hero-hotspot demo-hotspot" aria-label="Посмотреть демо" onClick={() => onNavigate('/app')} />
+          <button className="hero-hotspot demo-hotspot" aria-label="Посмотреть демо" onClick={openApp} />
+          <button className="hero-hotspot dashboard-hotspot" aria-label="Открыть кабинет ELISEI" onClick={openApp} />
+          <button className="hero-hotspot opportunity-hotspot" aria-label="Посмотреть найденную возможность" onClick={openApp} />
+          <button className="hero-hotspot recommendation-one-hotspot" aria-label="Применить рекомендацию по цене" onClick={openApp} />
+          <button className="hero-hotspot recommendation-two-hotspot" aria-label="Применить рекомендацию по остаткам" onClick={openApp} />
+          <button className="hero-hotspot recommendation-three-hotspot" aria-label="Применить рекомендацию по рекламе" onClick={openApp} />
         </section>
 
-        <section className="logo-strip"><span>Первое подключение</span><strong><Store size={18}/> Wildberries</strong><small>Другие маркетплейсы будут добавляться поэтапно</small></section>
+        <section className="logo-strip" id="integrations"><span>Первое подключение</span><strong><Store size={18}/> Wildberries</strong><small>Другие маркетплейсы будут добавляться поэтапно</small></section>
 
         <section className="public-section soft-section" id="product">
           <div className="section-kicker">Не очередной отчёт</div>
@@ -62,7 +82,7 @@ export default function LandingPage({ onNavigate, isAuthenticated }) {
           </div>
         </section>
 
-        <section className="public-section demo-section">
+        <section className="public-section demo-section" id="resources">
           <div className="demo-window">
             <div className="demo-top"><span/><span/><span/><small>ELISEI — Кабинет</small></div>
             <div className="demo-content">
