@@ -1,0 +1,6 @@
+:root {
+ --bg:#080810; --bg-soft:#0d0d17; --panel:rgba(20,18,34,.72); --panel-strong:rgba(29,25,49,.88);
+ --text:#f6f3ff; --muted:#9d98ae; --line:rgba(255,255,255,.09); --violet:#8b5cf6; --violet-2:#b89cff;
+ --blue:#5ad7ff; --green:#57e6ae; --amber:#ffc96b; --danger:#ff6b88;
+ --radius-lg:24px; --radius-md:18px; --shadow:0 24px 80px rgba(0,0,0,.36); --ease:220ms cubic-bezier(.2,.8,.2,1);
+}
