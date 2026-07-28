@@ -79,7 +79,6 @@ function authRequired(req, res, next) {
 }
 
 const isoDaysAgo = (days) => new Date(Date.now() - days * 86400000).toISOString()
-const WB_STOCKS_DATE_FROM = '2019-06-20T00:00:00.000Z'
 const authHeaders = token => ({ Authorization: token, Accept: 'application/json' })
 
 async function wbFetch(url, token, options = {}) {
@@ -98,7 +97,7 @@ async function wbFetch(url, token, options = {}) {
 
 async function probeToken(token) {
   const probes = [
-    { scope: 'statistics', run: () => wbFetch(`https://statistics-api.wildberries.ru/api/v1/supplier/stocks?dateFrom=${encodeURIComponent(WB_STOCKS_DATE_FROM)}`, token) },
+    { scope: 'analytics', run: () => loadWbWarehouseStocks(token, { limit: 1, maxPages: 1 }) },
     { scope: 'content', run: () => wbFetch('https://content-api.wildberries.ru/content/v2/get/cards/list', token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings: { cursor: { limit: 1 }, filter: { withPhoto: -1 } } }) }) },
   ]
   const scopes = []
@@ -152,13 +151,43 @@ async function loadProducts(token) {
   } catch { return [] }
 }
 
+function extractStockRows(payload) {
+  if (Array.isArray(payload)) return payload
+  if (Array.isArray(payload?.data)) return payload.data
+  if (Array.isArray(payload?.stocks)) return payload.stocks
+  if (Array.isArray(payload?.items)) return payload.items
+  if (Array.isArray(payload?.result?.data)) return payload.result.data
+  return []
+}
+
+async function loadWbWarehouseStocks(token, { limit = 250000, maxPages = 20 } = {}) {
+  const endpoint = 'https://seller-analytics-api.wildberries.ru/api/analytics/v1/stocks-report/wb-warehouses'
+  const rows = []
+  let offset = 0
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const payload = await wbFetch(endpoint, token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit, offset }),
+    })
+    const batch = extractStockRows(payload)
+    rows.push(...batch)
+
+    if (batch.length < limit) break
+    offset += batch.length
+  }
+
+  return rows
+}
+
 async function loadStatistics(token) {
   const [orders, sales, stocks] = await Promise.all([
     wbFetch(`https://statistics-api.wildberries.ru/api/v1/supplier/orders?dateFrom=${encodeURIComponent(isoDaysAgo(30))}&flag=0`, token).catch(() => []),
     wbFetch(`https://statistics-api.wildberries.ru/api/v1/supplier/sales?dateFrom=${encodeURIComponent(isoDaysAgo(30))}&flag=0`, token).catch(() => []),
-    wbFetch(`https://statistics-api.wildberries.ru/api/v1/supplier/stocks?dateFrom=${encodeURIComponent(WB_STOCKS_DATE_FROM)}`, token).catch(() => []),
+    loadWbWarehouseStocks(token),
   ])
-  return { orders: Array.isArray(orders) ? orders : [], sales: Array.isArray(sales) ? sales : [], stocks: Array.isArray(stocks) ? stocks : [] }
+  return { orders: Array.isArray(orders) ? orders : [], sales: Array.isArray(sales) ? sales : [], stocks }
 }
 
 function wbNmKey(row) {
@@ -172,7 +201,7 @@ function enrichProducts(products, stats) {
   for (const row of stats.stocks || []) {
     const key = wbNmKey(row)
     if (!key) continue
-    const quantity = Number(row.quantity ?? row.quantityFull ?? 0)
+    const quantity = Number(row.quantity ?? row.quantityFull ?? row.stock ?? row.stockCount ?? row.totalQuantity ?? row.availableQuantity ?? 0)
     stockByNm.set(key, (stockByNm.get(key) || 0) + (Number.isFinite(quantity) ? quantity : 0))
   }
 
@@ -196,12 +225,12 @@ function enrichProducts(products, stats) {
 }
 
 function withSyncLog(history, entry) { return [{ id: crypto.randomUUID(), at: new Date().toISOString(), ...entry }, ...(history || [])].slice(0, 20) }
-function buildDashboard(data) { const sales = data.sales || []; const orders = data.orders || []; const stocks = data.stocks || []; const revenue = sales.reduce((sum, row) => sum + Number(row.forPay || row.finishedPrice || row.priceWithDisc || 0), 0); const returns = sales.filter(row => String(row.saleID || '').startsWith('R')).length; const stockUnits = stocks.reduce((sum, row) => sum + Number(row.quantity || 0), 0); return { revenue: Math.round(revenue), orders: orders.length, sales: sales.length, returns, stockUnits, profit: null, margin: null, periodDays: 30 } }
+function buildDashboard(data) { const sales = data.sales || []; const orders = data.orders || []; const stocks = data.stocks || []; const revenue = sales.reduce((sum, row) => sum + Number(row.forPay || row.finishedPrice || row.priceWithDisc || 0), 0); const returns = sales.filter(row => String(row.saleID || '').startsWith('R')).length; const stockUnits = stocks.reduce((sum, row) => sum + Number(row.quantity ?? row.quantityFull ?? row.stock ?? row.stockCount ?? row.totalQuantity ?? row.availableQuantity ?? 0), 0); return { revenue: Math.round(revenue), orders: orders.length, sales: sales.length, returns, stockUnits, profit: null, margin: null, periodDays: 30 } }
 
 app.get('/health', async (_req, res) => {
   let database = 'not-configured'
   if (pool) { try { await pool.query('SELECT 1'); database = 'ok' } catch { database = 'error' } }
-  res.json({ ok: true, service: 'elisei-api', version: '2.5.1', database })
+  res.json({ ok: true, service: 'elisei-api', version: '2.5.2', database })
 })
 
 app.post('/api/auth/register', async (req, res) => {
