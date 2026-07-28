@@ -1,22 +1,34 @@
-# ELISEI v1.0 Premium
+# ELISEI v2.3.1
 
-Публичный SaaS-фронтенд ELISEI: лендинг, регистрация, вход и демонстрационный кабинет.
+Коммерческая SaaS-платформа аналитики маркетплейсов. Текущий релиз включает реальную авторизацию, PostgreSQL и защищённое подключение Wildberries.
 
-Маршруты:
-- `/` — публичный лендинг
+## Маршруты
+- `/` — лендинг
 - `/login` — вход
 - `/register` — регистрация
 - `/app` — кабинет
 
-Render Static Site:
+## Frontend / Render Static Site
 - Build command: `npm install && npm run build`
 - Publish directory: `dist`
 - Rewrite: `/*` → `/index.html`
+- Environment: `VITE_API_BASE_URL=https://<backend>.onrender.com`
 
-## v1.5 Functional App
-- рабочая навигация кабинета;
-- страницы аналитики, товаров, рекламы, финансов, остатков, отчётов и настроек;
-- поиск по товарам;
-- интерактивные рекомендации и уведомления;
-- демонстрационный чат с ЭЛом;
-- сохранены вход, регистрация и публичный лендинг.
+## Backend / Render Web Service
+- Root directory: `backend`
+- Build command: `npm install`
+- Start command: `npm start`
+
+Обязательные переменные:
+- `DATABASE_URL` — Internal Database URL PostgreSQL из Render
+- `JWT_SECRET` — длинная случайная строка
+- `FRONTEND_ORIGIN=https://elisei-platform-v2.onrender.com`
+- `NODE_ENV=production`
+
+При первом запуске backend автоматически создаёт таблицу `users`.
+
+## Проверка
+Откройте `/health` backend-сервиса. Ожидаемый ответ содержит:
+- `ok: true`
+- `version: 2.3.1`
+- `database: ok`

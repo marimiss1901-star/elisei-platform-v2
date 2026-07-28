@@ -1,3 +1,13 @@
+databases:
+  - name: elisei-db
+    plan: free
+
+envVarGroups:
+  - name: elisei-api-secrets
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+
 services:
   - type: web
     name: elisei-api
@@ -8,7 +18,14 @@ services:
     envVars:
       - key: NODE_VERSION
         value: 22
+      - key: NODE_ENV
+        value: production
       - key: FRONTEND_ORIGIN
         value: https://elisei-platform-v2.onrender.com
       - key: CONNECTION_TTL_HOURS
         value: 12
+      - key: DATABASE_URL
+        fromDatabase:
+          name: elisei-db
+          property: connectionString
+      - fromGroup: elisei-api-secrets

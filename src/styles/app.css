@@ -89,3 +89,7 @@
 .sync-log-row.success{border-color:rgba(61,226,157,.16)}.sync-log-row.error{border-color:rgba(255,111,128,.2)}.sync-log-icon{width:36px;height:36px;border-radius:11px;display:grid;place-items:center;background:rgba(61,226,157,.1);color:#54e7a9}.sync-log-row.error .sync-log-icon{background:rgba(255,111,128,.1);color:#ff7d8e}
 .sync-log-row>div:nth-child(2){display:flex;flex-direction:column;gap:4px}.sync-log-row>div:nth-child(2) span,.sync-log-details span{font-size:12px;color:var(--text-muted)}.sync-log-details{display:flex;justify-content:flex-end;gap:16px;flex-wrap:wrap}.sync-empty{padding:32px;text-align:center;color:var(--text-muted);border:1px dashed rgba(255,255,255,.12);border-radius:16px}
 @media(max-width:800px){.sync-summary{align-items:flex-start;flex-direction:column}.sync-log-row{grid-template-columns:42px 1fr}.sync-log-details{grid-column:2;justify-content:flex-start}}
+
+.auth-error{padding:11px 13px;border:1px solid rgba(239,68,68,.35);background:rgba(239,68,68,.09);border-radius:12px;color:#fecaca;font-size:13px;line-height:1.4}
+.auth-submit:disabled{opacity:.65;cursor:wait}
+.app-loading{min-height:100vh;display:grid;place-items:center;background:#090712;color:#fff;font:600 16px/1.4 Inter,system-ui,sans-serif}

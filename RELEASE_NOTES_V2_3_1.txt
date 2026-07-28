@@ -1,0 +1,29 @@
+ELISEI v2.3.1 — REAL AUTH CORE
+
+Добавлено:
+- настоящая регистрация пользователей;
+- вход по email и паролю;
+- безопасное хеширование паролей bcrypt;
+- JWT-сессия на 7 дней;
+- PostgreSQL-таблица users создаётся автоматически;
+- endpoint /api/auth/me для проверки активной сессии;
+- защита всех Wildberries API-маршрутов авторизацией;
+- изоляция WB-подключений по пользователю;
+- понятные ошибки форм входа и регистрации;
+- health-check показывает состояние базы данных.
+
+Новые обязательные переменные backend:
+- DATABASE_URL
+- JWT_SECRET
+- FRONTEND_ORIGIN
+
+Frontend:
+- VITE_API_BASE_URL=https://<backend>.onrender.com
+
+Порядок деплоя:
+1. Создать PostgreSQL в Render.
+2. Добавить Internal Database URL в DATABASE_URL backend-сервиса.
+3. Добавить длинное случайное значение в JWT_SECRET.
+4. Передеплоить backend с Clear build cache.
+5. Передеплоить frontend с Clear build cache.
+6. Зарегистрировать новый тестовый аккаунт.

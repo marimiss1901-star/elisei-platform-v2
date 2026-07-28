@@ -4,73 +4,49 @@ import LandingPage from './pages/LandingPage'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import DashboardPage from './pages/DashboardPage'
+import { authApi, authStore } from './lib/api'
 
 function ScrollToTop() {
   const { pathname } = useLocation()
-
-  useEffect(() => {
-    window.scrollTo({ top: 0, behavior: 'auto' })
-  }, [pathname])
-
+  useEffect(() => { window.scrollTo({ top: 0, behavior: 'auto' }) }, [pathname])
   return null
 }
 
 function AppRoutes() {
   const navigate = useNavigate()
-  const [isAuthenticated, setAuthenticated] = useState(
-    () => localStorage.getItem('elisei_demo_auth') === '1'
-  )
+  const [authState, setAuthState] = useState(() => authStore.getToken() ? 'checking' : 'guest')
+  const [user, setUser] = useState(null)
 
-  const login = () => {
-    localStorage.setItem('elisei_demo_auth', '1')
-    setAuthenticated(true)
+  useEffect(() => {
+    if (!authStore.getToken()) return
+    authApi.me().then(({ user: currentUser }) => { setUser(currentUser); setAuthState('authenticated') }).catch(() => { authStore.clear(); setAuthState('guest') })
+  }, [])
+
+  const finishAuth = ({ token, user: currentUser }) => {
+    authStore.setToken(token)
+    setUser(currentUser)
+    setAuthState('authenticated')
     navigate('/app', { replace: true })
   }
 
   const logout = () => {
-    localStorage.removeItem('elisei_demo_auth')
-    setAuthenticated(false)
+    authApi.logout()
+    localStorage.removeItem('elisei_wb_connection_id')
+    setUser(null)
+    setAuthState('guest')
     navigate('/', { replace: true })
   }
 
-  return (
-    <>
-      <ScrollToTop />
-      <Routes>
-        <Route
-          path="/"
-          element={<LandingPage onNavigate={navigate} isAuthenticated={isAuthenticated} />}
-        />
-        <Route
-          path="/login"
-          element={
-            isAuthenticated
-              ? <Navigate to="/app" replace />
-              : <LoginPage onNavigate={navigate} onLogin={login} />
-          }
-        />
-        <Route
-          path="/register"
-          element={
-            isAuthenticated
-              ? <Navigate to="/app" replace />
-              : <RegisterPage onNavigate={navigate} onRegister={login} />
-          }
-        />
-        <Route
-          path="/app/*"
-          element={
-            isAuthenticated
-              ? <DashboardPage onNavigate={navigate} onLogout={logout} />
-              : <Navigate to="/login" replace />
-          }
-        />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </>
-  )
+  if (authState === 'checking') return <div className="app-loading">Загружаем рабочее пространство…</div>
+  const isAuthenticated = authState === 'authenticated'
+
+  return <><ScrollToTop/><Routes>
+    <Route path="/" element={<LandingPage onNavigate={navigate} isAuthenticated={isAuthenticated} />} />
+    <Route path="/login" element={isAuthenticated ? <Navigate to="/app" replace /> : <LoginPage onNavigate={navigate} onLogin={finishAuth} />} />
+    <Route path="/register" element={isAuthenticated ? <Navigate to="/app" replace /> : <RegisterPage onNavigate={navigate} onRegister={finishAuth} />} />
+    <Route path="/app/*" element={isAuthenticated ? <DashboardPage onNavigate={navigate} onLogout={logout} user={user} /> : <Navigate to="/login" replace />} />
+    <Route path="*" element={<Navigate to="/" replace />} />
+  </Routes></>
 }
 
-export default function App() {
-  return <AppRoutes />
-}
+export default function App() { return <AppRoutes /> }
