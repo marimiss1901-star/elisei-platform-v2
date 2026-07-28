@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: elisei-api
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: FRONTEND_ORIGIN
+        value: https://elisei-platform-v2.onrender.com
+      - key: CONNECTION_TTL_HOURS
+        value: 12

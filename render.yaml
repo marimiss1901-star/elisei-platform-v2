@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: elisei-platform-new
+    name: elisei-platform-v2
     runtime: static
     buildCommand: npm install && npm run build
     staticPublishPath: ./dist

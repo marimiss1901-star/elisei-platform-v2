@@ -1,0 +1,18 @@
+ELISEI v2.0 — Router & SPA Fix
+
+Изменения:
+- проект переведён на react-router-dom;
+- добавлен BrowserRouter;
+- настроены маршруты /, /login, /register и /app/*;
+- защищённый маршрут /app перенаправляет неавторизованного пользователя на /login;
+- после входа пользователь попадает в /app;
+- после выхода пользователь возвращается на главную;
+- добавлен fallback для неизвестных адресов;
+- добавлен public/_redirects для SPA-режима Render;
+- сохранено правило rewrite в render.yaml;
+- версия проекта обновлена до 2.0.0.
+
+Render:
+Build Command: npm install && npm run build
+Publish Directory: dist
+После загрузки используйте Clear build cache & deploy.
