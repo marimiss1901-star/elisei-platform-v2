@@ -134,41 +134,75 @@ export default function DashboardPage({ onNavigate, onLogout }) {
     notify('Подключение удалено')
   }
 
-  const renderHome = () => <section className="command-home">
-    <div className="command-topline">
-      <div>
-        <span className="command-kicker">ELISEI · центр управления</span>
-        <h1>Доброе утро, Мария</h1>
-        <p>{connection.connected ? 'Эл проверил продажи, остатки и рекламу. Ниже — главное, что требует внимания сегодня.' : 'Подключите Wildberries, чтобы Эл заменил демонстрационные показатели реальными данными.'}</p>
+  const renderHome = () => {
+    const revenue = dashboardData?.revenue || 0
+    const orders = dashboardData?.orders || 0
+    const stockUnits = dashboardData?.stockUnits || 0
+    const sales = dashboardData?.sales || 0
+    const returns = dashboardData?.returns || 0
+    const criticalStock = productRows.filter(p => p.stock === 0).length
+    const lowStock = productRows.filter(p => p.stock > 0 && p.stock < 10).length
+    const now = new Date()
+    const dateLabel = now.toLocaleDateString('ru-RU', { weekday:'long', day:'numeric', month:'long' })
+    const timeLabel = now.toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit' })
+    const events = connection.connected ? [
+      {time:'сейчас', icon:RefreshCw, title:'Данные Wildberries проверены', text:connection.lastSync ? `Последняя синхронизация: ${new Date(connection.lastSync).toLocaleString('ru-RU')}` : 'Ожидается первая синхронизация', tone:'violet'},
+      {time:'сегодня', icon:AlertTriangle, title:`${criticalStock} товаров без остатка`, text:criticalStock ? 'Эти позиции уже могут терять продажи.' : 'Критичных нулевых остатков не найдено.', tone:criticalStock ? 'danger' : 'success'},
+      {time:'сегодня', icon:Boxes, title:`${lowStock} товаров заканчиваются`, text:lowStock ? 'Проверьте сроки следующей поставки.' : 'Запасы находятся в рабочем диапазоне.', tone:lowStock ? 'warning' : 'success'},
+      {time:'30 дней', icon:TrendingUp, title:`${sales} продаж и ${orders} заказов`, text:`Возвратов: ${returns}. Выручка: ${formatMoney(revenue)}.`, tone:'blue'}
+    ] : [
+      {time:'09:14', icon:Sparkles, title:'Эл завершил утренний анализ', text:'Демонстрационный сценарий показывает будущую работу системы.', tone:'violet'},
+      {time:'09:18', icon:Boxes, title:'Заканчиваются ходовые размеры', text:'2 модели требуют проверки поставки.', tone:'warning'},
+      {time:'09:23', icon:TrendingUp, title:'Обнаружен потенциал роста', text:'Изменение цены может увеличить прибыль.', tone:'success'},
+      {time:'09:28', icon:Megaphone, title:'Реклама требует внимания', text:'Одна кампания расходует бюджет без роста продаж.', tone:'danger'}
+    ]
+
+    return <section className="ops-home">
+      <div className="ops-head">
+        <div><span className="ops-kicker">ELISEI · командный центр</span><h1>Ваш бизнес — в одном экране</h1><p>{dateLabel} · {timeLabel} · Wildberries</p></div>
+        <div className="ops-data-status"><span className={connection.connected?'status-dot':'status-dot idle'}/><div><strong>{connection.connected?'Система на связи':'Демо-режим'}</strong><small>{connection.lastSync?`Обновлено ${new Date(connection.lastSync).toLocaleString('ru-RU')}`:'Подключите кабинет для реальных данных'}</small></div></div>
       </div>
-      <div className="command-status"><span className="status-dot"/><div><strong>{connection.connected ? 'Данные актуальны' : 'Демо-режим'}</strong><small>{connection.lastSync ? `Обновлено ${new Date(connection.lastSync).toLocaleString('ru-RU')}` : 'Ожидается синхронизация'}</small></div></div>
-    </div>
 
-    <div className="command-grid">
-      <article className="command-summary glass-panel">
-        <div className="summary-head"><div><span>Фокус на сегодня</span><h2>{connection.connected ? '3 действия дадут максимальный эффект' : 'Подключите кабинет — и Эл соберёт план дня'}</h2></div><div className="el-orb"><ElMascot compact/></div></div>
-        <div className="summary-score"><div><small>Потенциал результата</small><strong>{connection.connected ? '+35 600 ₽' : '—'}</strong><span>{connection.connected ? 'по текущим рекомендациям' : 'после первой синхронизации'}</span></div><button className="primary-btn" onClick={()=>connection.connected ? notify('Утренний разбор открыт') : setActive('Подключения')}><Sparkles size={17}/>{connection.connected ? 'Открыть разбор' : 'Подключить WB'}</button></div>
-        <div className="summary-signal"><span className="signal-icon"><Sparkles size={16}/></span><p><strong>Эл:</strong> {connection.connected ? 'Сначала проверьте нулевые остатки. Затем — цены и рекламу: именно там сейчас самый быстрый эффект.' : 'После подключения я начну с остатков, продаж и рекламы, а затем расставлю задачи по приоритету.'}</p></div>
-      </article>
+      <div className="ops-hero-grid">
+        <article className="profit-stage">
+          <div className="profit-glow"/>
+          <div className="profit-label">Выручка за 30 дней</div>
+          <div className="profit-value">{connection.connected ? formatMoney(revenue) : '1 592 500 ₽'}</div>
+          <div className="profit-delta"><TrendingUp size={17}/>{connection.connected ? `${sales} продаж` : '+18,4% к прошлому периоду'}</div>
+          <div className="profit-line"><span style={{width: connection.connected ? `${Math.min(100, Math.max(8, sales))}%` : '74%'}}/></div>
+          <div className="profit-subgrid"><div><span>Заказы</span><strong>{connection.connected?orders:'842'}</strong></div><div><span>Остатки</span><strong>{connection.connected?stockUnits.toLocaleString('ru-RU'):'2 410'}</strong></div><div><span>Возвраты</span><strong>{connection.connected?returns:'31'}</strong></div></div>
+        </article>
 
-      <div className="command-metrics">
-        <article className="command-metric glass-panel"><div className="metric-top"><span>Выручка · 30 дней</span><TrendingUp size={18}/></div><strong>{dashboardData ? formatMoney(dashboardData.revenue) : '286 740 ₽'}</strong><small>{connection.connected ? `${dashboardData?.sales || 0} продаж` : '+12% к прошлому периоду'}</small></article>
-        <article className="command-metric glass-panel"><div className="metric-top"><span>Заказы · 30 дней</span><PackageSearch size={18}/></div><strong>{dashboardData ? String(dashboardData.orders) : '156'}</strong><small>{connection.connected ? `${dashboardData?.returns || 0} возвратов` : '+9% к прошлому периоду'}</small></article>
-        <article className="command-metric glass-panel"><div className="metric-top"><span>Остатки</span><Boxes size={18}/></div><strong>{dashboardData ? String(dashboardData.stockUnits) : '2 410'}</strong><small>{connection.connected ? 'единиц на складах' : 'демонстрационные данные'}</small></article>
-        <article className="command-metric glass-panel muted-metric"><div className="metric-top"><span>Прибыль</span><CircleDollarSign size={18}/></div><strong>{connection.connected ? 'Нужна себестоимость' : '+47 200 ₽'}</strong><small onClick={()=>setActive('Финансы')}>Добавить данные →</small></article>
+        <article className="el-live-panel glass-panel">
+          <div className="el-live-head"><div className="el-live-avatar"><ElMascot compact/></div><div><span>ЭЛ · AI-директор</span><h2>{syncing?'Анализирую данные…':'Анализ завершён'}</h2></div><span className="live-badge">LIVE</span></div>
+          <div className="el-checks"><div><CheckCircle2 size={16}/><span>Товары</span><strong>{productRows.length}</strong></div><div><CheckCircle2 size={16}/><span>Остатки</span><strong>{stockUnits}</strong></div><div><CheckCircle2 size={16}/><span>Заказы</span><strong>{orders}</strong></div></div>
+          <div className="el-result"><small>Найдено задач</small><strong>{connection.connected ? criticalStock + lowStock : 3}</strong><span>{connection.connected ? `${criticalStock} критичных · ${lowStock} требуют внимания` : '1 критичная · 2 важных'}</span></div>
+          <button className="primary-btn ops-primary" onClick={()=>connection.connected?setActive('Спросить ЭЛа'):setActive('Подключения')}><Sparkles size={17}/>{connection.connected?'Обсудить с Элом':'Подключить Wildberries'}</button>
+        </article>
       </div>
-    </div>
 
-    <div className="command-section-head"><div><span>Главное на сегодня</span><h2>Решения с наибольшим эффектом</h2></div><button className="text-action" onClick={()=>setActive('Спросить ЭЛа')}>Обсудить с Элом <ChevronRight size={16}/></button></div>
-    <div className="action-grid">
-      {recommendations.map((r,index)=><article className={`action-card ${r.tone}`} key={r.title}><div className="action-card-top"><span>0{index+1}</span><b>{r.eyebrow}</b></div><h3>{r.title}</h3><p>{r.text}</p><div className="action-effect"><strong>{r.effect}</strong><button onClick={()=>notify(`Открыто: ${r.title}`)}><ChevronRight size={17}/></button></div></article>)}
-    </div>
+      <div className="quick-strip">
+        {[['Остатки',Boxes],['Товары',PackageSearch],['Реклама',Megaphone],['Финансы',WalletCards],['Отзывы',Star],['AI CRM',UsersRound],['Прогноз',BarChart3]].map(([label,Icon])=><button key={label} onClick={()=>setActive(label==='Прогноз'?'Аналитика':label)}><Icon size={19}/><span>{label}</span><ChevronRight size={14}/></button>)}
+      </div>
 
-    <div className="command-lower-grid">
-      <article className="performance-card glass-panel"><div className="panel-title"><div><span>Динамика бизнеса</span><h3>Выручка и прогноз</h3></div><button className="text-action" onClick={()=>setActive('Аналитика')}>Подробнее <ChevronRight size={15}/></button></div><TrendChart/><div className="performance-footer"><div><span>Текущий период</span><strong>{dashboardData ? formatMoney(dashboardData.revenue) : '286 740 ₽'}</strong></div><div><span>Прогноз</span><strong>{connection.connected ? 'После 2 синхронизаций' : '318 400 ₽'}</strong></div><div><span>Темп</span><strong className="positive">+12,4%</strong></div></div></article>
-      <article className="el-brief-card glass-panel"><div className="brief-head"><div className="brief-avatar"><ElMascot compact/></div><div><span>Эл · AI-аналитик</span><h3>Короткий вывод</h3></div></div><p>{connection.connected ? 'Товары подключены. Следующий шаг — корректно загрузить остатки, затем добавить себестоимость. После этого я смогу считать реальную прибыль и находить точки роста.' : 'Сейчас интерфейс показывает сценарий работы. После подключения Wildberries карточки и рекомендации будут строиться на реальных данных.'}</p><div className="brief-list"><button onClick={()=>setActive('Остатки')}><Boxes size={16}/><span>Проверить остатки</span><ChevronRight size={15}/></button><button onClick={()=>setActive('Товары')}><PackageSearch size={16}/><span>Открыть товары</span><ChevronRight size={15}/></button><button onClick={()=>setActive('Спросить ЭЛа')}><MessageCircle size={16}/><span>Задать вопрос Элу</span><ChevronRight size={15}/></button></div></article>
-    </div>
-  </section>
+      <div className="ops-content-grid">
+        <section className="priority-zone">
+          <div className="ops-section-title"><div><span>Приоритеты</span><h2>Что сделать сегодня</h2></div><button className="text-action" onClick={()=>setActive('Спросить ЭЛа')}>Обсудить план <ChevronRight size={15}/></button></div>
+          <div className="priority-list">{recommendations.map((r,index)=><button className={`priority-row ${r.tone}`} key={r.title} onClick={()=>notify(`Открыто: ${r.title}`)}><span className="priority-index">0{index+1}</span><div><small>{r.eyebrow}</small><h3>{r.title}</h3><p>{r.text}</p></div><div className="priority-effect"><strong>{r.effect}</strong><ChevronRight size={18}/></div></button>)}</div>
+        </section>
+
+        <section className="event-zone glass-panel">
+          <div className="ops-section-title compact"><div><span>Лента событий</span><h2>Что происходит</h2></div><button className="icon-btn" onClick={()=>connection.connected&&syncConnection()} disabled={syncing}><RefreshCw className={syncing?'spin':''} size={17}/></button></div>
+          <div className="event-list">{events.map(({time,icon:Icon,title,text,tone})=><div className={`event-item ${tone}`} key={title}><div className="event-icon"><Icon size={17}/></div><div><span>{time}</span><strong>{title}</strong><p>{text}</p></div></div>)}</div>
+        </section>
+      </div>
+
+      <section className="business-pulse glass-panel">
+        <div className="ops-section-title"><div><span>Пульс бизнеса</span><h2>Динамика и прогноз</h2></div><button className="text-action" onClick={()=>setActive('Аналитика')}>Открыть аналитику <ChevronRight size={15}/></button></div>
+        <div className="pulse-body"><div className="pulse-chart"><TrendChart/></div><div className="pulse-stats"><div><span>Выручка</span><strong>{connection.connected?formatMoney(revenue):'1,59 млн ₽'}</strong></div><div><span>Заказы</span><strong>{connection.connected?orders:'842'}</strong></div><div><span>Товары под риском</span><strong className={criticalStock?'danger-text':''}>{connection.connected?criticalStock:'7'}</strong></div><div><span>Статус</span><strong className="positive">{connection.connected?'Данные подключены':'Демо'}</strong></div></div></div>
+      </section>
+    </section>
+  }
 
   const renderAnalytics = () => <section className="app-page glass-panel"><div className="page-title"><span>Аналитика</span><h1>Центр показателей</h1><p>{connection.connected?'Показатели рассчитаны по данным последней синхронизации Wildberries. Прибыль и маржинальность появятся после загрузки себестоимости и расходов.':'Демо-данные показывают, как будет выглядеть аналитика после подключения API.'}</p></div><div className="metrics-grid"><MetricCard label="Выручка за 30 дней" value={dashboardData ? formatMoney(dashboardData.revenue) : '7,26 млн ₽'} delta={dashboardData ? `${dashboardData.sales} продаж` : '+14,2%'} icon={TrendingUp}/><MetricCard label="Заказы за 30 дней" value={dashboardData ? String(dashboardData.orders) : '156'} delta={dashboardData ? `${dashboardData.returns} возвратов` : '+9,8%'} icon={PackageSearch}/><MetricCard label="Остатки" value={dashboardData ? String(dashboardData.stockUnits) : '2 410'} delta="единиц на складах" icon={Boxes}/></div><div className="chart-card inner-chart"><div className="card-head"><div><span>Последние 30 дней</span><h3>Динамика выручки</h3></div></div><TrendChart/></div></section>
 
