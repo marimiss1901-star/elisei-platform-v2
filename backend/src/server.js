@@ -66,6 +66,32 @@ async function loadStatistics(token) {
   return { orders: Array.isArray(orders) ? orders : [], sales: Array.isArray(sales) ? sales : [], stocks: Array.isArray(stocks) ? stocks : [] }
 }
 
+
+function enrichProducts(products, stats) {
+  const stockByNm = new Map()
+  const revenueByNm = new Map()
+  for (const row of stats.stocks || []) {
+    const key = String(row.nmId || row.nmID || '')
+    if (!key) continue
+    stockByNm.set(key, (stockByNm.get(key) || 0) + Number(row.quantity || 0))
+  }
+  for (const row of stats.sales || []) {
+    const key = String(row.nmId || row.nmID || '')
+    if (!key) continue
+    const value = Number(row.forPay || row.finishedPrice || row.priceWithDisc || 0)
+    revenueByNm.set(key, (revenueByNm.get(key) || 0) + value)
+  }
+  return products.map(product => {
+    const key = String(product.nmID || '')
+    const stock = stockByNm.get(key) || 0
+    return { ...product, stock, revenue: Math.round(revenueByNm.get(key) || 0), status: stock === 0 ? 'Нет остатка' : stock < 10 ? 'Риск' : 'В норме' }
+  })
+}
+
+function addSyncLog(session, entry) {
+  session.syncHistory = [{ id: crypto.randomUUID(), at: new Date().toISOString(), ...entry }, ...(session.syncHistory || [])].slice(0, 20)
+}
+
 function buildDashboard(data) {
   const sales = data.sales || []
   const orders = data.orders || []
@@ -76,7 +102,7 @@ function buildDashboard(data) {
   return { revenue: Math.round(revenue), orders: orders.length, sales: sales.length, returns, stockUnits, profit: null, margin: null, periodDays: 30 }
 }
 
-app.get('/health', (_req, res) => res.json({ ok: true, service: 'elisei-api', version: '2.1.0' }))
+app.get('/health', (_req, res) => res.json({ ok: true, service: 'elisei-api', version: '2.2.0' }))
 
 app.post('/api/wb/connect', async (req, res) => {
   try {
@@ -84,7 +110,7 @@ app.post('/api/wb/connect', async (req, res) => {
     if (token.length < 40) return res.status(400).json({ error: 'API-ключ выглядит слишком коротким' })
     const scopes = await probeToken(token)
     const id = crypto.randomUUID()
-    sessions.set(id, { token, scopes, createdAt: Date.now(), updatedAt: Date.now(), data: null })
+    sessions.set(id, { token, scopes, createdAt: Date.now(), updatedAt: Date.now(), data: null, syncHistory: [] })
     res.json({ connectionId: id, scopes, connectedAt: new Date().toISOString(), expiresInHours: ttlMs / 3600000 })
   } catch (error) { res.status(error.status === 429 ? 429 : 400).json({ error: error.message }) }
 })
@@ -92,24 +118,37 @@ app.post('/api/wb/connect', async (req, res) => {
 app.get('/api/wb/status/:id', (req, res) => {
   const session = getSession(req.params.id)
   if (!session) return res.status(404).json({ error: 'Подключение истекло или сервер был перезапущен' })
-  res.json({ connected: true, scopes: session.scopes, lastSync: session.lastSync || null })
+  res.json({ connected: true, scopes: session.scopes, lastSync: session.lastSync || null, syncHistory: session.syncHistory || [] })
 })
 
 app.post('/api/wb/sync', async (req, res) => {
   const session = getSession(String(req.body?.connectionId || ''))
   if (!session) return res.status(404).json({ error: 'Подключение не найдено. Подключите Wildberries повторно.' })
   try {
+    const startedAt = Date.now()
     const [products, stats] = await Promise.all([loadProducts(session.token), loadStatistics(session.token)])
-    session.data = { products, ...stats }
+    const enrichedProducts = enrichProducts(products, stats)
+    session.data = { products: enrichedProducts, ...stats }
     session.updatedAt = Date.now(); session.lastSync = new Date().toISOString()
-    res.json({ ok: true, lastSync: session.lastSync, counts: { products: products.length, orders: stats.orders.length, sales: stats.sales.length, stocks: stats.stocks.length }, dashboard: buildDashboard(session.data) })
-  } catch (error) { res.status(error.status || 502).json({ error: error.message }) }
+    const counts = { products: enrichedProducts.length, orders: stats.orders.length, sales: stats.sales.length, stocks: stats.stocks.length }
+    addSyncLog(session, { status: 'success', durationMs: Date.now() - startedAt, counts })
+    res.json({ ok: true, lastSync: session.lastSync, counts, dashboard: buildDashboard(session.data), syncHistory: session.syncHistory })
+  } catch (error) {
+    addSyncLog(session, { status: 'error', message: error.message })
+    res.status(error.status || 502).json({ error: error.message })
+  }
 })
 
 app.get('/api/wb/dashboard/:id', (req, res) => {
   const session = getSession(req.params.id)
   if (!session) return res.status(404).json({ error: 'Подключение не найдено' })
   res.json({ dashboard: buildDashboard(session.data || {}), lastSync: session.lastSync || null })
+})
+
+app.get('/api/wb/sync-history/:id', (req, res) => {
+  const session = getSession(req.params.id)
+  if (!session) return res.status(404).json({ error: 'Подключение не найдено' })
+  res.json({ history: session.syncHistory || [] })
 })
 
 app.get('/api/wb/products/:id', (req, res) => {

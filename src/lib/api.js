@@ -17,6 +17,7 @@ export const wbApi = {
   sync: (connectionId) => request('/api/wb/sync', { method: 'POST', body: JSON.stringify({ connectionId }) }),
   dashboard: (connectionId) => request(`/api/wb/dashboard/${encodeURIComponent(connectionId)}`),
   products: (connectionId) => request(`/api/wb/products/${encodeURIComponent(connectionId)}`),
+  syncHistory: (connectionId) => request(`/api/wb/sync-history/${encodeURIComponent(connectionId)}`),
   disconnect: (connectionId) => request('/api/wb/disconnect', { method: 'POST', body: JSON.stringify({ connectionId }) }),
   configured: Boolean(API_BASE),
   baseUrl: API_BASE,
