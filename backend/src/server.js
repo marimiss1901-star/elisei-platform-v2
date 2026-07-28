@@ -79,6 +79,7 @@ function authRequired(req, res, next) {
 }
 
 const isoDaysAgo = (days) => new Date(Date.now() - days * 86400000).toISOString()
+const WB_STOCKS_DATE_FROM = '2019-06-20T00:00:00.000Z'
 const authHeaders = token => ({ Authorization: token, Accept: 'application/json' })
 
 async function wbFetch(url, token, options = {}) {
@@ -97,7 +98,7 @@ async function wbFetch(url, token, options = {}) {
 
 async function probeToken(token) {
   const probes = [
-    { scope: 'statistics', run: () => wbFetch(`https://statistics-api.wildberries.ru/api/v1/supplier/stocks?dateFrom=${encodeURIComponent(isoDaysAgo(1))}`, token) },
+    { scope: 'statistics', run: () => wbFetch(`https://statistics-api.wildberries.ru/api/v1/supplier/stocks?dateFrom=${encodeURIComponent(WB_STOCKS_DATE_FROM)}`, token) },
     { scope: 'content', run: () => wbFetch('https://content-api.wildberries.ru/content/v2/get/cards/list', token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings: { cursor: { limit: 1 }, filter: { withPhoto: -1 } } }) }) },
   ]
   const scopes = []
@@ -155,16 +156,43 @@ async function loadStatistics(token) {
   const [orders, sales, stocks] = await Promise.all([
     wbFetch(`https://statistics-api.wildberries.ru/api/v1/supplier/orders?dateFrom=${encodeURIComponent(isoDaysAgo(30))}&flag=0`, token).catch(() => []),
     wbFetch(`https://statistics-api.wildberries.ru/api/v1/supplier/sales?dateFrom=${encodeURIComponent(isoDaysAgo(30))}&flag=0`, token).catch(() => []),
-    wbFetch(`https://statistics-api.wildberries.ru/api/v1/supplier/stocks?dateFrom=${encodeURIComponent(isoDaysAgo(1))}`, token).catch(() => []),
+    wbFetch(`https://statistics-api.wildberries.ru/api/v1/supplier/stocks?dateFrom=${encodeURIComponent(WB_STOCKS_DATE_FROM)}`, token).catch(() => []),
   ])
   return { orders: Array.isArray(orders) ? orders : [], sales: Array.isArray(sales) ? sales : [], stocks: Array.isArray(stocks) ? stocks : [] }
 }
 
+function wbNmKey(row) {
+  return String(row?.nmId ?? row?.nmID ?? row?.nm_id ?? '').trim()
+}
+
 function enrichProducts(products, stats) {
-  const stockByNm = new Map(); const revenueByNm = new Map()
-  for (const row of stats.stocks || []) { const key = String(row.nmId || row.nmID || ''); if (key) stockByNm.set(key, (stockByNm.get(key) || 0) + Number(row.quantity || 0)) }
-  for (const row of stats.sales || []) { const key = String(row.nmId || row.nmID || ''); if (key) revenueByNm.set(key, (revenueByNm.get(key) || 0) + Number(row.forPay || row.finishedPrice || row.priceWithDisc || 0)) }
-  return products.map(product => { const key = String(product.nmID || ''); const stock = stockByNm.get(key) || 0; return { ...product, stock, revenue: Math.round(revenueByNm.get(key) || 0), status: stock === 0 ? 'Нет остатка' : stock < 10 ? 'Риск' : 'В норме' } })
+  const stockByNm = new Map()
+  const revenueByNm = new Map()
+
+  for (const row of stats.stocks || []) {
+    const key = wbNmKey(row)
+    if (!key) continue
+    const quantity = Number(row.quantity ?? row.quantityFull ?? 0)
+    stockByNm.set(key, (stockByNm.get(key) || 0) + (Number.isFinite(quantity) ? quantity : 0))
+  }
+
+  for (const row of stats.sales || []) {
+    const key = wbNmKey(row)
+    if (!key) continue
+    const revenue = Number(row.forPay ?? row.finishedPrice ?? row.priceWithDisc ?? 0)
+    revenueByNm.set(key, (revenueByNm.get(key) || 0) + (Number.isFinite(revenue) ? revenue : 0))
+  }
+
+  return products.map(product => {
+    const key = wbNmKey(product)
+    const stock = stockByNm.get(key) || 0
+    return {
+      ...product,
+      stock,
+      revenue: Math.round(revenueByNm.get(key) || 0),
+      status: stock === 0 ? 'Нет остатка' : stock < 10 ? 'Риск' : 'В норме',
+    }
+  })
 }
 
 function withSyncLog(history, entry) { return [{ id: crypto.randomUUID(), at: new Date().toISOString(), ...entry }, ...(history || [])].slice(0, 20) }
@@ -173,7 +201,7 @@ function buildDashboard(data) { const sales = data.sales || []; const orders = d
 app.get('/health', async (_req, res) => {
   let database = 'not-configured'
   if (pool) { try { await pool.query('SELECT 1'); database = 'ok' } catch { database = 'error' } }
-  res.json({ ok: true, service: 'elisei-api', version: '2.4.1', database })
+  res.json({ ok: true, service: 'elisei-api', version: '2.5.1', database })
 })
 
 app.post('/api/auth/register', async (req, res) => {
