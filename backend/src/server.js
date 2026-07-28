@@ -15,7 +15,8 @@ const ttlMs = Number(process.env.CONNECTION_TTL_HOURS || 12) * 60 * 60 * 1000
 const jwtSecret = process.env.JWT_SECRET || ''
 const databaseUrl = process.env.DATABASE_URL || ''
 const pool = databaseUrl ? new Pool({ connectionString: databaseUrl, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined }) : null
-const sessions = new Map()
+const encryptionSecret = process.env.ENCRYPTION_KEY || jwtSecret
+const encryptionKey = encryptionSecret ? crypto.createHash('sha256').update(encryptionSecret).digest() : null
 
 app.use(helmet())
 app.use(cors({ origin(origin, cb) { if (!origin || !allowedOrigins.length || allowedOrigins.includes(origin)) return cb(null, true); cb(new Error('Origin is not allowed')) } }))
@@ -31,13 +32,29 @@ async function initDatabase() {
       email TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
+    );
+    CREATE TABLE IF NOT EXISTS marketplace_connections (
+      id UUID PRIMARY KEY,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      marketplace TEXT NOT NULL,
+      token_encrypted TEXT NOT NULL,
+      scopes JSONB NOT NULL DEFAULT '[]'::jsonb,
+      status TEXT NOT NULL DEFAULT 'connected',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_sync_at TIMESTAMPTZ,
+      data JSONB,
+      sync_history JSONB NOT NULL DEFAULT '[]'::jsonb,
+      UNIQUE(user_id, marketplace)
+    );
+    CREATE INDEX IF NOT EXISTS marketplace_connections_user_idx ON marketplace_connections(user_id);
   `)
 }
 
 function requireBackendConfig() {
   if (!pool) throw Object.assign(new Error('DATABASE_URL не настроен'), { status: 503 })
   if (!jwtSecret) throw Object.assign(new Error('JWT_SECRET не настроен'), { status: 503 })
+  if (!encryptionKey) throw Object.assign(new Error('ENCRYPTION_KEY не настроен'), { status: 503 })
 }
 
 function signToken(user) {
@@ -91,10 +108,40 @@ async function probeToken(token) {
   return scopes
 }
 
-function getSession(id, userId) {
-  const session = sessions.get(id)
-  if (!session || session.userId !== userId || Date.now() - session.updatedAt > ttlMs) { if (session) sessions.delete(id); return null }
-  return session
+function encryptToken(value) {
+  const iv = crypto.randomBytes(12)
+  const cipher = crypto.createCipheriv('aes-256-gcm', encryptionKey, iv)
+  const encrypted = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()])
+  const tag = cipher.getAuthTag()
+  return [iv, tag, encrypted].map(part => part.toString('base64url')).join('.')
+}
+
+function decryptToken(value) {
+  const [ivPart, tagPart, encryptedPart] = String(value || '').split('.')
+  if (!ivPart || !tagPart || !encryptedPart) throw new Error('Повреждён сохранённый API-ключ')
+  const decipher = crypto.createDecipheriv('aes-256-gcm', encryptionKey, Buffer.from(ivPart, 'base64url'))
+  decipher.setAuthTag(Buffer.from(tagPart, 'base64url'))
+  return Buffer.concat([decipher.update(Buffer.from(encryptedPart, 'base64url')), decipher.final()]).toString('utf8')
+}
+
+async function getConnection(userId, id = null) {
+  const params = [userId]
+  let sql = `SELECT * FROM marketplace_connections WHERE user_id = $1 AND marketplace = 'wildberries'`
+  if (id) { params.push(id); sql += ' AND id = $2' }
+  const result = await pool.query(sql, params)
+  return result.rows[0] || null
+}
+
+function publicConnection(row) {
+  return {
+    connected: Boolean(row),
+    connectionId: row?.id || null,
+    scopes: row?.scopes || [],
+    status: row?.status || 'disconnected',
+    connectedAt: row?.created_at || null,
+    lastSync: row?.last_sync_at || null,
+    syncHistory: row?.sync_history || [],
+  }
 }
 
 async function loadProducts(token) {
@@ -120,13 +167,13 @@ function enrichProducts(products, stats) {
   return products.map(product => { const key = String(product.nmID || ''); const stock = stockByNm.get(key) || 0; return { ...product, stock, revenue: Math.round(revenueByNm.get(key) || 0), status: stock === 0 ? 'Нет остатка' : stock < 10 ? 'Риск' : 'В норме' } })
 }
 
-function addSyncLog(session, entry) { session.syncHistory = [{ id: crypto.randomUUID(), at: new Date().toISOString(), ...entry }, ...(session.syncHistory || [])].slice(0, 20) }
+function withSyncLog(history, entry) { return [{ id: crypto.randomUUID(), at: new Date().toISOString(), ...entry }, ...(history || [])].slice(0, 20) }
 function buildDashboard(data) { const sales = data.sales || []; const orders = data.orders || []; const stocks = data.stocks || []; const revenue = sales.reduce((sum, row) => sum + Number(row.forPay || row.finishedPrice || row.priceWithDisc || 0), 0); const returns = sales.filter(row => String(row.saleID || '').startsWith('R')).length; const stockUnits = stocks.reduce((sum, row) => sum + Number(row.quantity || 0), 0); return { revenue: Math.round(revenue), orders: orders.length, sales: sales.length, returns, stockUnits, profit: null, margin: null, periodDays: 30 } }
 
 app.get('/health', async (_req, res) => {
   let database = 'not-configured'
   if (pool) { try { await pool.query('SELECT 1'); database = 'ok' } catch { database = 'error' } }
-  res.json({ ok: true, service: 'elisei-api', version: '2.3.1', database })
+  res.json({ ok: true, service: 'elisei-api', version: '2.4.1', database })
 })
 
 app.post('/api/auth/register', async (req, res) => {
@@ -160,15 +207,83 @@ app.get('/api/auth/me', authRequired, async (req, res) => {
   res.json({ user: publicUser(result.rows[0]) })
 })
 
-app.post('/api/wb/connect', authRequired, async (req, res) => {
-  try { const token = String(req.body?.token || '').trim(); if (token.length < 40) return res.status(400).json({ error: 'API-ключ выглядит слишком коротким' }); const scopes = await probeToken(token); const id = crypto.randomUUID(); sessions.set(id, { userId: req.auth.sub, token, scopes, createdAt: Date.now(), updatedAt: Date.now(), data: null, syncHistory: [] }); res.json({ connectionId: id, scopes, connectedAt: new Date().toISOString(), expiresInHours: ttlMs / 3600000 }) } catch (error) { res.status(error.status === 429 ? 429 : 400).json({ error: error.message }) }
+app.get('/api/wb/connection', authRequired, async (req, res) => {
+  const connection = await getConnection(req.auth.sub)
+  res.json(publicConnection(connection))
 })
-app.get('/api/wb/status/:id', authRequired, (req, res) => { const session = getSession(req.params.id, req.auth.sub); if (!session) return res.status(404).json({ error: 'Подключение истекло или сервер был перезапущен' }); res.json({ connected: true, scopes: session.scopes, lastSync: session.lastSync || null, syncHistory: session.syncHistory || [] }) })
-app.post('/api/wb/sync', authRequired, async (req, res) => { const session = getSession(String(req.body?.connectionId || ''), req.auth.sub); if (!session) return res.status(404).json({ error: 'Подключение не найдено. Подключите Wildberries повторно.' }); try { const startedAt = Date.now(); const [products, stats] = await Promise.all([loadProducts(session.token), loadStatistics(session.token)]); const enrichedProducts = enrichProducts(products, stats); session.data = { products: enrichedProducts, ...stats }; session.updatedAt = Date.now(); session.lastSync = new Date().toISOString(); const counts = { products: enrichedProducts.length, orders: stats.orders.length, sales: stats.sales.length, stocks: stats.stocks.length }; addSyncLog(session, { status: 'success', durationMs: Date.now() - startedAt, counts }); res.json({ ok: true, lastSync: session.lastSync, counts, dashboard: buildDashboard(session.data), syncHistory: session.syncHistory }) } catch (error) { addSyncLog(session, { status: 'error', message: error.message }); res.status(error.status || 502).json({ error: error.message }) } })
-app.get('/api/wb/dashboard/:id', authRequired, (req, res) => { const session = getSession(req.params.id, req.auth.sub); if (!session) return res.status(404).json({ error: 'Подключение не найдено' }); res.json({ dashboard: buildDashboard(session.data || {}), lastSync: session.lastSync || null }) })
-app.get('/api/wb/sync-history/:id', authRequired, (req, res) => { const session = getSession(req.params.id, req.auth.sub); if (!session) return res.status(404).json({ error: 'Подключение не найдено' }); res.json({ history: session.syncHistory || [] }) })
-app.get('/api/wb/products/:id', authRequired, (req, res) => { const session = getSession(req.params.id, req.auth.sub); if (!session) return res.status(404).json({ error: 'Подключение не найдено' }); res.json({ products: session.data?.products || [], lastSync: session.lastSync || null }) })
-app.post('/api/wb/disconnect', authRequired, (req, res) => { const id = String(req.body?.connectionId || ''); const session = getSession(id, req.auth.sub); if (session) sessions.delete(id); res.json({ ok: true }) })
+
+app.post('/api/wb/connect', authRequired, async (req, res) => {
+  try {
+    const token = String(req.body?.token || '').trim()
+    if (token.length < 40) return res.status(400).json({ error: 'API-ключ выглядит слишком коротким' })
+    const scopes = await probeToken(token)
+    const id = crypto.randomUUID()
+    const result = await pool.query(`
+      INSERT INTO marketplace_connections (id, user_id, marketplace, token_encrypted, scopes, status)
+      VALUES ($1,$2,'wildberries',$3,$4::jsonb,'connected')
+      ON CONFLICT (user_id, marketplace) DO UPDATE SET
+        token_encrypted = EXCLUDED.token_encrypted,
+        scopes = EXCLUDED.scopes,
+        status = 'connected',
+        updated_at = NOW()
+      RETURNING *
+    `, [id, req.auth.sub, encryptToken(token), JSON.stringify(scopes)])
+    res.json(publicConnection(result.rows[0]))
+  } catch (error) {
+    res.status(error.status === 429 ? 429 : 400).json({ error: error.message })
+  }
+})
+
+app.get('/api/wb/status/:id', authRequired, async (req, res) => {
+  const connection = await getConnection(req.auth.sub, req.params.id)
+  if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
+  res.json(publicConnection(connection))
+})
+
+app.post('/api/wb/sync', authRequired, async (req, res) => {
+  const connection = await getConnection(req.auth.sub, String(req.body?.connectionId || '') || null)
+  if (!connection) return res.status(404).json({ error: 'Подключение не найдено. Подключите Wildberries.' })
+  const startedAt = Date.now()
+  try {
+    const token = decryptToken(connection.token_encrypted)
+    const [products, stats] = await Promise.all([loadProducts(token), loadStatistics(token)])
+    const enrichedProducts = enrichProducts(products, stats)
+    const data = { products: enrichedProducts, ...stats }
+    const counts = { products: enrichedProducts.length, orders: stats.orders.length, sales: stats.sales.length, stocks: stats.stocks.length }
+    const history = withSyncLog(connection.sync_history, { status: 'success', durationMs: Date.now() - startedAt, counts })
+    const updated = await pool.query(`UPDATE marketplace_connections SET data=$1::jsonb, sync_history=$2::jsonb, last_sync_at=NOW(), updated_at=NOW(), status='connected' WHERE id=$3 AND user_id=$4 RETURNING *`, [JSON.stringify(data), JSON.stringify(history), connection.id, req.auth.sub])
+    const row = updated.rows[0]
+    res.json({ ok: true, lastSync: row.last_sync_at, counts, dashboard: buildDashboard(data), syncHistory: history })
+  } catch (error) {
+    const history = withSyncLog(connection.sync_history, { status: 'error', message: error.message, durationMs: Date.now() - startedAt })
+    await pool.query(`UPDATE marketplace_connections SET sync_history=$1::jsonb, updated_at=NOW(), status='error' WHERE id=$2 AND user_id=$3`, [JSON.stringify(history), connection.id, req.auth.sub])
+    res.status(error.status || 502).json({ error: error.message })
+  }
+})
+
+app.get('/api/wb/dashboard/:id', authRequired, async (req, res) => {
+  const connection = await getConnection(req.auth.sub, req.params.id)
+  if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
+  res.json({ dashboard: buildDashboard(connection.data || {}), lastSync: connection.last_sync_at || null })
+})
+
+app.get('/api/wb/sync-history/:id', authRequired, async (req, res) => {
+  const connection = await getConnection(req.auth.sub, req.params.id)
+  if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
+  res.json({ history: connection.sync_history || [] })
+})
+
+app.get('/api/wb/products/:id', authRequired, async (req, res) => {
+  const connection = await getConnection(req.auth.sub, req.params.id)
+  if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
+  res.json({ products: connection.data?.products || [], lastSync: connection.last_sync_at || null })
+})
+
+app.post('/api/wb/disconnect', authRequired, async (req, res) => {
+  const id = String(req.body?.connectionId || '')
+  await pool.query(`DELETE FROM marketplace_connections WHERE user_id=$1 AND marketplace='wildberries' AND ($2='' OR id=$2::uuid)`, [req.auth.sub, id])
+  res.json({ ok: true })
+})
 
 app.use((error, _req, res, _next) => res.status(error.status || 500).json({ error: error.message || 'Внутренняя ошибка' }))
 

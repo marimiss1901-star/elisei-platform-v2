@@ -34,6 +34,7 @@ export const authApi = {
 }
 
 export const wbApi = {
+  current: () => request('/api/wb/connection'),
   connect: (token) => request('/api/wb/connect', { method: 'POST', body: JSON.stringify({ token }) }),
   status: (connectionId) => request(`/api/wb/status/${encodeURIComponent(connectionId)}`),
   sync: (connectionId) => request('/api/wb/sync', { method: 'POST', body: JSON.stringify({ connectionId }) }),

@@ -31,7 +31,6 @@ function AppRoutes() {
 
   const logout = () => {
     authApi.logout()
-    localStorage.removeItem('elisei_wb_connection_id')
     setUser(null)
     setAuthState('guest')
     navigate('/', { replace: true })

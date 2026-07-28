@@ -19,7 +19,6 @@ const products = [
   ['MP002XW0L8TT','Полуботинки','122 420 ₽','9','Риск'],
 ]
 
-const STORAGE_KEY = 'elisei_wb_connection_id'
 const formatMoney = value => value == null ? '—' : new Intl.NumberFormat('ru-RU').format(value) + ' ₽'
 
 export default function DashboardPage({ onNavigate, onLogout }) {
@@ -28,7 +27,7 @@ export default function DashboardPage({ onNavigate, onLogout }) {
   const [toast, setToast] = useState('')
   const [chat, setChat] = useState('')
   const [messages, setMessages] = useState([{role:'el', text:'Доброе утро, Мария. Я уже проверил продажи, рекламу и остатки. С чего начнём?'}])
-  const [connection, setConnection] = useState({ connected:false, connectionId:sessionStorage.getItem(STORAGE_KEY) || '', scopes:[], lastSync:null })
+  const [connection, setConnection] = useState({ connected:false, connectionId:'', scopes:[], lastSync:null })
   const [tokenDraft, setTokenDraft] = useState('')
   const [showToken, setShowToken] = useState(false)
   const [checking, setChecking] = useState(false)
@@ -38,17 +37,20 @@ export default function DashboardPage({ onNavigate, onLogout }) {
   const [syncHistory, setSyncHistory] = useState([])
 
   useEffect(() => {
-    const connectionId = sessionStorage.getItem(STORAGE_KEY)
-    if (!connectionId || !wbApi.configured) return
-    wbApi.status(connectionId).then(status => {
+    if (!wbApi.configured) return
+    wbApi.current().then(status => {
+      if (!status.connected || !status.connectionId) return null
+      const connectionId = status.connectionId
       setConnection({ connected:true, connectionId, scopes:status.scopes || [], lastSync:status.lastSync || null })
       setSyncHistory(status.syncHistory || [])
       return Promise.all([wbApi.dashboard(connectionId), wbApi.products(connectionId), wbApi.syncHistory(connectionId)])
-    }).then(([dashboard, productResult, historyResult]) => {
+    }).then(result => {
+      if (!result) return
+      const [dashboard, productResult, historyResult] = result
       setDashboardData(dashboard.dashboard || null)
       setLiveProducts(productResult.products || [])
       setSyncHistory(historyResult.history || [])
-    }).catch(() => sessionStorage.removeItem(STORAGE_KEY))
+    }).catch(error => notify(error.message))
   }, [])
 
   const nav = [
@@ -84,7 +86,6 @@ export default function DashboardPage({ onNavigate, onLogout }) {
     setChecking(true)
     try {
       const result = await wbApi.connect(tokenDraft.trim())
-      sessionStorage.setItem(STORAGE_KEY, result.connectionId)
       const next = { connected:true, connectionId:result.connectionId, scopes:result.scopes || [], lastSync:null }
       setConnection(next)
       setTokenDraft('')
@@ -96,7 +97,6 @@ export default function DashboardPage({ onNavigate, onLogout }) {
 
   const disconnect = async () => {
     try { if (connection.connectionId && wbApi.configured) await wbApi.disconnect(connection.connectionId) } catch {}
-    sessionStorage.removeItem(STORAGE_KEY)
     setConnection({ connected:false, connectionId:'', scopes:[], lastSync:null })
     setDashboardData(null); setLiveProducts([]); setSyncHistory([]); setTokenDraft('')
     notify('Подключение удалено')
@@ -114,7 +114,7 @@ export default function DashboardPage({ onNavigate, onLogout }) {
 
   const renderProducts = () => <section className="app-page glass-panel"><div className="page-title"><span>Каталог</span><h1>{active}</h1><p>Поиск работает по артикулу, модели и названию.</p></div><div className="data-table"><div className="data-row head"><span>Артикул</span><span>Товар</span><span>Выручка</span><span>Остаток</span><span>Статус</span></div>{filteredProducts.map(p=><div className="data-row" key={p[0]}>{p.map((v,i)=><span key={i} className={i===4 ? (v==='В норме'?'status-ok':'status-risk'):''}>{v}</span>)}</div>)}</div></section>
 
-  const renderConnections = () => <section className="app-page glass-panel connections-page"><div className="page-title"><span>Интеграции</span><h1>Подключение маркетплейса</h1><p>Добавьте официальный API-ключ Wildberries. Ключ отправляется напрямую на backend и не сохраняется в браузере. Текущая тестовая сессия действует до перезапуска backend или истечения срока.</p></div><div className="connection-card"><div className="connection-logo">WB</div><div className="connection-copy"><div className="connection-title"><h3>Wildberries</h3><span className={connection.connected?'connection-status connected':'connection-status'}>{connection.connected?'Подключён':'Не подключён'}</span></div><p>Товары, остатки, заказы, продажи, реклама и финансовые отчёты.</p>{connection.connected?<><div className="connection-meta"><span>Последняя синхронизация</span><strong>{connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : 'Ещё не выполнялась'}</strong></div><div className="connection-actions"><button className="secondary-btn" disabled={syncing} onClick={()=>syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/> {syncing?'Синхронизация':'Синхронизировать'}</button><button className="danger-btn" onClick={disconnect}>Отключить</button></div></>:<form className="token-form" onSubmit={saveConnection}><label>API-ключ Wildberries</label><div className="token-input"><input type={showToken?'text':'password'} value={tokenDraft} onChange={e=>setTokenDraft(e.target.value)} placeholder="Вставьте официальный API-ключ" autoComplete="off"/><button type="button" onClick={()=>setShowToken(v=>!v)} aria-label={showToken?'Скрыть ключ':'Показать ключ'}>{showToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>Мы рекомендуем использовать ключ только с необходимыми правами чтения.</small><button className="primary-btn" disabled={checking}>{checking?<><RefreshCw className="spin" size={17}/> Проверяем подключение</>:<><PlugZap size={17}/> Проверить и подключить</>}</button></form>}</div></div><div className="security-note"><ShieldCheck size={22}/><div><strong>Безопасная архитектура</strong><p>Ключ хранится только в оперативной памяти backend-сервиса и не возвращается клиенту. Следующий production-этап — база данных, шифрование ключей и авторизация пользователей.</p></div></div></section>
+  const renderConnections = () => <section className="app-page glass-panel connections-page"><div className="page-title"><span>Интеграции</span><h1>Подключение маркетплейса</h1><p>Добавьте официальный API-ключ Wildberries. Ключ отправляется напрямую на backend и не сохраняется в браузере. Подключение сохраняется в защищённой базе и восстанавливается после повторного входа.</p></div><div className="connection-card"><div className="connection-logo">WB</div><div className="connection-copy"><div className="connection-title"><h3>Wildberries</h3><span className={connection.connected?'connection-status connected':'connection-status'}>{connection.connected?'Подключён':'Не подключён'}</span></div><p>Товары, остатки, заказы, продажи, реклама и финансовые отчёты.</p>{connection.connected?<><div className="connection-meta"><span>Последняя синхронизация</span><strong>{connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : 'Ещё не выполнялась'}</strong></div><div className="connection-actions"><button className="secondary-btn" disabled={syncing} onClick={()=>syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/> {syncing?'Синхронизация':'Синхронизировать'}</button><button className="danger-btn" onClick={disconnect}>Отключить</button></div></>:<form className="token-form" onSubmit={saveConnection}><label>API-ключ Wildberries</label><div className="token-input"><input type={showToken?'text':'password'} value={tokenDraft} onChange={e=>setTokenDraft(e.target.value)} placeholder="Вставьте официальный API-ключ" autoComplete="off"/><button type="button" onClick={()=>setShowToken(v=>!v)} aria-label={showToken?'Скрыть ключ':'Показать ключ'}>{showToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>Мы рекомендуем использовать ключ только с необходимыми правами чтения.</small><button className="primary-btn" disabled={checking}>{checking?<><RefreshCw className="spin" size={17}/> Проверяем подключение</>:<><PlugZap size={17}/> Проверить и подключить</>}</button></form>}</div></div><div className="security-note"><ShieldCheck size={22}/><div><strong>Безопасная архитектура</strong><p>API-ключ шифруется алгоритмом AES-256-GCM и хранится отдельно для вашего аккаунта. Ключ никогда не возвращается в браузер и не отображается после сохранения.</p></div></div></section>
 
   const renderSyncHistory = () => <section className="app-page glass-panel"><div className="page-title"><span>Контроль данных</span><h1>Журнал синхронизаций</h1><p>Здесь отображаются последние загрузки данных из Wildberries и результаты каждой попытки.</p></div>{!connection.connected?<div className="empty-state"><Clock3 size={38}/><h3>Wildberries не подключён</h3><p>Подключите кабинет, чтобы начать синхронизацию данных.</p><button className="primary-btn" onClick={()=>setActive('Подключения')}>Подключить Wildberries</button></div>:<><div className="sync-summary"><div><span>Последняя синхронизация</span><strong>{connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : 'Ещё не выполнялась'}</strong></div><button className="secondary-btn" disabled={syncing} onClick={()=>syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Загрузка данных':'Запустить синхронизацию'}</button></div><div className="sync-log">{syncHistory.length===0?<div className="sync-empty">В журнале пока нет записей.</div>:syncHistory.map(item=><div className={`sync-log-row ${item.status}`} key={item.id}><div className="sync-log-icon">{item.status==='success'?<CheckCircle2 size={18}/>:<AlertTriangle size={18}/>}</div><div><strong>{item.status==='success'?'Синхронизация завершена':'Ошибка синхронизации'}</strong><span>{new Date(item.at).toLocaleString('ru-RU')}</span></div><div className="sync-log-details">{item.status==='success'?<><span>{item.counts?.products || 0} товаров</span><span>{item.counts?.orders || 0} заказов</span><span>{item.counts?.sales || 0} продаж</span><span>{Math.max(1, Math.round((item.durationMs || 0)/1000))} сек.</span></>:<span>{item.message || 'Неизвестная ошибка'}</span>}</div></div>)}</div></>}</section>
 
