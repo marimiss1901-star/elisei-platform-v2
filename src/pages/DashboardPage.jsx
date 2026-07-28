@@ -139,68 +139,49 @@ export default function DashboardPage({ onNavigate, onLogout }) {
     const orders = dashboardData?.orders || 0
     const stockUnits = dashboardData?.stockUnits || 0
     const sales = dashboardData?.sales || 0
-    const returns = dashboardData?.returns || 0
     const criticalStock = productRows.filter(p => p.stock === 0).length
     const lowStock = productRows.filter(p => p.stock > 0 && p.stock < 10).length
+    const opportunities = connection.connected ? Math.max(criticalStock + lowStock, 1) : 6
     const now = new Date()
     const dateLabel = now.toLocaleDateString('ru-RU', { weekday:'long', day:'numeric', month:'long' })
-    const timeLabel = now.toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit' })
-    const events = connection.connected ? [
-      {time:'сейчас', icon:RefreshCw, title:'Данные Wildberries проверены', text:connection.lastSync ? `Последняя синхронизация: ${new Date(connection.lastSync).toLocaleString('ru-RU')}` : 'Ожидается первая синхронизация', tone:'violet'},
-      {time:'сегодня', icon:AlertTriangle, title:`${criticalStock} товаров без остатка`, text:criticalStock ? 'Эти позиции уже могут терять продажи.' : 'Критичных нулевых остатков не найдено.', tone:criticalStock ? 'danger' : 'success'},
-      {time:'сегодня', icon:Boxes, title:`${lowStock} товаров заканчиваются`, text:lowStock ? 'Проверьте сроки следующей поставки.' : 'Запасы находятся в рабочем диапазоне.', tone:lowStock ? 'warning' : 'success'},
-      {time:'30 дней', icon:TrendingUp, title:`${sales} продаж и ${orders} заказов`, text:`Возвратов: ${returns}. Выручка: ${formatMoney(revenue)}.`, tone:'blue'}
-    ] : [
-      {time:'09:14', icon:Sparkles, title:'Эл завершил утренний анализ', text:'Демонстрационный сценарий показывает будущую работу системы.', tone:'violet'},
-      {time:'09:18', icon:Boxes, title:'Заканчиваются ходовые размеры', text:'2 модели требуют проверки поставки.', tone:'warning'},
-      {time:'09:23', icon:TrendingUp, title:'Обнаружен потенциал роста', text:'Изменение цены может увеличить прибыль.', tone:'success'},
-      {time:'09:28', icon:Megaphone, title:'Реклама требует внимания', text:'Одна кампания расходует бюджет без роста продаж.', tone:'danger'}
-    ]
 
-    return <section className="ops-home">
-      <div className="ops-head">
-        <div><span className="ops-kicker">ELISEI · командный центр</span><h1>Ваш бизнес — в одном экране</h1><p>{dateLabel} · {timeLabel} · Wildberries</p></div>
-        <div className="ops-data-status"><span className={connection.connected?'status-dot':'status-dot idle'}/><div><strong>{connection.connected?'Система на связи':'Демо-режим'}</strong><small>{connection.lastSync?`Обновлено ${new Date(connection.lastSync).toLocaleString('ru-RU')}`:'Подключите кабинет для реальных данных'}</small></div></div>
+    return <section className="brand-home">
+      <div className="brand-hero glass-panel">
+        <div className="brand-hero-copy">
+          <span className="brand-kicker"><Sparkles size={15}/> ЭЛ уже всё проверил</span>
+          <h1>Доброе утро,<br/><em>Мария</em></h1>
+          <p>{connection.connected ? `Я проверил ${productRows.length} товаров, продажи и остатки. Нашёл ${opportunities} возможностей для роста.` : 'Подключите Wildberries — и я начну анализировать продажи, остатки, рекламу и прибыль.'}</p>
+          <div className="brand-hero-actions">
+            <button className="primary-btn brand-primary" onClick={()=>connection.connected?setActive('Спросить ЭЛа'):setActive('Подключения')}><MessageCircle size={18}/>{connection.connected?'Обсудить с Элом':'Подключить Wildberries'}</button>
+            <button className="brand-secondary" onClick={()=>setActive('Аналитика')}>Открыть аналитику <ChevronRight size={16}/></button>
+          </div>
+          <div className="brand-sync"><span className={connection.connected?'status-dot':'status-dot idle'}/><span>{connection.connected ? (connection.lastSync ? `Данные обновлены ${new Date(connection.lastSync).toLocaleString('ru-RU')}` : 'Кабинет подключён, ожидается первая синхронизация') : `${dateLabel} · демонстрационный режим`}</span></div>
+        </div>
+        <div className="brand-mascot-stage"><div className="brand-orbit one"/><div className="brand-orbit two"/><ElMascot/><div className="el-speech"><strong>Эл</strong><span>{connection.connected?'Я подготовил план на сегодня ✨':'Готов подключиться к вашему бизнесу'}</span></div></div>
       </div>
 
-      <div className="ops-hero-grid">
-        <article className="profit-stage">
-          <div className="profit-glow"/>
-          <div className="profit-label">Выручка за 30 дней</div>
-          <div className="profit-value">{connection.connected ? formatMoney(revenue) : '1 592 500 ₽'}</div>
-          <div className="profit-delta"><TrendingUp size={17}/>{connection.connected ? `${sales} продаж` : '+18,4% к прошлому периоду'}</div>
-          <div className="profit-line"><span style={{width: connection.connected ? `${Math.min(100, Math.max(8, sales))}%` : '74%'}}/></div>
-          <div className="profit-subgrid"><div><span>Заказы</span><strong>{connection.connected?orders:'842'}</strong></div><div><span>Остатки</span><strong>{connection.connected?stockUnits.toLocaleString('ru-RU'):'2 410'}</strong></div><div><span>Возвраты</span><strong>{connection.connected?returns:'31'}</strong></div></div>
-        </article>
-
-        <article className="el-live-panel glass-panel">
-          <div className="el-live-head"><div className="el-live-avatar"><ElMascot compact/></div><div><span>ЭЛ · AI-директор</span><h2>{syncing?'Анализирую данные…':'Анализ завершён'}</h2></div><span className="live-badge">LIVE</span></div>
-          <div className="el-checks"><div><CheckCircle2 size={16}/><span>Товары</span><strong>{productRows.length}</strong></div><div><CheckCircle2 size={16}/><span>Остатки</span><strong>{stockUnits}</strong></div><div><CheckCircle2 size={16}/><span>Заказы</span><strong>{orders}</strong></div></div>
-          <div className="el-result"><small>Найдено задач</small><strong>{connection.connected ? criticalStock + lowStock : 3}</strong><span>{connection.connected ? `${criticalStock} критичных · ${lowStock} требуют внимания` : '1 критичная · 2 важных'}</span></div>
-          <button className="primary-btn ops-primary" onClick={()=>connection.connected?setActive('Спросить ЭЛа'):setActive('Подключения')}><Sparkles size={17}/>{connection.connected?'Обсудить с Элом':'Подключить Wildberries'}</button>
-        </article>
-      </div>
-
-      <div className="quick-strip">
-        {[['Остатки',Boxes],['Товары',PackageSearch],['Реклама',Megaphone],['Финансы',WalletCards],['Отзывы',Star],['AI CRM',UsersRound],['Прогноз',BarChart3]].map(([label,Icon])=><button key={label} onClick={()=>setActive(label==='Прогноз'?'Аналитика':label)}><Icon size={19}/><span>{label}</span><ChevronRight size={14}/></button>)}
-      </div>
-
-      <div className="ops-content-grid">
-        <section className="priority-zone">
-          <div className="ops-section-title"><div><span>Приоритеты</span><h2>Что сделать сегодня</h2></div><button className="text-action" onClick={()=>setActive('Спросить ЭЛа')}>Обсудить план <ChevronRight size={15}/></button></div>
-          <div className="priority-list">{recommendations.map((r,index)=><button className={`priority-row ${r.tone}`} key={r.title} onClick={()=>notify(`Открыто: ${r.title}`)}><span className="priority-index">0{index+1}</span><div><small>{r.eyebrow}</small><h3>{r.title}</h3><p>{r.text}</p></div><div className="priority-effect"><strong>{r.effect}</strong><ChevronRight size={18}/></div></button>)}</div>
-        </section>
-
-        <section className="event-zone glass-panel">
-          <div className="ops-section-title compact"><div><span>Лента событий</span><h2>Что происходит</h2></div><button className="icon-btn" onClick={()=>connection.connected&&syncConnection()} disabled={syncing}><RefreshCw className={syncing?'spin':''} size={17}/></button></div>
-          <div className="event-list">{events.map(({time,icon:Icon,title,text,tone})=><div className={`event-item ${tone}`} key={title}><div className="event-icon"><Icon size={17}/></div><div><span>{time}</span><strong>{title}</strong><p>{text}</p></div></div>)}</div>
-        </section>
-      </div>
-
-      <section className="business-pulse glass-panel">
-        <div className="ops-section-title"><div><span>Пульс бизнеса</span><h2>Динамика и прогноз</h2></div><button className="text-action" onClick={()=>setActive('Аналитика')}>Открыть аналитику <ChevronRight size={15}/></button></div>
-        <div className="pulse-body"><div className="pulse-chart"><TrendChart/></div><div className="pulse-stats"><div><span>Выручка</span><strong>{connection.connected?formatMoney(revenue):'1,59 млн ₽'}</strong></div><div><span>Заказы</span><strong>{connection.connected?orders:'842'}</strong></div><div><span>Товары под риском</span><strong className={criticalStock?'danger-text':''}>{connection.connected?criticalStock:'7'}</strong></div><div><span>Статус</span><strong className="positive">{connection.connected?'Данные подключены':'Демо'}</strong></div></div></div>
+      <section className="brand-metrics">
+        {[
+          ['Аналитика', BarChart3, connection.connected?formatMoney(revenue):'2 487 000 ₽', connection.connected?`${sales} продаж`:'+12,8% за 30 дней','violet'],
+          ['Финансы', WalletCards, connection.connected?'Нужна себестоимость':'435 000 ₽', connection.connected?'Добавьте расходы':'чистая прибыль','pink'],
+          ['Товары', PackageSearch, connection.connected?String(productRows.length):'4 286', connection.connected?'в каталоге':'активных карточек','blue'],
+          ['Остатки', Boxes, connection.connected?stockUnits.toLocaleString('ru-RU'):'18 730', connection.connected?`${criticalStock} без остатка`:'единиц на складах','cyan']
+        ].map(([label,Icon,value,caption,tone])=><button className={`brand-metric ${tone}`} key={label} onClick={()=>setActive(label)}><span className="brand-3d-icon"><Icon size={27}/></span><span><small>{label}</small><strong>{value}</strong><em>{caption}</em></span><ChevronRight size={16}/></button>)}
       </section>
+
+      <div className="brand-grid">
+        <section className="el-recommendations glass-panel">
+          <div className="brand-section-head"><div><span>Эл рекомендует</span><h2>Что сделать сегодня</h2></div><button onClick={()=>setActive('Спросить ЭЛа')}>Спросить Эла <ChevronRight size={15}/></button></div>
+          <div className="recommendation-cards">{recommendations.map((r,index)=><button className={`recommendation-tile ${r.tone}`} key={r.title} onClick={()=>notify(`Открыто: ${r.title}`)}><span className="rec-number">0{index+1}</span><div><small>{r.eyebrow}</small><h3>{r.title}</h3><p>{r.text}</p><strong>{r.effect}</strong></div><span className="rec-arrow"><ChevronRight size={18}/></span></button>)}</div>
+        </section>
+
+        <aside className="el-profile-card glass-panel">
+          <div className="el-profile-top"><div className="mini-el"><ElMascot compact/></div><div><span>ЭЛ · AI-помощник</span><h2>{syncing?'Думаю…':'Я на связи'}</h2></div><span className="live-badge">LIVE</span></div>
+          <p>{connection.connected?'Я слежу за изменениями и подсказываю, где вы теряете деньги или можете заработать больше.':'После подключения я начну собирать данные и готовить персональные рекомендации.'}</p>
+          <div className="el-profile-stats"><div><span>Проверено товаров</span><strong>{productRows.length}</strong></div><div><span>Задач найдено</span><strong>{opportunities}</strong></div><div><span>Риск остатков</span><strong>{criticalStock+lowStock}</strong></div></div>
+          <button className="primary-btn brand-primary" onClick={()=>setActive('Спросить ЭЛа')}><Sparkles size={17}/> Спросить Эла</button>
+        </aside>
+      </div>
     </section>
   }
 
