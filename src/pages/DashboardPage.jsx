@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Bell, LogOut, ChevronRight, CircleDollarSign, Home, MessageCircle, PackageSearch, Search, ShieldCheck, Sparkles, TrendingUp, WalletCards, BarChart3, Megaphone, Boxes, FileText, Settings, Send, CheckCircle2, PlugZap, Eye, EyeOff, RefreshCw, Star, UsersRound, Clock3, AlertTriangle } from 'lucide-react'
+import { Bell, LogOut, ChevronRight, CircleDollarSign, Home, MessageCircle, PackageSearch, Search, ShieldCheck, Sparkles, TrendingUp, WalletCards, BarChart3, Megaphone, Boxes, FileText, Settings, Send, CheckCircle2, PlugZap, Eye, EyeOff, RefreshCw, Star, UsersRound, Clock3, AlertTriangle, ChevronUp, ChevronDown, SlidersHorizontal, X } from 'lucide-react'
 import ElMascot from '../components/ElMascot'
 import RecommendationCard from '../components/RecommendationCard'
 import MetricCard from '../components/MetricCard'
@@ -35,6 +35,9 @@ export default function DashboardPage({ onNavigate, onLogout }) {
   const [dashboardData, setDashboardData] = useState(null)
   const [liveProducts, setLiveProducts] = useState([])
   const [syncHistory, setSyncHistory] = useState([])
+  const [productFilter, setProductFilter] = useState('Все')
+  const [productSort, setProductSort] = useState({ key:'title', direction:'asc' })
+  const [selectedProduct, setSelectedProduct] = useState(null)
 
   useEffect(() => {
     if (!wbApi.configured) return
@@ -59,8 +62,37 @@ export default function DashboardPage({ onNavigate, onLogout }) {
     ['Отзывы', Star], ['Спросить ЭЛа', MessageCircle], ['Подключения', PlugZap], ['Синхронизации', Clock3], ['Настройки', Settings]
   ]
 
-  const productRows = liveProducts.length ? liveProducts.map(p => [String(p.vendorCode || p.nmID || '—'), p.title || 'Товар', formatMoney(p.revenue || 0), String(p.stock ?? '—'), p.status || 'Загружен']) : products
-  const filteredProducts = useMemo(() => productRows.filter(p => p.join(' ').toLowerCase().includes(query.toLowerCase())), [query, liveProducts])
+  const productRows = useMemo(() => {
+    const source = liveProducts.length ? liveProducts : products.map((p, index) => ({ vendorCode:p[0], title:p[1], revenue:Number(String(p[2]).replace(/\D/g,'')) || 0, stock:Number(p[3]) || 0, status:p[4], nmID:`demo-${index}` }))
+    return source.map((p, index) => {
+      const stock = Number(p.stock || 0)
+      const revenue = Number(p.revenue || 0)
+      const status = stock <= 0 ? 'Нет остатка' : stock < 10 ? 'Заканчивается' : 'В наличии'
+      return { ...p, id:String(p.nmID || p.vendorCode || index), article:String(p.vendorCode || p.nmID || '—'), title:p.title || 'Товар', brand:p.brand || 'Без бренда', photo:p.photo || '', revenue, stock, status }
+    })
+  }, [liveProducts])
+
+  const filteredProducts = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    const filtered = productRows.filter(p => {
+      const matchesQuery = !needle || [p.article, p.title, p.brand, p.nmID].join(' ').toLowerCase().includes(needle)
+      const matchesFilter = productFilter === 'Все' ||
+        (productFilter === 'В наличии' && p.stock > 0) ||
+        (productFilter === 'Нет остатка' && p.stock === 0) ||
+        (productFilter === 'Заканчиваются' && p.stock > 0 && p.stock < 10) ||
+        (productFilter === 'С продажами' && p.revenue > 0) ||
+        (productFilter === 'Без продаж' && p.revenue === 0)
+      return matchesQuery && matchesFilter
+    })
+    return [...filtered].sort((a,b) => {
+      const av=a[productSort.key], bv=b[productSort.key]
+      const result = typeof av === 'number' ? av-bv : String(av).localeCompare(String(bv), 'ru')
+      return productSort.direction === 'asc' ? result : -result
+    })
+  }, [productRows, query, productFilter, productSort])
+
+  const changeProductSort = key => setProductSort(current => current.key === key ? { key, direction:current.direction === 'asc' ? 'desc' : 'asc' } : { key, direction:'asc' })
+  const SortIcon = ({ column }) => productSort.key !== column ? null : productSort.direction === 'asc' ? <ChevronUp size={14}/> : <ChevronDown size={14}/>
   const notify = (text) => { setToast(text); window.clearTimeout(window.__eliseiToast); window.__eliseiToast=setTimeout(()=>setToast(''), 2600) }
   const sendChat = (e) => { e.preventDefault(); if(!chat.trim()) return; const q=chat.trim(); setMessages(m=>[...m,{role:'user',text:q},{role:'el',text:connection.connected?'Wildberries подключён. После синхронизации я использую реальные товары, заказы, продажи и остатки. Расчёт прибыли появится после добавления себестоимости и расходов.':'Сначала подключите официальный API Wildberries в разделе «Подключения». После этого я смогу анализировать реальные данные.'}]); setChat('') }
 
@@ -112,7 +144,7 @@ export default function DashboardPage({ onNavigate, onLogout }) {
 
   const renderAnalytics = () => <section className="app-page glass-panel"><div className="page-title"><span>Аналитика</span><h1>Центр показателей</h1><p>{connection.connected?'Показатели рассчитаны по данным последней синхронизации Wildberries. Прибыль и маржинальность появятся после загрузки себестоимости и расходов.':'Демо-данные показывают, как будет выглядеть аналитика после подключения API.'}</p></div><div className="metrics-grid"><MetricCard label="Выручка за 30 дней" value={dashboardData ? formatMoney(dashboardData.revenue) : '7,26 млн ₽'} delta={dashboardData ? `${dashboardData.sales} продаж` : '+14,2%'} icon={TrendingUp}/><MetricCard label="Заказы за 30 дней" value={dashboardData ? String(dashboardData.orders) : '156'} delta={dashboardData ? `${dashboardData.returns} возвратов` : '+9,8%'} icon={PackageSearch}/><MetricCard label="Остатки" value={dashboardData ? String(dashboardData.stockUnits) : '2 410'} delta="единиц на складах" icon={Boxes}/></div><div className="chart-card inner-chart"><div className="card-head"><div><span>Последние 30 дней</span><h3>Динамика выручки</h3></div></div><TrendChart/></div></section>
 
-  const renderProducts = () => <section className="app-page glass-panel"><div className="page-title"><span>Каталог</span><h1>{active}</h1><p>Поиск работает по артикулу, модели и названию.</p></div><div className="data-table"><div className="data-row head"><span>Артикул</span><span>Товар</span><span>Выручка</span><span>Остаток</span><span>Статус</span></div>{filteredProducts.map(p=><div className="data-row" key={p[0]}>{p.map((v,i)=><span key={i} className={i===4 ? (v==='В норме'?'status-ok':'status-risk'):''}>{v}</span>)}</div>)}</div></section>
+  const renderProducts = () => <section className="app-page glass-panel products-page"><div className="page-title product-title"><div><span>Каталог</span><h1>{active}</h1><p>Фото, бренд, остатки и продажи из последней синхронизации Wildberries.</p></div><div className="catalog-counter"><strong>{filteredProducts.length}</strong><span>товаров показано</span></div></div><div className="product-toolbar"><div className="filter-label"><SlidersHorizontal size={16}/> Фильтры</div>{['Все','В наличии','Заканчиваются','Нет остатка','С продажами','Без продаж'].map(filter=><button key={filter} className={productFilter===filter?'filter-chip active':'filter-chip'} onClick={()=>setProductFilter(filter)}>{filter}</button>)}</div><div className="data-table product-table"><div className="data-row head product-row"><span>Фото</span><button onClick={()=>changeProductSort('article')}>Артикул <SortIcon column="article"/></button><button onClick={()=>changeProductSort('title')}>Товар <SortIcon column="title"/></button><button onClick={()=>changeProductSort('revenue')}>Выручка <SortIcon column="revenue"/></button><button onClick={()=>changeProductSort('stock')}>Остаток <SortIcon column="stock"/></button><span>Статус</span></div>{filteredProducts.length===0?<div className="product-empty">По выбранным условиям товары не найдены.</div>:filteredProducts.map(p=><button className="data-row product-row product-item" key={p.id} onClick={()=>setSelectedProduct(p)}><span className="product-thumb">{p.photo?<img src={p.photo} alt="" loading="lazy"/>:<PackageSearch size={22}/>}</span><span className="product-article">{p.article}<small>nmID {p.nmID || '—'}</small></span><span className="product-name"><strong>{p.title}</strong><small>{p.brand}</small></span><span className="product-money">{formatMoney(p.revenue)}</span><span className={`stock-value ${p.stock===0?'zero':p.stock<10?'low':'good'}`}>{p.stock}</span><span><b className={`status-badge ${p.stock===0?'danger':p.stock<10?'warning':'success'}`}>{p.status}</b></span></button>)}</div>{selectedProduct&&<div className="product-drawer-backdrop" onClick={()=>setSelectedProduct(null)}><aside className="product-drawer" onClick={e=>e.stopPropagation()}><button className="drawer-close" onClick={()=>setSelectedProduct(null)}><X size={20}/></button><div className="drawer-photo">{selectedProduct.photo?<img src={selectedProduct.photo} alt={selectedProduct.title}/>:<PackageSearch size={44}/>}</div><span className="drawer-eyebrow">{selectedProduct.brand}</span><h2>{selectedProduct.title}</h2><p className="drawer-article">Артикул: {selectedProduct.article} · nmID: {selectedProduct.nmID || '—'}</p><div className="drawer-metrics"><div><span>Выручка</span><strong>{formatMoney(selectedProduct.revenue)}</strong></div><div><span>Остаток</span><strong>{selectedProduct.stock} шт.</strong></div></div><div className={`drawer-insight ${selectedProduct.stock===0?'danger':selectedProduct.stock<10?'warning':'success'}`}><Sparkles size={19}/><div><strong>Рекомендация ЭЛа</strong><p>{selectedProduct.stock===0?'Товар закончился. Проверьте доступность поставки и потенциально упущенные продажи.':selectedProduct.stock<10?'Запас подходит к критическому уровню. Рекомендуется запланировать поставку до следующего пика спроса.':'Остаток находится в рабочем диапазоне. Следите за темпом продаж после следующей синхронизации.'}</p></div></div></aside></div>}</section>
 
   const renderConnections = () => <section className="app-page glass-panel connections-page"><div className="page-title"><span>Интеграции</span><h1>Подключение маркетплейса</h1><p>Добавьте официальный API-ключ Wildberries. Ключ отправляется напрямую на backend и не сохраняется в браузере. Подключение сохраняется в защищённой базе и восстанавливается после повторного входа.</p></div><div className="connection-card"><div className="connection-logo">WB</div><div className="connection-copy"><div className="connection-title"><h3>Wildberries</h3><span className={connection.connected?'connection-status connected':'connection-status'}>{connection.connected?'Подключён':'Не подключён'}</span></div><p>Товары, остатки, заказы, продажи, реклама и финансовые отчёты.</p>{connection.connected?<><div className="connection-meta"><span>Последняя синхронизация</span><strong>{connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : 'Ещё не выполнялась'}</strong></div><div className="connection-actions"><button className="secondary-btn" disabled={syncing} onClick={()=>syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/> {syncing?'Синхронизация':'Синхронизировать'}</button><button className="danger-btn" onClick={disconnect}>Отключить</button></div></>:<form className="token-form" onSubmit={saveConnection}><label>API-ключ Wildberries</label><div className="token-input"><input type={showToken?'text':'password'} value={tokenDraft} onChange={e=>setTokenDraft(e.target.value)} placeholder="Вставьте официальный API-ключ" autoComplete="off"/><button type="button" onClick={()=>setShowToken(v=>!v)} aria-label={showToken?'Скрыть ключ':'Показать ключ'}>{showToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>Мы рекомендуем использовать ключ только с необходимыми правами чтения.</small><button className="primary-btn" disabled={checking}>{checking?<><RefreshCw className="spin" size={17}/> Проверяем подключение</>:<><PlugZap size={17}/> Проверить и подключить</>}</button></form>}</div></div><div className="security-note"><ShieldCheck size={22}/><div><strong>Безопасная архитектура</strong><p>API-ключ шифруется алгоритмом AES-256-GCM и хранится отдельно для вашего аккаунта. Ключ никогда не возвращается в браузер и не отображается после сохранения.</p></div></div></section>
 
