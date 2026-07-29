@@ -20,7 +20,7 @@ const encryptionKey = encryptionSecret ? crypto.createHash('sha256').update(encr
 
 app.use(helmet())
 app.use(cors({ origin(origin, cb) { if (!origin || !allowedOrigins.length || allowedOrigins.includes(origin)) return cb(null, true); cb(new Error('Origin is not allowed')) } }))
-app.use(express.json({ limit: '64kb' }))
+app.use(express.json({ limit: '2mb' }))
 
 async function initDatabase() {
   if (!pool) return
@@ -48,6 +48,11 @@ async function initDatabase() {
       UNIQUE(user_id, marketplace)
     );
     CREATE INDEX IF NOT EXISTS marketplace_connections_user_idx ON marketplace_connections(user_id);
+    CREATE TABLE IF NOT EXISTS business_settings (
+      user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      settings JSONB NOT NULL DEFAULT '{}'::jsonb,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `)
 }
 
@@ -154,7 +159,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.5.5 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.6.0 (marketplace analytics)',
   }
   if (wbClientSecret) headers['X-Client-Secret'] = wbClientSecret
   return headers
@@ -274,6 +279,319 @@ function publicConnection(row) {
     connectedAt: row?.created_at || null,
     lastSync: row?.last_sync_at || null,
     syncHistory: row?.sync_history || [],
+  }
+}
+
+const DEFAULT_BUSINESS_SETTINGS = Object.freeze({
+  commissionPercent: 20,
+  logisticsPerSale: 0,
+  storageMonthly: 0,
+  advertisingMonthly: 0,
+  fixedMonthly: 0,
+  taxPercent: 0,
+  defaultCostPercent: 0,
+  targetMarginPercent: 20,
+  productCosts: {},
+})
+
+function finiteNumber(value, fallback = 0) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : fallback
+}
+
+function sanitizeBusinessSettings(value = {}) {
+  const productCosts = value?.productCosts && typeof value.productCosts === 'object' && !Array.isArray(value.productCosts)
+    ? Object.fromEntries(Object.entries(value.productCosts).map(([key, amount]) => [String(key), Math.max(0, finiteNumber(amount, 0))]))
+    : {}
+  return {
+    commissionPercent: Math.min(100, Math.max(0, finiteNumber(value.commissionPercent, DEFAULT_BUSINESS_SETTINGS.commissionPercent))),
+    logisticsPerSale: Math.max(0, finiteNumber(value.logisticsPerSale, 0)),
+    storageMonthly: Math.max(0, finiteNumber(value.storageMonthly, 0)),
+    advertisingMonthly: Math.max(0, finiteNumber(value.advertisingMonthly, 0)),
+    fixedMonthly: Math.max(0, finiteNumber(value.fixedMonthly, 0)),
+    taxPercent: Math.min(100, Math.max(0, finiteNumber(value.taxPercent, 0))),
+    defaultCostPercent: Math.min(100, Math.max(0, finiteNumber(value.defaultCostPercent, 0))),
+    targetMarginPercent: Math.min(90, Math.max(0, finiteNumber(value.targetMarginPercent, 20))),
+    productCosts,
+  }
+}
+
+async function getBusinessSettings(userId) {
+  const result = await pool.query('SELECT settings FROM business_settings WHERE user_id=$1', [userId])
+  return sanitizeBusinessSettings({ ...DEFAULT_BUSINESS_SETTINGS, ...(result.rows[0]?.settings || {}) })
+}
+
+async function saveBusinessSettings(userId, settings) {
+  const clean = sanitizeBusinessSettings(settings)
+  await pool.query(`
+    INSERT INTO business_settings (user_id, settings, updated_at)
+    VALUES ($1,$2::jsonb,NOW())
+    ON CONFLICT (user_id) DO UPDATE SET settings=EXCLUDED.settings, updated_at=NOW()
+  `, [userId, JSON.stringify(clean)])
+  return clean
+}
+
+function dateKey(value) {
+  if (!value) return ''
+  const raw = String(value)
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10)
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10)
+}
+
+function firstNumber(row, keys, fallback = 0) {
+  for (const key of keys) {
+    const value = Number(row?.[key])
+    if (Number.isFinite(value)) return value
+  }
+  return fallback
+}
+
+function productKey(row) {
+  return String(row?.nmId ?? row?.nmID ?? row?.nm_id ?? '').trim()
+}
+
+function buildCoreAnalytics(data = {}, rawSettings = {}) {
+  const settings = sanitizeBusinessSettings({ ...DEFAULT_BUSINESS_SETTINGS, ...rawSettings })
+  const rawProducts = Array.isArray(data.products) ? data.products : []
+  const orders = Array.isArray(data.orders) ? data.orders : []
+  const salesRows = Array.isArray(data.sales) ? data.sales : []
+  const stocks = Array.isArray(data.stocks) ? data.stocks : []
+  const periodDays = 30
+  const productMap = new Map()
+  const ensure = (row = {}) => {
+    const key = productKey(row) || String(row.vendorCode || row.supplierArticle || '').trim()
+    if (!key) return null
+    if (!productMap.has(key)) {
+      productMap.set(key, {
+        key,
+        nmID: row.nmID ?? row.nmId ?? null,
+        vendorCode: row.vendorCode || row.supplierArticle || '',
+        title: row.title || row.subject || row.subjectName || 'Товар',
+        brand: row.brand || '',
+        photo: row.photo || '',
+        stock: 0,
+        ordersCount: 0,
+        salesCount: 0,
+        returnsCount: 0,
+        revenue: 0,
+        dailySales: {},
+      })
+    }
+    const item = productMap.get(key)
+    if (!item.vendorCode) item.vendorCode = row.vendorCode || row.supplierArticle || ''
+    if ((!item.title || item.title === 'Товар') && (row.title || row.subjectName)) item.title = row.title || row.subjectName
+    if (!item.brand && row.brand) item.brand = row.brand
+    if (!item.photo && row.photo) item.photo = row.photo
+    return item
+  }
+
+  rawProducts.forEach(row => ensure(row))
+  const warehouses = new Map()
+  for (const row of stocks) {
+    const item = ensure(row)
+    if (!item) continue
+    const quantity = Math.max(0, firstNumber(row, ['quantity', 'quantityFull', 'stock', 'stockCount', 'totalQuantity', 'availableQuantity'], 0))
+    item.stock += quantity
+    const name = String(row.warehouseName || row.warehouse || row.officeName || 'Все склады').trim() || 'Все склады'
+    warehouses.set(name, (warehouses.get(name) || 0) + quantity)
+  }
+
+  const dailyMap = new Map()
+  for (let offset = periodDays - 1; offset >= 0; offset -= 1) {
+    const date = new Date(Date.now() - offset * 86400000).toISOString().slice(0, 10)
+    dailyMap.set(date, { date, revenue: 0, orders: 0, sales: 0, returns: 0 })
+  }
+
+  for (const row of orders) {
+    const item = ensure(row)
+    if (item) item.ordersCount += 1
+    const day = dateKey(row.date || row.lastChangeDate || row.createdAt)
+    if (dailyMap.has(day)) dailyMap.get(day).orders += 1
+  }
+
+  for (const row of salesRows) {
+    const item = ensure(row)
+    const isReturn = String(row.saleID || row.saleId || '').toUpperCase().startsWith('R') || Boolean(row.isReturn)
+    let amount = firstNumber(row, ['forPay', 'finishedPrice', 'priceWithDisc', 'totalPrice'], 0)
+    if (isReturn && amount > 0) amount = -amount
+    const day = dateKey(row.sale_dt || row.date || row.lastChangeDate || row.createdAt)
+    if (item) {
+      item.revenue += amount
+      if (isReturn) item.returnsCount += 1
+      else item.salesCount += 1
+      if (day) item.dailySales[day] = (item.dailySales[day] || 0) + (isReturn ? -1 : 1)
+    }
+    if (dailyMap.has(day)) {
+      const bucket = dailyMap.get(day)
+      bucket.revenue += amount
+      if (isReturn) bucket.returns += 1
+      else bucket.sales += 1
+    }
+  }
+
+  const sharedExpenses = settings.advertisingMonthly + settings.storageMonthly + settings.fixedMonthly
+  let totalRevenue = 0
+  let totalSales = 0
+  let totalReturns = 0
+  let totalOrders = orders.length
+  let totalStock = 0
+  for (const item of productMap.values()) {
+    totalRevenue += item.revenue
+    totalSales += item.salesCount
+    totalReturns += item.returnsCount
+    totalStock += item.stock
+  }
+
+  const sortedByRevenue = [...productMap.values()].sort((a, b) => b.revenue - a.revenue)
+  let cumulativeRevenue = 0
+  const positiveRevenue = Math.max(0, sortedByRevenue.reduce((sum, item) => sum + Math.max(0, item.revenue), 0))
+  for (const item of sortedByRevenue) {
+    const shareBefore = positiveRevenue > 0 ? cumulativeRevenue / positiveRevenue : 1
+    item.abc = item.revenue <= 0 ? 'C' : shareBefore < 0.8 ? 'A' : shareBefore < 0.95 ? 'B' : 'C'
+    cumulativeRevenue += Math.max(0, item.revenue)
+  }
+
+  const products = sortedByRevenue.map(item => {
+    const netUnits = Math.max(0, item.salesCount - item.returnsCount)
+    const averagePrice = netUnits > 0 ? Math.max(0, item.revenue) / netUnits : 0
+    const costKeyCandidates = [item.key, String(item.nmID || ''), item.vendorCode].filter(Boolean)
+    let unitCost = 0
+    for (const key of costKeyCandidates) {
+      if (settings.productCosts[key] != null) { unitCost = finiteNumber(settings.productCosts[key], 0); break }
+    }
+    if (!unitCost && settings.defaultCostPercent > 0 && averagePrice > 0) unitCost = averagePrice * settings.defaultCostPercent / 100
+    const hasCost = unitCost > 0
+    const cogs = unitCost * netUnits
+    const commission = Math.max(0, item.revenue) * settings.commissionPercent / 100
+    const tax = Math.max(0, item.revenue) * settings.taxPercent / 100
+    const logistics = item.salesCount * settings.logisticsPerSale
+    const revenueShare = positiveRevenue > 0 ? Math.max(0, item.revenue) / positiveRevenue : 0
+    const allocatedShared = sharedExpenses * revenueShare
+    const profit = hasCost ? item.revenue - cogs - commission - tax - logistics - allocatedShared : null
+    const margin = profit != null && item.revenue > 0 ? profit / item.revenue * 100 : null
+    const dailyAverage = item.salesCount / periodDays
+    const stockCoverDays = dailyAverage > 0 ? item.stock / dailyAverage : null
+    const values = [...dailyMap.keys()].map(day => item.dailySales[day] || 0)
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length
+    const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length
+    const cv = mean > 0 ? Math.sqrt(variance) / mean : null
+    const xyz = cv == null ? 'Z' : cv <= 0.5 ? 'X' : cv <= 1 ? 'Y' : 'Z'
+    const returnRate = item.salesCount > 0 ? item.returnsCount / item.salesCount * 100 : 0
+    const denominator = 1 - (settings.commissionPercent + settings.taxPercent) / 100
+    const breakevenPrice = hasCost && denominator > 0 ? (unitCost + settings.logisticsPerSale) / denominator : null
+    const targetDenominator = 1 - settings.targetMarginPercent / 100
+    const targetPrice = breakevenPrice != null && targetDenominator > 0 ? breakevenPrice / targetDenominator : null
+    const frozenMoney = item.salesCount === 0 && item.stock > 0 ? item.stock * (unitCost || averagePrice * 0.5) : 0
+    let stockStatus = 'В наличии'
+    if (item.stock <= 0) stockStatus = 'Нет остатка'
+    else if (stockCoverDays != null && stockCoverDays < 14) stockStatus = 'Заканчивается'
+    else if (stockCoverDays != null && stockCoverDays > 120) stockStatus = 'Избыток'
+    else if (item.salesCount === 0 && item.stock > 20) stockStatus = 'Без движения'
+
+    let recommendation = 'Контролировать динамику'
+    if (item.stock <= 0 && item.salesCount > 0) recommendation = 'Срочно пополнить остаток'
+    else if (stockCoverDays != null && stockCoverDays < 14) recommendation = 'Запланировать поставку'
+    else if (item.salesCount === 0 && item.stock > 20) recommendation = 'Проверить цену и запустить распродажу'
+    else if (returnRate >= 20 && item.salesCount >= 3) recommendation = 'Проверить карточку и причины возвратов'
+    else if (profit != null && profit < 0) recommendation = 'Повысить цену или сократить расходы'
+    else if (item.abc === 'A' && stockCoverDays != null && stockCoverDays < 30) recommendation = 'Сохранить цену и пополнить запас'
+
+    return {
+      ...item,
+      revenue: Math.round(item.revenue),
+      stock: Math.round(item.stock),
+      netUnits,
+      averagePrice: Math.round(averagePrice),
+      unitCost: Math.round(unitCost * 100) / 100,
+      cogs: Math.round(cogs),
+      commission: Math.round(commission),
+      logistics: Math.round(logistics),
+      profit: profit == null ? null : Math.round(profit),
+      margin: margin == null ? null : Math.round(margin * 10) / 10,
+      stockCoverDays: stockCoverDays == null ? null : Math.round(stockCoverDays),
+      returnRate: Math.round(returnRate * 10) / 10,
+      xyz,
+      stockStatus,
+      recommendation,
+      frozenMoney: Math.round(frozenMoney),
+      breakevenPrice: breakevenPrice == null ? null : Math.round(breakevenPrice),
+      targetPrice: targetPrice == null ? null : Math.round(targetPrice),
+      peakPrice: targetPrice == null ? null : Math.round(targetPrice * 1.15),
+    }
+  })
+
+  const totals = products.reduce((acc, item) => {
+    acc.cogs += item.cogs || 0
+    acc.commission += item.commission || 0
+    acc.logistics += item.logistics || 0
+    return acc
+  }, { cogs: 0, commission: 0, logistics: 0 })
+  const tax = Math.max(0, totalRevenue) * settings.taxPercent / 100
+  const costConfigured = products.some(item => item.unitCost > 0)
+  const operatingProfit = costConfigured
+    ? totalRevenue - totals.cogs - totals.commission - totals.logistics - tax - sharedExpenses
+    : null
+  const margin = operatingProfit != null && totalRevenue > 0 ? operatingProfit / totalRevenue * 100 : null
+  const averageDailySales = totalSales / periodDays
+  const stockCoverDays = averageDailySales > 0 ? totalStock / averageDailySales : null
+
+  const recommendations = []
+  const pushRecommendation = (priority, type, product, title, text, effect = '') => {
+    recommendations.push({ id: `${type}:${product?.key || recommendations.length}`, priority, type, productKey: product?.key || null, title, text, effect })
+  }
+  for (const item of products) {
+    if (item.stock <= 0 && item.salesCount > 0) pushRecommendation(1, 'stock', item, `Пополнить «${item.title}»`, `За 30 дней было ${item.salesCount} продаж, но текущий остаток равен нулю.`, `Риск потерять продажи`)
+    else if (item.stockCoverDays != null && item.stockCoverDays < 14) pushRecommendation(2, 'stock', item, `Запланировать поставку «${item.title}»`, `Запаса примерно на ${item.stockCoverDays} дней.`, `${item.stock} шт. на складах`)
+    if (item.salesCount === 0 && item.stock > 20) pushRecommendation(3, 'slow', item, `Разобрать неликвид «${item.title}»`, `Нет продаж за 30 дней при остатке ${item.stock} шт.`, item.frozenMoney ? `Заморожено ≈ ${item.frozenMoney} ₽` : '')
+    if (item.returnRate >= 20 && item.salesCount >= 3) pushRecommendation(2, 'quality', item, `Проверить качество «${item.title}»`, `Возвраты составляют ${item.returnRate}% от продаж.`, `${item.returnsCount} возвратов`)
+    if (item.profit != null && item.profit < 0) pushRecommendation(1, 'price', item, `Исправить экономику «${item.title}»`, `Расчётная прибыль отрицательная: ${item.profit} ₽.`, item.breakevenPrice ? `Цена в 0: ${item.breakevenPrice} ₽` : '')
+  }
+  recommendations.sort((a, b) => a.priority - b.priority)
+
+  const categoryMap = new Map()
+  for (const item of products) {
+    const key = item.brand || 'Без бренда'
+    const current = categoryMap.get(key) || { name: key, revenue: 0, sales: 0, stock: 0, profit: 0 }
+    current.revenue += item.revenue
+    current.sales += item.salesCount
+    current.stock += item.stock
+    if (item.profit != null) current.profit += item.profit
+    categoryMap.set(key, current)
+  }
+
+  return {
+    periodDays,
+    generatedAt: new Date().toISOString(),
+    summary: {
+      revenue: Math.round(totalRevenue),
+      orders: totalOrders,
+      sales: totalSales,
+      returns: totalReturns,
+      returnRate: totalSales > 0 ? Math.round(totalReturns / totalSales * 1000) / 10 : 0,
+      stockUnits: Math.round(totalStock),
+      activeProducts: products.length,
+      zeroStock: products.filter(item => item.stock <= 0).length,
+      lowStock: products.filter(item => item.stockStatus === 'Заканчивается').length,
+      slowStock: products.filter(item => ['Избыток', 'Без движения'].includes(item.stockStatus)).length,
+      stockCoverDays: stockCoverDays == null ? null : Math.round(stockCoverDays),
+      cogs: costConfigured ? Math.round(totals.cogs) : null,
+      commission: Math.round(totals.commission),
+      logistics: Math.round(totals.logistics),
+      advertising: Math.round(settings.advertisingMonthly),
+      storage: Math.round(settings.storageMonthly),
+      fixed: Math.round(settings.fixedMonthly),
+      tax: Math.round(tax),
+      operatingProfit: operatingProfit == null ? null : Math.round(operatingProfit),
+      margin: margin == null ? null : Math.round(margin * 10) / 10,
+    },
+    settings,
+    products,
+    dailyTrend: [...dailyMap.values()].map(row => ({ ...row, revenue: Math.round(row.revenue) })),
+    warehouses: [...warehouses.entries()].map(([name, quantity]) => ({ name, quantity: Math.round(quantity) })).sort((a, b) => b.quantity - a.quantity),
+    categories: [...categoryMap.values()].sort((a, b) => b.revenue - a.revenue),
+    recommendations: recommendations.slice(0, 30),
+    syncWarnings: Array.isArray(data.syncWarnings) ? data.syncWarnings : [],
   }
 }
 
@@ -499,12 +817,12 @@ function enrichProducts(products, stats) {
 }
 
 function withSyncLog(history, entry) { return [{ id: crypto.randomUUID(), at: new Date().toISOString(), ...entry }, ...(history || [])].slice(0, 20) }
-function buildDashboard(data) { const sales = data.sales || []; const orders = data.orders || []; const stocks = data.stocks || []; const revenue = sales.reduce((sum, row) => sum + Number(row.forPay || row.finishedPrice || row.priceWithDisc || 0), 0); const returns = sales.filter(row => String(row.saleID || '').startsWith('R')).length; const stockUnits = stocks.reduce((sum, row) => sum + Number(row.quantity ?? row.quantityFull ?? row.stock ?? row.stockCount ?? row.totalQuantity ?? row.availableQuantity ?? 0), 0); return { revenue: Math.round(revenue), orders: orders.length, sales: sales.length, returns, stockUnits, profit: null, margin: null, periodDays: 30 } }
+function buildDashboard(data, settings = DEFAULT_BUSINESS_SETTINGS) { const summary = buildCoreAnalytics(data, settings).summary; return { revenue: summary.revenue, orders: summary.orders, sales: summary.sales, returns: summary.returns, stockUnits: summary.stockUnits, profit: summary.operatingProfit, margin: summary.margin, periodDays: 30 } }
 
 app.get('/health', async (_req, res) => {
   let database = 'not-configured'
   if (pool) { try { await pool.query('SELECT 1'); database = 'ok' } catch { database = 'error' } }
-  res.json({ ok: true, service: 'elisei-api', version: '2.5.5', database })
+  res.json({ ok: true, service: 'elisei-api', version: '2.6.0', database })
 })
 
 app.post('/api/auth/register', async (req, res) => {
@@ -599,7 +917,9 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
     const history = withSyncLog(connection.sync_history, { status: 'success', durationMs: Date.now() - startedAt, counts, warnings })
     const updated = await pool.query(`UPDATE marketplace_connections SET data=$1::jsonb, sync_history=$2::jsonb, last_sync_at=NOW(), updated_at=NOW(), status='connected' WHERE id=$3 AND user_id=$4 RETURNING *`, [JSON.stringify(data), JSON.stringify(history), connection.id, req.auth.sub])
     const row = updated.rows[0]
-    res.json({ ok: true, partial: warnings.length > 0, warnings, lastSync: row.last_sync_at, counts, dashboard: buildDashboard(data), syncHistory: history })
+    const settings = await getBusinessSettings(req.auth.sub)
+    const core = buildCoreAnalytics(data, settings)
+    res.json({ ok: true, partial: warnings.length > 0, warnings, lastSync: row.last_sync_at, counts, dashboard: buildDashboard(data, settings), core, syncHistory: history })
   } catch (error) {
     const history = withSyncLog(connection.sync_history, { status: 'error', message: error.message, durationMs: Date.now() - startedAt })
     await pool.query(`UPDATE marketplace_connections SET sync_history=$1::jsonb, updated_at=NOW(), status='error' WHERE id=$2 AND user_id=$3`, [JSON.stringify(history), connection.id, req.auth.sub])
@@ -612,7 +932,25 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
 app.get('/api/wb/dashboard/:id', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, req.params.id)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
-  res.json({ dashboard: buildDashboard(connection.data || {}), lastSync: connection.last_sync_at || null })
+  const settings = await getBusinessSettings(req.auth.sub)
+  res.json({ dashboard: buildDashboard(connection.data || {}, settings), lastSync: connection.last_sync_at || null })
+})
+
+app.get('/api/wb/core/:id', authRequired, async (req, res) => {
+  const connection = await getConnection(req.auth.sub, req.params.id)
+  if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
+  const settings = await getBusinessSettings(req.auth.sub)
+  res.json({ core: buildCoreAnalytics(connection.data || {}, settings), lastSync: connection.last_sync_at || null })
+})
+
+app.get('/api/business/settings', authRequired, async (req, res) => {
+  res.json({ settings: await getBusinessSettings(req.auth.sub) })
+})
+
+app.put('/api/business/settings', authRequired, async (req, res) => {
+  const settings = await saveBusinessSettings(req.auth.sub, req.body || {})
+  const connection = await getConnection(req.auth.sub)
+  res.json({ settings, core: connection ? buildCoreAnalytics(connection.data || {}, settings) : null })
 })
 
 app.get('/api/wb/sync-history/:id', authRequired, async (req, res) => {
