@@ -184,6 +184,8 @@ const WB_SYNC_STAGES = Object.freeze({
   advertising: { label: 'Реклама', scope: 'promotion' },
 })
 const CORE_SYNC_SCOPES = [...new Set(Object.values(WB_SYNC_STAGES).map(item => item.scope))]
+const STOCK_DATA_SCHEMA_VERSION = 2
+const STOCK_DATA_SOURCE = 'wb_warehouse_remains'
 
 function decodeJwtPayload(value, invalidMessage) {
   try {
@@ -276,7 +278,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.7.1 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.7.3 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -682,19 +684,46 @@ function productKey(row) {
   return String(row?.nmId ?? row?.nmID ?? row?.nm_id ?? '').trim()
 }
 
+function isTrustedStockSnapshot(data = {}) {
+  const meta = data?.stockMeta && typeof data.stockMeta === 'object' ? data.stockMeta : {}
+  return Number(meta.schemaVersion || 0) === STOCK_DATA_SCHEMA_VERSION && meta.source === STOCK_DATA_SOURCE
+}
+
+function buildStockMeta(rows = [], extra = {}) {
+  const normalized = Array.isArray(rows) ? rows : []
+  const totalQuantity = normalized.reduce((sum, row) => sum + Math.max(0, Number(row?.quantity || 0) || 0), 0)
+  const productIds = new Set(normalized.map(row => String(row?.nmId ?? row?.nmID ?? '').trim()).filter(Boolean))
+  const warehouses = new Set(normalized.map(row => String(row?.warehouseName || '').trim()).filter(Boolean))
+  return {
+    schemaVersion: STOCK_DATA_SCHEMA_VERSION,
+    source: STOCK_DATA_SOURCE,
+    rows: normalized.length,
+    totalQuantity: Math.round(totalQuantity),
+    nonZeroRows: normalized.filter(row => Number(row?.quantity || 0) > 0).length,
+    zeroRows: normalized.filter(row => Number(row?.quantity || 0) <= 0).length,
+    products: productIds.size,
+    warehouses: warehouses.size,
+    receivedAt: new Date().toISOString(),
+    ...extra,
+  }
+}
+
 function buildCoreAnalytics(data = {}, rawSettings = {}) {
   const settings = sanitizeBusinessSettings({ ...DEFAULT_BUSINESS_SETTINGS, ...rawSettings })
   const rawProducts = Array.isArray(data.products) ? data.products : []
   const orders = Array.isArray(data.orders) ? data.orders : []
   const salesRows = Array.isArray(data.sales) ? data.sales : []
-  const stocks = Array.isArray(data.stocks) ? data.stocks : []
+  // Старые тестовые/ошибочно разобранные остатки не должны попадать в аналитику.
+  // Доверяем только снимку, который прошёл новый нормализатор и имеет метаданные происхождения.
+  const trustedStocks = isTrustedStockSnapshot(data)
+  const stocks = trustedStocks && Array.isArray(data.stocks) ? data.stocks : []
   const advertisingData = data?.advertising && typeof data.advertising === 'object' ? data.advertising : { campaigns: [], totals: {} }
   const stageStatus = data?.stageStatus && typeof data.stageStatus === 'object' ? data.stageStatus : {}
   const availability = {
     products: stageStatus.products?.available ?? rawProducts.length > 0,
     orders: stageStatus.orders?.available ?? orders.length > 0,
     sales: stageStatus.sales?.available ?? salesRows.length > 0,
-    stocks: stageStatus.stocks?.available ?? stocks.length > 0,
+    stocks: trustedStocks && Boolean(stageStatus.stocks?.available ?? true),
     advertising: stageStatus.advertising?.available ?? (Array.isArray(advertisingData.campaigns) && advertisingData.campaigns.length > 0),
   }
   const periodDays = 30
@@ -1233,7 +1262,8 @@ async function advanceWarehouseRemainsTask(token, state, { deadlineAt = 0 } = {}
     const report = await wbFetch(`${base}/tasks/${encodeURIComponent(taskId)}/download`, token, {
       label: 'Загрузка отчёта остатков WB', timeoutMs: 60000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
     })
-    return { pending: false, rows: normalizeWarehouseRemains(report), taskId: null, taskStatus: 'done' }
+    const rows = normalizeWarehouseRemains(report)
+    return { pending: false, rows, stockMeta: buildStockMeta(rows, { taskId }), taskId: null, taskStatus: 'done' }
   }
   if (taskStatus === 'canceled' || taskStatus === 'purged') {
     throw Object.assign(new Error(`Отчёт остатков WB завершён со статусом ${taskStatus}. Будет создан новый отчёт.`), { status: 502, resetTask: true })
@@ -1258,6 +1288,7 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
   state = await updateSyncState(connection.id, stage, { status:'running', lastAttemptAt:new Date().toISOString(), lastError:null, nextAllowedAt:null })
   try {
     let value
+    let meta = null
     if (stage === 'products') value = await loadProducts(selected.token, { deadlineAt })
     else if (stage === 'orders' || stage === 'sales') value = await loadStatisticsRows(stage, selected.token, { deadlineAt, previousRows:fallback })
     else if (stage === 'advertising') value = await loadAdvertising(selected.token, { deadlineAt })
@@ -1271,13 +1302,14 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
         return { stage, status:'pending', value:fallback, warning:'Остатки: отчёт WB формируется в фоне. ELISEI проверит его автоматически.', state }
       }
       value = result.rows
+      meta = result.stockMeta
     }
     const count = stageCount(stage, value)
     state = await updateSyncState(connection.id, stage, {
       status:'success', lastAttemptAt:new Date().toISOString(), lastSuccessAt:new Date().toISOString(), nextAllowedAt:null,
-      lastError:null, lastCount:count, taskId:null, metadata:{ tokenId:selected.row.id, tokenLabel:selected.row.label, primary:Boolean(selected.row.is_primary) },
+      lastError:null, lastCount:count, taskId:null, metadata:{ tokenId:selected.row.id, tokenLabel:selected.row.label, primary:Boolean(selected.row.is_primary), ...(stage === 'stocks' && meta ? meta : {}) },
     })
-    return { stage, status:'success', value, state }
+    return { stage, status:'success', value, meta, state }
   } catch (error) {
     const nextAllowedAt = error?.nextAllowedAt || (error?.retryAfterSeconds ? new Date(Date.now() + Number(error.retryAfterSeconds) * 1000).toISOString() : null)
     const status = Number(error?.status) === 429 ? 'rate_limited' : Number(error?.status) === 403 ? 'forbidden' : 'error'
@@ -1332,7 +1364,7 @@ app.get('/health', async (_req, res) => {
   res.json({
     ok: true,
     service: 'elisei-api',
-    version: '2.7.2',
+    version: '2.7.3',
     database,
     backgroundWorker: {
       running: backgroundWorkerState.running,
@@ -1506,7 +1538,7 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
           lastError:'Этап поставлен в фоновую очередь после достижения общего лимита времени.',
         })
         stageStatus[stage] = {
-          status:'queued', available:stageCount(stage, previousStageValue(data, stage)) > 0,
+          status:'queued', available:stage === 'stocks' ? isTrustedStockSnapshot(data) : stageCount(stage, previousStageValue(data, stage)) > 0,
           count:stageCount(stage, previousStageValue(data, stage)), lastSuccessAt:queuedState.last_success_at || null,
           nextAllowedAt:queuedState.next_allowed_at || null, error:queuedState.last_error || null,
         }
@@ -1516,10 +1548,16 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
       const result = await runSyncStage({ connection, tokens, data, stage, deadlineAt })
       results.push(result)
       if (result.warning) warnings.push(result.warning)
-      if (result.status === 'success') data[stageDataKey(stage)] = result.value
+      if (result.status === 'success') {
+        data[stageDataKey(stage)] = result.value
+        if (stage === 'stocks') data.stockMeta = result.meta || buildStockMeta(result.value)
+      }
+      const stageAvailable = stage === 'stocks'
+        ? isTrustedStockSnapshot(data)
+        : (result.status === 'success' || stageCount(stage, result.value) > 0)
       stageStatus[stage] = {
         status: result.status,
-        available: result.status === 'success' || stageCount(stage, result.value) > 0,
+        available: stageAvailable,
         count: stageCount(stage, result.value),
         lastSuccessAt: result.state?.last_success_at || null,
         nextAllowedAt: result.state?.next_allowed_at || null,
@@ -1638,13 +1676,13 @@ async function processPendingStockReports() {
         await updateSyncState(row.connection_id, 'stocks', { status:'pending', nextAllowedAt:result.nextAllowedAt, taskId:result.taskId, metadata:{ taskStatus:result.taskStatus }, lastError:null })
         continue
       }
-      const data = { ...(row.data || {}), stocks:result.rows }
-      data.stageStatus = { ...(data.stageStatus || {}), stocks:{ status:'success', available:true, count:result.rows.length, lastSuccessAt:new Date().toISOString(), nextAllowedAt:null, error:null } }
+      const data = { ...(row.data || {}), stocks:result.rows, stockMeta:result.stockMeta || buildStockMeta(result.rows) }
+      data.stageStatus = { ...(data.stageStatus || {}), stocks:{ status:'success', available:true, count:result.rows.length, totalQuantity:data.stockMeta.totalQuantity, lastSuccessAt:new Date().toISOString(), nextAllowedAt:null, error:null } }
       data.syncWarnings = (Array.isArray(data.syncWarnings) ? data.syncWarnings : []).filter(text => !String(text).startsWith('Остатки:'))
       const stats = { orders:Array.isArray(data.orders)?data.orders:[], sales:Array.isArray(data.sales)?data.sales:[], stocks:result.rows }
       data.products = enrichProducts(Array.isArray(data.products)?data.products:[], stats)
       await pool.query(`UPDATE marketplace_connections SET data=$1::jsonb,last_sync_at=NOW(),updated_at=NOW(),status='connected' WHERE id=$2`, [JSON.stringify(data), row.connection_id])
-      await updateSyncState(row.connection_id, 'stocks', { status:'success', lastSuccessAt:new Date().toISOString(), nextAllowedAt:null, lastError:null, lastCount:result.rows.length, taskId:null, metadata:{ taskStatus:'done' } })
+      await updateSyncState(row.connection_id, 'stocks', { status:'success', lastSuccessAt:new Date().toISOString(), nextAllowedAt:null, lastError:null, lastCount:result.rows.length, taskId:null, metadata:{ taskStatus:'done', ...data.stockMeta } })
     } catch (error) {
       const nextAllowedAt = error?.nextAllowedAt || new Date(Date.now() + 60000).toISOString()
       await updateSyncState(row.connection_id, 'stocks', { status:Number(error?.status)===429?'rate_limited':'pending', nextAllowedAt, lastError:error.message, taskId:error?.resetTask?null:row.task_id })
