@@ -53,7 +53,43 @@ async function initDatabase() {
       settings JSONB NOT NULL DEFAULT '{}'::jsonb,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE marketplace_connections ADD COLUMN IF NOT EXISTS seller_id TEXT;
+    CREATE TABLE IF NOT EXISTS wb_tokens (
+      id UUID PRIMARY KEY,
+      connection_id UUID NOT NULL REFERENCES marketplace_connections(id) ON DELETE CASCADE,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      label TEXT NOT NULL DEFAULT 'API-токен',
+      token_encrypted TEXT NOT NULL,
+      token_fingerprint TEXT NOT NULL,
+      seller_id TEXT,
+      token_type INTEGER NOT NULL DEFAULT 0,
+      token_type_label TEXT NOT NULL DEFAULT 'Неизвестный',
+      scopes JSONB NOT NULL DEFAULT '[]'::jsonb,
+      read_only BOOLEAN NOT NULL DEFAULT TRUE,
+      expires_at TIMESTAMPTZ,
+      status TEXT NOT NULL DEFAULT 'active',
+      last_checked_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(user_id, token_fingerprint)
+    );
+    CREATE INDEX IF NOT EXISTS wb_tokens_connection_idx ON wb_tokens(connection_id);
+    CREATE TABLE IF NOT EXISTS wb_sync_states (
+      connection_id UUID NOT NULL REFERENCES marketplace_connections(id) ON DELETE CASCADE,
+      stage TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'idle',
+      last_attempt_at TIMESTAMPTZ,
+      last_success_at TIMESTAMPTZ,
+      next_allowed_at TIMESTAMPTZ,
+      last_error TEXT,
+      last_count INTEGER NOT NULL DEFAULT 0,
+      task_id TEXT,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY(connection_id, stage)
+    );
   `)
+  await migrateLegacyWbTokens()
 }
 
 function requireBackendConfig() {
@@ -91,17 +127,50 @@ const activeSyncs = new Set()
 const WB_SCOPE_BITS = {
   content: { bit: 1, label: 'Контент' },
   analytics: { bit: 2, label: 'Аналитика' },
+  prices: { bit: 3, label: 'Цены и скидки' },
+  marketplace: { bit: 4, label: 'Маркетплейс' },
   statistics: { bit: 5, label: 'Статистика' },
+  promotion: { bit: 6, label: 'Продвижение' },
+  feedbacks: { bit: 7, label: 'Вопросы и отзывы' },
+  chat: { bit: 9, label: 'Чат с покупателями' },
+  supplies: { bit: 10, label: 'Поставки' },
+  returns: { bit: 11, label: 'Возвраты' },
+  documents: { bit: 12, label: 'Документы' },
+  finance: { bit: 13, label: 'Финансы' },
+  users: { bit: 16, label: 'Пользователи' },
 }
 const WB_TOKEN_TYPES = { 1: 'Базовый', 2: 'Тестовый', 3: 'Персональный', 4: 'Сервисный' }
+const WB_SYNC_STAGES = Object.freeze({
+  products: { label: 'Товары', scope: 'content' },
+  orders: { label: 'Заказы', scope: 'statistics' },
+  sales: { label: 'Продажи', scope: 'statistics' },
+  stocks: { label: 'Остатки', scope: 'analytics' },
+  advertising: { label: 'Реклама', scope: 'promotion' },
+})
 
-function decodeWbToken(token) {
+function decodeJwtPayload(value, invalidMessage) {
   try {
-    const parts = String(token || '').split('.')
+    const parts = String(value || '').split('.')
     if (parts.length < 2) throw new Error('not jwt')
     return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'))
   } catch {
-    throw Object.assign(new Error('API-ключ Wildberries имеет неверный формат'), { status: 401 })
+    throw Object.assign(new Error(invalidMessage), { status: 401 })
+  }
+}
+
+function decodeWbToken(token) {
+  return decodeJwtPayload(token, 'API-ключ Wildberries имеет неверный формат')
+}
+
+function inspectServiceSecret() {
+  if (!wbClientSecret) return null
+  const payload = decodeJwtPayload(wbClientSecret, 'WB_CLIENT_SECRET имеет неверный формат')
+  if (Number(payload.exp || 0) > 0 && Number(payload.exp) * 1000 <= Date.now()) {
+    throw Object.assign(new Error('Секрет сервиса Wildberries истёк. Обновите WB_CLIENT_SECRET в Render.'), { status: 401 })
+  }
+  return {
+    serviceId: String(payload.asid || ''),
+    expiresAt: Number(payload.exp || 0) > 0 ? new Date(Number(payload.exp) * 1000).toISOString() : null,
   }
 }
 
@@ -112,9 +181,6 @@ function inspectWbToken(token) {
   const scopes = Object.entries(WB_SCOPE_BITS)
     .filter(([, item]) => (scopeMask & (1 << item.bit)) !== 0)
     .map(([key]) => key)
-  const missing = Object.entries(WB_SCOPE_BITS)
-    .filter(([, item]) => (scopeMask & (1 << item.bit)) === 0)
-    .map(([, item]) => item.label)
 
   if (Number(payload.exp || 0) > 0 && Number(payload.exp) * 1000 <= Date.now()) {
     throw Object.assign(new Error('API-ключ Wildberries истёк. Создайте новый ключ.'), { status: 401 })
@@ -122,18 +188,31 @@ function inspectWbToken(token) {
   if (Boolean(payload.t) || typeId === 2) {
     throw Object.assign(new Error('Тестовый токен не имеет доступа к реальным данным кабинета'), { status: 403 })
   }
-  if (missing.length) {
-    throw Object.assign(new Error(`В API-ключе не хватает категорий: ${missing.join(', ')}. Нужны Контент, Аналитика и Статистика.`), { status: 403 })
+  if (!scopes.length) {
+    throw Object.assign(new Error('В API-ключе Wildberries не обнаружены категории доступа'), { status: 403 })
   }
-  if (typeId === 4 && !wbClientSecret) {
-    throw Object.assign(new Error('Сервисный токен WB требует секрет сервиса. В Render не задан WB_CLIENT_SECRET.'), { status: 403 })
+  if (typeId === 3) {
+    throw Object.assign(new Error('Персональный токен предназначен только для локальных программ продавца. Для облачного ELISEI используйте Базовый токен, а после регистрации сервиса — Сервисный токен или OAuth 2.0.'), { status: 403 })
+  }
+  const serviceSecret = inspectServiceSecret()
+  if (typeId === 4 && !serviceSecret) {
+    throw Object.assign(new Error('Сервисный токен WB работает только у зарегистрированного сервиса с WB_CLIENT_SECRET. Для текущей версии ELISEI используйте Базовый токен.'), { status: 403 })
+  }
+  const tokenServiceId = String(payload.asid || '')
+  if (typeId === 4 && serviceSecret?.serviceId && tokenServiceId && serviceSecret.serviceId !== tokenServiceId) {
+    throw Object.assign(new Error('Сервисный токен и WB_CLIENT_SECRET принадлежат разным сервисам Wildberries.'), { status: 403 })
   }
 
   return {
     scopes,
+    scopeLabels: scopes.map(scope => WB_SCOPE_BITS[scope]?.label || scope),
     typeId,
     tokenType: WB_TOKEN_TYPES[typeId] || 'Неизвестный',
     readOnly: (scopeMask & (1 << 30)) !== 0,
+    sellerId: String(payload.sid || ''),
+    tokenId: String(payload.id || ''),
+    serviceId: tokenServiceId,
+    expiresAt: Number(payload.exp || 0) > 0 ? new Date(Number(payload.exp) * 1000).toISOString() : null,
   }
 }
 
@@ -156,12 +235,15 @@ function humanWait(seconds) {
 }
 
 function authHeaders(token) {
+  const info = inspectWbToken(token)
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.6.0 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.7.0 (marketplace analytics)',
   }
-  if (wbClientSecret) headers['X-Client-Secret'] = wbClientSecret
+  // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
+  // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
+  if (wbClientSecret && (info.typeId === 1 || info.typeId === 4)) headers['X-Client-Secret'] = wbClientSecret
   return headers
 }
 
@@ -210,12 +292,13 @@ async function wbFetch(url, token, options = {}) {
     })
     lastError = error
 
-    if (response.status === 429 && attempt + 1 < maxAttempts) {
+    if (response.status === 429) {
       const retrySeconds = retryAfterSeconds(response, attempt)
       const delayMs = retryDelayMs(response, attempt)
       error.retryAfterSeconds = retrySeconds
-      if (delayMs > maxRetryDelayMs) {
-        error.message = `${label}: Wildberries установил паузу ${humanWait(retrySeconds)}. Долгое ожидание отменено — повторите синхронизацию позже.`
+      error.nextAllowedAt = new Date(Date.now() + retrySeconds * 1000).toISOString()
+      if (attempt + 1 >= maxAttempts || delayMs > maxRetryDelayMs) {
+        error.message = `${label}: Wildberries установил паузу ${humanWait(retrySeconds)}. ELISEI сохранит предыдущие данные и повторит этап после окончания паузы.`
         throw error
       }
       if (deadlineAt && Date.now() + delayMs >= deadlineAt) {
@@ -237,13 +320,12 @@ async function wbFetch(url, token, options = {}) {
 async function probeToken(token) {
   const info = inspectWbToken(token)
   // Лёгкий официальный /ping подтверждает, что токен активен и принимается WB.
-  // Он не расходует лимит тяжёлого отчёта остатков.
   await wbFetch('https://common-api.wildberries.ru/ping', token, {
     label: 'Проверка токена WB',
     timeoutMs: 15000,
     maxAttempts: 2,
   })
-  return info.scopes
+  return info
 }
 
 function encryptToken(value) {
@@ -262,6 +344,109 @@ function decryptToken(value) {
   return Buffer.concat([decipher.update(Buffer.from(encryptedPart, 'base64url')), decipher.final()]).toString('utf8')
 }
 
+function tokenFingerprint(token) {
+  return crypto.createHash('sha256').update(String(token || '')).digest('hex')
+}
+
+function publicWbToken(row) {
+  return {
+    id: row.id,
+    label: row.label,
+    scopes: Array.isArray(row.scopes) ? row.scopes : [],
+    scopeLabels: (Array.isArray(row.scopes) ? row.scopes : []).map(scope => WB_SCOPE_BITS[scope]?.label || scope),
+    tokenType: row.token_type_label,
+    readOnly: Boolean(row.read_only),
+    expiresAt: row.expires_at || null,
+    status: row.status,
+    lastCheckedAt: row.last_checked_at || null,
+    fingerprint: String(row.token_fingerprint || '').slice(0, 8),
+  }
+}
+
+function publicSyncState(row) {
+  return {
+    stage: row.stage,
+    label: WB_SYNC_STAGES[row.stage]?.label || row.stage,
+    status: row.status,
+    lastAttemptAt: row.last_attempt_at || null,
+    lastSuccessAt: row.last_success_at || null,
+    nextAllowedAt: row.next_allowed_at || null,
+    lastError: row.last_error || null,
+    lastCount: Number(row.last_count || 0),
+    taskId: row.task_id || null,
+    metadata: row.metadata || {},
+  }
+}
+
+async function getWbTokens(userId, connectionId) {
+  const result = await pool.query(`SELECT * FROM wb_tokens WHERE user_id=$1 AND connection_id=$2 AND status='active' ORDER BY created_at`, [userId, connectionId])
+  return result.rows
+}
+
+async function getSyncStates(connectionId) {
+  const result = await pool.query('SELECT * FROM wb_sync_states WHERE connection_id=$1 ORDER BY stage', [connectionId])
+  return result.rows
+}
+
+async function updateSyncState(connectionId, stage, patch = {}) {
+  const current = await pool.query('SELECT * FROM wb_sync_states WHERE connection_id=$1 AND stage=$2', [connectionId, stage])
+  const row = current.rows[0] || {}
+  const value = {
+    status: patch.status ?? row.status ?? 'idle',
+    lastAttemptAt: patch.lastAttemptAt === undefined ? row.last_attempt_at : patch.lastAttemptAt,
+    lastSuccessAt: patch.lastSuccessAt === undefined ? row.last_success_at : patch.lastSuccessAt,
+    nextAllowedAt: patch.nextAllowedAt === undefined ? row.next_allowed_at : patch.nextAllowedAt,
+    lastError: patch.lastError === undefined ? row.last_error : patch.lastError,
+    lastCount: patch.lastCount === undefined ? Number(row.last_count || 0) : Number(patch.lastCount || 0),
+    taskId: patch.taskId === undefined ? row.task_id : patch.taskId,
+    metadata: patch.metadata === undefined ? (row.metadata || {}) : patch.metadata,
+  }
+  const result = await pool.query(`
+    INSERT INTO wb_sync_states (connection_id,stage,status,last_attempt_at,last_success_at,next_allowed_at,last_error,last_count,task_id,metadata,updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,NOW())
+    ON CONFLICT (connection_id,stage) DO UPDATE SET
+      status=EXCLUDED.status,last_attempt_at=EXCLUDED.last_attempt_at,last_success_at=EXCLUDED.last_success_at,
+      next_allowed_at=EXCLUDED.next_allowed_at,last_error=EXCLUDED.last_error,last_count=EXCLUDED.last_count,
+      task_id=EXCLUDED.task_id,metadata=EXCLUDED.metadata,updated_at=NOW()
+    RETURNING *
+  `, [connectionId, stage, value.status, value.lastAttemptAt, value.lastSuccessAt, value.nextAllowedAt, value.lastError, value.lastCount, value.taskId, JSON.stringify(value.metadata || {})])
+  return result.rows[0]
+}
+
+function unionTokenScopes(tokens) {
+  return [...new Set(tokens.flatMap(row => Array.isArray(row.scopes) ? row.scopes : []))]
+}
+
+function chooseToken(tokens, scope) {
+  const row = tokens.find(item => Array.isArray(item.scopes) && item.scopes.includes(scope))
+  if (!row) return null
+  const token = decryptToken(row.token_encrypted)
+  return { row, token, info: inspectWbToken(token) }
+}
+
+async function migrateLegacyWbTokens() {
+  if (!pool || !encryptionKey) return
+  const result = await pool.query(`
+    SELECT mc.* FROM marketplace_connections mc
+    WHERE mc.marketplace='wildberries'
+      AND NOT EXISTS (SELECT 1 FROM wb_tokens wt WHERE wt.connection_id=mc.id)
+  `)
+  for (const row of result.rows) {
+    try {
+      const token = decryptToken(row.token_encrypted)
+      const info = inspectWbToken(token)
+      await pool.query(`
+        INSERT INTO wb_tokens (id,connection_id,user_id,label,token_encrypted,token_fingerprint,seller_id,token_type,token_type_label,scopes,read_only,expires_at,status,last_checked_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,'active',NOW())
+        ON CONFLICT (user_id,token_fingerprint) DO NOTHING
+      `, [crypto.randomUUID(), row.id, row.user_id, 'Основной токен', row.token_encrypted, tokenFingerprint(token), info.sellerId || null, info.typeId, info.tokenType, JSON.stringify(info.scopes), info.readOnly, info.expiresAt])
+      await pool.query('UPDATE marketplace_connections SET seller_id=COALESCE(seller_id,$1), scopes=$2::jsonb WHERE id=$3', [info.sellerId || null, JSON.stringify(info.scopes), row.id])
+    } catch (error) {
+      console.warn('Legacy WB token migration skipped:', row.id, error.message)
+    }
+  }
+}
+
 async function getConnection(userId, id = null) {
   const params = [userId]
   let sql = `SELECT * FROM marketplace_connections WHERE user_id = $1 AND marketplace = 'wildberries'`
@@ -270,11 +455,17 @@ async function getConnection(userId, id = null) {
   return result.rows[0] || null
 }
 
-function publicConnection(row) {
+function publicConnection(row, tokens = [], syncStates = []) {
+  const scopes = tokens.length ? unionTokenScopes(tokens) : (row?.scopes || [])
   return {
-    connected: Boolean(row),
+    connected: Boolean(row && tokens.length),
+    hasConnection: Boolean(row),
     connectionId: row?.id || null,
-    scopes: row?.scopes || [],
+    sellerId: row?.seller_id || null,
+    scopes,
+    scopeLabels: scopes.map(scope => WB_SCOPE_BITS[scope]?.label || scope),
+    tokens: tokens.map(publicWbToken),
+    syncStates: syncStates.map(publicSyncState),
     status: row?.status || 'disconnected',
     connectedAt: row?.created_at || null,
     lastSync: row?.last_sync_at || null,
@@ -357,6 +548,15 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
   const orders = Array.isArray(data.orders) ? data.orders : []
   const salesRows = Array.isArray(data.sales) ? data.sales : []
   const stocks = Array.isArray(data.stocks) ? data.stocks : []
+  const advertisingData = data?.advertising && typeof data.advertising === 'object' ? data.advertising : { campaigns: [], totals: {} }
+  const stageStatus = data?.stageStatus && typeof data.stageStatus === 'object' ? data.stageStatus : {}
+  const availability = {
+    products: stageStatus.products?.available ?? rawProducts.length > 0,
+    orders: stageStatus.orders?.available ?? orders.length > 0,
+    sales: stageStatus.sales?.available ?? salesRows.length > 0,
+    stocks: stageStatus.stocks?.available ?? stocks.length > 0,
+    advertising: stageStatus.advertising?.available ?? (Array.isArray(advertisingData.campaigns) && advertisingData.campaigns.length > 0),
+  }
   const periodDays = 30
   const productMap = new Map()
   const ensure = (row = {}) => {
@@ -430,7 +630,9 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     }
   }
 
-  const sharedExpenses = settings.advertisingMonthly + settings.storageMonthly + settings.fixedMonthly
+  const actualAdvertisingSpend = Math.max(0, finiteNumber(advertisingData?.totals?.spend, 0))
+  const advertisingExpense = availability.advertising ? actualAdvertisingSpend : settings.advertisingMonthly
+  const sharedExpenses = advertisingExpense + settings.storageMonthly + settings.fixedMonthly
   let totalRevenue = 0
   let totalSales = 0
   let totalReturns = 0
@@ -471,7 +673,7 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     const profit = hasCost ? item.revenue - cogs - commission - tax - logistics - allocatedShared : null
     const margin = profit != null && item.revenue > 0 ? profit / item.revenue * 100 : null
     const dailyAverage = item.salesCount / periodDays
-    const stockCoverDays = dailyAverage > 0 ? item.stock / dailyAverage : null
+    const stockCoverDays = availability.stocks && dailyAverage > 0 ? item.stock / dailyAverage : null
     const values = [...dailyMap.keys()].map(day => item.dailySales[day] || 0)
     const mean = values.reduce((sum, value) => sum + value, 0) / values.length
     const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length
@@ -482,17 +684,17 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     const breakevenPrice = hasCost && denominator > 0 ? (unitCost + settings.logisticsPerSale) / denominator : null
     const targetDenominator = 1 - settings.targetMarginPercent / 100
     const targetPrice = breakevenPrice != null && targetDenominator > 0 ? breakevenPrice / targetDenominator : null
-    const frozenMoney = item.salesCount === 0 && item.stock > 0 ? item.stock * (unitCost || averagePrice * 0.5) : 0
-    let stockStatus = 'В наличии'
-    if (item.stock <= 0) stockStatus = 'Нет остатка'
-    else if (stockCoverDays != null && stockCoverDays < 14) stockStatus = 'Заканчивается'
-    else if (stockCoverDays != null && stockCoverDays > 120) stockStatus = 'Избыток'
-    else if (item.salesCount === 0 && item.stock > 20) stockStatus = 'Без движения'
+    const frozenMoney = availability.stocks && item.salesCount === 0 && item.stock > 0 ? item.stock * (unitCost || averagePrice * 0.5) : 0
+    let stockStatus = availability.stocks ? 'В наличии' : 'Не загружено'
+    if (availability.stocks && item.stock <= 0) stockStatus = 'Нет остатка'
+    else if (availability.stocks && stockCoverDays != null && stockCoverDays < 14) stockStatus = 'Заканчивается'
+    else if (availability.stocks && stockCoverDays != null && stockCoverDays > 120) stockStatus = 'Избыток'
+    else if (availability.stocks && item.salesCount === 0 && item.stock > 20) stockStatus = 'Без движения'
 
-    let recommendation = 'Контролировать динамику'
-    if (item.stock <= 0 && item.salesCount > 0) recommendation = 'Срочно пополнить остаток'
-    else if (stockCoverDays != null && stockCoverDays < 14) recommendation = 'Запланировать поставку'
-    else if (item.salesCount === 0 && item.stock > 20) recommendation = 'Проверить цену и запустить распродажу'
+    let recommendation = availability.stocks ? 'Контролировать динамику' : 'Дождаться загрузки остатков WB'
+    if (availability.stocks && item.stock <= 0 && item.salesCount > 0) recommendation = 'Срочно пополнить остаток'
+    else if (availability.stocks && stockCoverDays != null && stockCoverDays < 14) recommendation = 'Запланировать поставку'
+    else if (availability.stocks && item.salesCount === 0 && item.stock > 20) recommendation = 'Проверить цену и запустить распродажу'
     else if (returnRate >= 20 && item.salesCount >= 3) recommendation = 'Проверить карточку и причины возвратов'
     else if (profit != null && profit < 0) recommendation = 'Повысить цену или сократить расходы'
     else if (item.abc === 'A' && stockCoverDays != null && stockCoverDays < 30) recommendation = 'Сохранить цену и пополнить запас'
@@ -500,7 +702,8 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     return {
       ...item,
       revenue: Math.round(item.revenue),
-      stock: Math.round(item.stock),
+      stock: availability.stocks ? Math.round(item.stock) : null,
+      stockAvailable: availability.stocks,
       netUnits,
       averagePrice: Math.round(averagePrice),
       unitCost: Math.round(unitCost * 100) / 100,
@@ -541,13 +744,33 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     recommendations.push({ id: `${type}:${product?.key || recommendations.length}`, priority, type, productKey: product?.key || null, title, text, effect })
   }
   for (const item of products) {
-    if (item.stock <= 0 && item.salesCount > 0) pushRecommendation(1, 'stock', item, `Пополнить «${item.title}»`, `За 30 дней было ${item.salesCount} продаж, но текущий остаток равен нулю.`, `Риск потерять продажи`)
-    else if (item.stockCoverDays != null && item.stockCoverDays < 14) pushRecommendation(2, 'stock', item, `Запланировать поставку «${item.title}»`, `Запаса примерно на ${item.stockCoverDays} дней.`, `${item.stock} шт. на складах`)
-    if (item.salesCount === 0 && item.stock > 20) pushRecommendation(3, 'slow', item, `Разобрать неликвид «${item.title}»`, `Нет продаж за 30 дней при остатке ${item.stock} шт.`, item.frozenMoney ? `Заморожено ≈ ${item.frozenMoney} ₽` : '')
+    if (availability.stocks && item.stock <= 0 && item.salesCount > 0) pushRecommendation(1, 'stock', item, `Пополнить «${item.title}»`, `За 30 дней было ${item.salesCount} продаж, но текущий остаток равен нулю.`, `Риск потерять продажи`)
+    else if (availability.stocks && item.stockCoverDays != null && item.stockCoverDays < 14) pushRecommendation(2, 'stock', item, `Запланировать поставку «${item.title}»`, `Запаса примерно на ${item.stockCoverDays} дней.`, `${item.stock} шт. на складах`)
+    if (availability.stocks && item.salesCount === 0 && item.stock > 20) pushRecommendation(3, 'slow', item, `Разобрать неликвид «${item.title}»`, `Нет продаж за 30 дней при остатке ${item.stock} шт.`, item.frozenMoney ? `Заморожено ≈ ${item.frozenMoney} ₽` : '')
     if (item.returnRate >= 20 && item.salesCount >= 3) pushRecommendation(2, 'quality', item, `Проверить качество «${item.title}»`, `Возвраты составляют ${item.returnRate}% от продаж.`, `${item.returnsCount} возвратов`)
     if (item.profit != null && item.profit < 0) pushRecommendation(1, 'price', item, `Исправить экономику «${item.title}»`, `Расчётная прибыль отрицательная: ${item.profit} ₽.`, item.breakevenPrice ? `Цена в 0: ${item.breakevenPrice} ₽` : '')
   }
   recommendations.sort((a, b) => a.priority - b.priority)
+
+  const stockDetailMap = new Map()
+  if (availability.stocks) {
+    for (const row of stocks) {
+      const key = productKey(row) || String(row?.vendorCode || '').trim()
+      const product = productMap.get(key)
+      const warehouseName = String(row?.warehouseName || row?.warehouse || 'Все склады').trim() || 'Все склады'
+      const techSize = String(row?.techSize || row?.size || '—').trim() || '—'
+      const barcode = String(row?.barcode || '').trim()
+      const detailKey = [key, barcode, techSize, warehouseName].join('|')
+      const quantity = Math.max(0, firstNumber(row, ['quantity','quantityFull','stock','stockCount','totalQuantity','availableQuantity'], 0))
+      const current = stockDetailMap.get(detailKey) || {
+        key:detailKey, nmID:row?.nmId ?? row?.nmID ?? product?.nmID ?? null,
+        vendorCode:row?.vendorCode || product?.vendorCode || '', title:product?.title || row?.subjectName || 'Товар',
+        brand:product?.brand || row?.brand || '', barcode, techSize, warehouseName, quantity:0,
+      }
+      current.quantity += quantity
+      stockDetailMap.set(detailKey, current)
+    }
+  }
 
   const categoryMap = new Map()
   for (const item of products) {
@@ -564,21 +787,22 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     periodDays,
     generatedAt: new Date().toISOString(),
     summary: {
-      revenue: Math.round(totalRevenue),
-      orders: totalOrders,
-      sales: totalSales,
-      returns: totalReturns,
-      returnRate: totalSales > 0 ? Math.round(totalReturns / totalSales * 1000) / 10 : 0,
-      stockUnits: Math.round(totalStock),
+      revenue: availability.sales ? Math.round(totalRevenue) : null,
+      orders: availability.orders ? totalOrders : null,
+      sales: availability.sales ? totalSales : null,
+      returns: availability.sales ? totalReturns : null,
+      returnRate: availability.sales ? (totalSales > 0 ? Math.round(totalReturns / totalSales * 1000) / 10 : 0) : null,
+      stockUnits: availability.stocks ? Math.round(totalStock) : null,
       activeProducts: products.length,
-      zeroStock: products.filter(item => item.stock <= 0).length,
-      lowStock: products.filter(item => item.stockStatus === 'Заканчивается').length,
-      slowStock: products.filter(item => ['Избыток', 'Без движения'].includes(item.stockStatus)).length,
+      zeroStock: availability.stocks ? products.filter(item => item.stock <= 0).length : null,
+      lowStock: availability.stocks ? products.filter(item => item.stockStatus === 'Заканчивается').length : null,
+      slowStock: availability.stocks ? products.filter(item => ['Избыток', 'Без движения'].includes(item.stockStatus)).length : null,
       stockCoverDays: stockCoverDays == null ? null : Math.round(stockCoverDays),
       cogs: costConfigured ? Math.round(totals.cogs) : null,
       commission: Math.round(totals.commission),
       logistics: Math.round(totals.logistics),
-      advertising: Math.round(settings.advertisingMonthly),
+      advertising: Math.round(advertisingExpense),
+      advertisingSource: availability.advertising ? 'wb_api' : 'manual',
       storage: Math.round(settings.storageMonthly),
       fixed: Math.round(settings.fixedMonthly),
       tax: Math.round(tax),
@@ -586,9 +810,19 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
       margin: margin == null ? null : Math.round(margin * 10) / 10,
     },
     settings,
+    availability,
+    stageStatus,
+    advertising: {
+      campaigns: Array.isArray(advertisingData.campaigns) ? advertisingData.campaigns : [],
+      totals: advertisingData.totals || {},
+      period: advertisingData.period || null,
+      truncated: Boolean(advertisingData.truncated),
+      source: availability.advertising ? 'wb_api' : 'manual',
+    },
     products,
     dailyTrend: [...dailyMap.values()].map(row => ({ ...row, revenue: Math.round(row.revenue) })),
     warehouses: [...warehouses.entries()].map(([name, quantity]) => ({ name, quantity: Math.round(quantity) })).sort((a, b) => b.quantity - a.quantity),
+    stockDetails: [...stockDetailMap.values()].map(item => ({ ...item, quantity:Math.round(item.quantity) })).sort((a,b) => b.quantity - a.quantity),
     categories: [...categoryMap.values()].sort((a, b) => b.revenue - a.revenue),
     recommendations: recommendations.slice(0, 30),
     syncWarnings: Array.isArray(data.syncWarnings) ? data.syncWarnings : [],
@@ -628,157 +862,290 @@ async function loadProducts(token, { limit = 100, maxPages = 300, deadlineAt = 0
   return products
 }
 
-function extractStockRows(payload) {
-  if (Array.isArray(payload?.data?.items)) return payload.data.items
-  if (Array.isArray(payload)) return payload
-  if (Array.isArray(payload?.data)) return payload.data
-  if (Array.isArray(payload?.stocks)) return payload.stocks
-  if (Array.isArray(payload?.items)) return payload.items
-  if (Array.isArray(payload?.result?.data)) return payload.result.data
-  return []
-}
-
-async function loadWbWarehouseStocks(token, { limit = 250000, maxPages = 20, deadlineAt = 0 } = {}) {
-  const endpoint = 'https://seller-analytics-api.wildberries.ru/api/analytics/v1/stocks-report/wb-warehouses'
-  const rows = []
-  let offset = 0
-
-  for (let page = 0; page < maxPages; page += 1) {
-    const payload = await wbFetch(endpoint, token, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ limit, offset }),
-      label: 'Остатки WB',
-      timeoutMs: 120000,
-      maxAttempts: 2,
-      maxRetryDelayMs: 15000,
-      deadlineAt,
-    })
-    const batch = extractStockRows(payload)
-    rows.push(...batch)
-
-    if (batch.length < limit) break
-    offset += batch.length
-    await sleep(21000)
-  }
-  return rows
-}
-
-
 function normalizeWarehouseRemains(report) {
   const rows = []
   for (const item of Array.isArray(report) ? report : []) {
     const warehouses = Array.isArray(item?.warehouses) ? item.warehouses : []
-    const totalRow = warehouses.find(row => String(row?.warehouseName || '').trim().toLowerCase() === 'всего находится на складах')
-    const quantity = totalRow
-      ? Number(totalRow.quantity || 0)
-      : warehouses
-          .filter(row => !String(row?.warehouseName || '').toLowerCase().includes('в пути'))
-          .reduce((sum, row) => sum + Number(row?.quantity || 0), 0)
-    rows.push({
-      nmId: item?.nmId ?? item?.nmID,
-      vendorCode: item?.vendorCode || '',
-      barcode: item?.barcode || '',
-      techSize: item?.techSize || '',
-      quantity: Number.isFinite(quantity) ? quantity : 0,
+    const physical = warehouses.filter(row => {
+      const name = String(row?.warehouseName || '').trim().toLowerCase()
+      return name && name !== 'всего находится на складах' && !name.includes('в пути')
     })
+    const source = physical.length
+      ? physical
+      : warehouses.filter(row => String(row?.warehouseName || '').trim().toLowerCase() === 'всего находится на складах')
+    if (!source.length) {
+      rows.push({
+        nmId:item?.nmId ?? item?.nmID, vendorCode:item?.vendorCode || '', barcode:item?.barcode || '',
+        techSize:item?.techSize || '', warehouseName:'Все склады', quantity:0,
+      })
+      continue
+    }
+    for (const warehouse of source) {
+      const quantity = Number(warehouse?.quantity || 0)
+      rows.push({
+        nmId:item?.nmId ?? item?.nmID,
+        vendorCode:item?.vendorCode || '',
+        barcode:item?.barcode || '',
+        techSize:item?.techSize || '',
+        brand:item?.brand || '',
+        subjectName:item?.subjectName || '',
+        warehouseName:String(warehouse?.warehouseName || 'Все склады').trim() || 'Все склады',
+        quantity:Number.isFinite(quantity) ? Math.max(0, quantity) : 0,
+      })
+    }
   }
   return rows
 }
 
-async function loadWarehouseRemainsReport(token, { maxWaitMs = 55000, deadlineAt = 0 } = {}) {
-  const base = 'https://seller-analytics-api.wildberries.ru/api/v1/warehouse_remains'
-  const created = await wbFetch(`${base}?locale=ru`, token, {
-    label: 'Создание отчёта остатков WB',
-    timeoutMs: 30000,
-    maxAttempts: 2,
-    maxRetryDelayMs: 10000,
-    deadlineAt,
-  })
-  const taskId = created?.data?.taskId
-  if (!taskId) throw Object.assign(new Error('Отчёт остатков WB: не получен taskId'), { status: 502 })
+function stageDataKey(stage) {
+  return stage === 'advertising' ? 'advertising' : stage
+}
 
-  const startedAt = Date.now()
-  let status = 'new'
-  while (Date.now() - startedAt < maxWaitMs && (!deadlineAt || Date.now() + 5200 < deadlineAt)) {
-    await sleep(5200)
-    const state = await wbFetch(`${base}/tasks/${encodeURIComponent(taskId)}/status`, token, {
-      label: 'Проверка отчёта остатков WB',
-      timeoutMs: 20000,
-      maxAttempts: 2,
-      maxRetryDelayMs: 10000,
-      deadlineAt,
+function previousStageValue(data, stage) {
+  const value = data?.[stageDataKey(stage)]
+  if (stage === 'advertising') return value && typeof value === 'object' ? value : { campaigns: [], totals: {}, period: null }
+  return Array.isArray(value) ? value : []
+}
+
+function stageCount(stage, value) {
+  if (stage === 'advertising') return Array.isArray(value?.campaigns) ? value.campaigns.length : 0
+  return Array.isArray(value) ? value.length : 0
+}
+
+function statisticRowKey(kind, row, index = 0) {
+  const explicit = row?.srid ?? row?.rid ?? row?.odid ?? row?.saleID ?? row?.sticker
+  if (explicit != null && String(explicit).trim()) return `${kind}:${String(explicit).trim()}`
+  return [
+    kind,
+    row?.gNumber || '',
+    row?.nmId ?? row?.nmID ?? '',
+    row?.barcode || '',
+    row?.date || row?.saleDate || row?.orderDate || '',
+    index,
+  ].join(':')
+}
+
+function mergeStatisticsRows(kind, previousRows, incomingRows) {
+  const map = new Map()
+  const cutoff = Date.now() - 95 * 86400000
+  const add = (row, index) => {
+    const eventDate = Date.parse(row?.date || row?.saleDate || row?.orderDate || row?.lastChangeDate || '')
+    if (Number.isFinite(eventDate) && eventDate < cutoff) return
+    map.set(statisticRowKey(kind, row, index), row)
+  }
+  ;(Array.isArray(previousRows) ? previousRows : []).forEach(add)
+  ;(Array.isArray(incomingRows) ? incomingRows : []).forEach(add)
+  return [...map.values()].sort((a, b) => Date.parse(b?.lastChangeDate || b?.date || '') - Date.parse(a?.lastChangeDate || a?.date || ''))
+}
+
+function incrementalDateFrom(previousRows) {
+  const latest = (Array.isArray(previousRows) ? previousRows : []).reduce((max, row) => {
+    const value = Date.parse(row?.lastChangeDate || row?.date || '')
+    return Number.isFinite(value) ? Math.max(max, value) : max
+  }, 0)
+  // Небольшое перекрытие защищает от пограничных обновлений и поздних изменений статуса.
+  return latest ? new Date(Math.max(Date.now() - 95 * 86400000, latest - 60 * 60000)).toISOString() : isoDaysAgo(30)
+}
+
+async function loadStatisticsRows(kind, token, { deadlineAt = 0, previousRows = [] } = {}) {
+  const endpoint = kind === 'orders' ? 'orders' : 'sales'
+  const label = kind === 'orders' ? 'Заказы WB' : 'Продажи WB'
+  const dateFrom = incrementalDateFrom(previousRows)
+  const payload = await wbFetch(
+    `https://statistics-api.wildberries.ru/api/v1/supplier/${endpoint}?dateFrom=${encodeURIComponent(dateFrom)}&flag=0`,
+    token,
+    { label, timeoutMs: 45000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt },
+  )
+  return mergeStatisticsRows(kind, previousRows, Array.isArray(payload) ? payload : [])
+}
+
+function normalizeCampaignList(payload) {
+  const result = []
+  const seen = new Set()
+  const push = (row, inherited = {}) => {
+    const advertId = Number(row?.advertId ?? row?.advert_id ?? row?.id)
+    if (!Number.isFinite(advertId) || seen.has(advertId)) return
+    seen.add(advertId)
+    result.push({
+      advertId,
+      name: row?.name || row?.advertName || row?.campaignName || `Кампания ${advertId}`,
+      status: Number(row?.status ?? inherited.status ?? 0),
+      type: Number(row?.type ?? inherited.type ?? 0),
+      paymentType: row?.payment_type || row?.paymentType || inherited.paymentType || '',
+      changeTime: row?.changeTime || row?.change_time || null,
     })
-    status = String(state?.data?.status || '').toLowerCase()
-    if (status === 'done') break
-    if (status === 'canceled' || status === 'purged') {
-      throw Object.assign(new Error(`Отчёт остатков WB завершён со статусом ${status}`), { status: 502 })
+  }
+  const walk = (node, inherited = {}) => {
+    if (!node) return
+    if (Array.isArray(node)) { node.forEach(item => walk(item, inherited)); return }
+    if (typeof node !== 'object') return
+    const next = {
+      status: node.status ?? inherited.status,
+      type: node.type ?? inherited.type,
+      paymentType: node.payment_type ?? inherited.paymentType,
     }
+    if (node.advertId != null || node.advert_id != null || (node.id != null && (node.status != null || node.name))) push(node, next)
+    if (Array.isArray(node.advert_list)) node.advert_list.forEach(item => push(item, next))
+    if (Array.isArray(node.adverts)) node.adverts.forEach(item => walk(item, next))
+    if (Array.isArray(node.items)) node.items.forEach(item => walk(item, next))
+  }
+  walk(payload)
+  return result
+}
+
+const AD_METRIC_KEYS = ['views','clicks','sum','atbs','orders','shks','sum_price','orders_price']
+function numericMetric(row, key) {
+  const value = Number(row?.[key])
+  return Number.isFinite(value) ? value : 0
+}
+
+function collectNmAdStats(node, output = []) {
+  if (!node) return output
+  if (Array.isArray(node)) { node.forEach(item => collectNmAdStats(item, output)); return output }
+  if (typeof node !== 'object') return output
+  if (node.nmId != null || node.nmID != null || node.nm_id != null) output.push(node)
+  for (const value of Object.values(node)) if (value && typeof value === 'object') collectNmAdStats(value, output)
+  return output
+}
+
+function normalizeAdvertisingStats(payload, campaigns) {
+  const rows = Array.isArray(payload) ? payload : Array.isArray(payload?.adverts) ? payload.adverts : Array.isArray(payload?.data) ? payload.data : []
+  const statsById = new Map()
+  for (const row of rows) {
+    const advertId = Number(row?.advertId ?? row?.advert_id ?? row?.id)
+    if (!Number.isFinite(advertId)) continue
+    const productRows = collectNmAdStats(row, [])
+    const directHasMetrics = AD_METRIC_KEYS.some(key => Number.isFinite(Number(row?.[key])))
+    const source = productRows.length ? productRows : directHasMetrics ? [row] : []
+    const metrics = source.reduce((acc, item) => {
+      for (const key of AD_METRIC_KEYS) acc[key] += numericMetric(item, key)
+      return acc
+    }, Object.fromEntries(AD_METRIC_KEYS.map(key => [key, 0])))
+    const nmStats = productRows.map(item => ({
+      nmId: Number(item.nmId ?? item.nmID ?? item.nm_id) || null,
+      name: item.name || item.title || '',
+      views: numericMetric(item, 'views'), clicks: numericMetric(item, 'clicks'), spend: numericMetric(item, 'sum'),
+      orders: numericMetric(item, 'orders'), revenue: numericMetric(item, 'orders_price') || numericMetric(item, 'sum_price'),
+    }))
+    statsById.set(advertId, { ...metrics, nmStats })
   }
 
-  if (status !== 'done') {
-    throw Object.assign(new Error('Отчёт остатков WB формируется дольше 55 секунд. Долгое ожидание остановлено; повторите синхронизацию позже.'), { status: 504 })
-  }
-
-  const report = await wbFetch(`${base}/tasks/${encodeURIComponent(taskId)}/download`, token, {
-    label: 'Загрузка отчёта остатков WB',
-    timeoutMs: 60000,
-    maxAttempts: 2,
-    maxRetryDelayMs: 10000,
-    deadlineAt,
+  const normalized = campaigns.map(campaign => {
+    const stats = statsById.get(campaign.advertId) || Object.fromEntries(AD_METRIC_KEYS.map(key => [key, 0]))
+    const spend = Number(stats.sum || 0)
+    const views = Number(stats.views || 0)
+    const clicks = Number(stats.clicks || 0)
+    const orders = Number(stats.orders || 0)
+    const revenue = Number(stats.orders_price || stats.sum_price || 0)
+    return {
+      ...campaign,
+      views, clicks, spend, orders, revenue,
+      ctr: views > 0 ? clicks / views * 100 : 0,
+      cpc: clicks > 0 ? spend / clicks : 0,
+      crr: revenue > 0 ? spend / revenue * 100 : null,
+      nmStats: stats.nmStats || [],
+    }
   })
-  return normalizeWarehouseRemains(report)
+  const totals = normalized.reduce((acc, item) => {
+    acc.views += item.views; acc.clicks += item.clicks; acc.spend += item.spend; acc.orders += item.orders; acc.revenue += item.revenue
+    return acc
+  }, { views: 0, clicks: 0, spend: 0, orders: 0, revenue: 0 })
+  totals.ctr = totals.views > 0 ? totals.clicks / totals.views * 100 : 0
+  totals.cpc = totals.clicks > 0 ? totals.spend / totals.clicks : 0
+  totals.crr = totals.revenue > 0 ? totals.spend / totals.revenue * 100 : null
+  return { campaigns: normalized, totals }
 }
 
-async function safeSyncStage(label, loader, fallback, warnings) {
-  try {
-    return await loader()
-  } catch (error) {
-    if ([402, 403, 429, 504].includes(Number(error?.status))) {
-      warnings.push(`${label}: ${error.message}${Array.isArray(fallback) && fallback.length ? ' Сохранены предыдущие данные.' : ''}`)
-      return Array.isArray(fallback) ? fallback : []
-    }
-    throw error
+async function loadAdvertising(token, { deadlineAt = 0 } = {}) {
+  const campaignPayload = await wbFetch('https://advert-api.wildberries.ru/api/advert/v2/adverts?statuses=4,7,8,9,11', token, {
+    label: 'Кампании WB', timeoutMs: 45000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
+  })
+  const allCampaigns = normalizeCampaignList(campaignPayload)
+  const campaigns = allCampaigns.slice(0, 50)
+  if (!campaigns.length) return { campaigns: [], totals: { views:0, clicks:0, spend:0, orders:0, revenue:0, ctr:0, cpc:0, crr:null }, period: { days:30 }, truncated:false }
+  const endDate = new Date().toISOString().slice(0, 10)
+  const beginDate = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10)
+  const ids = campaigns.map(item => item.advertId).join(',')
+  const statsPayload = await wbFetch(`https://advert-api.wildberries.ru/adv/v3/fullstats?ids=${encodeURIComponent(ids)}&beginDate=${beginDate}&endDate=${endDate}`, token, {
+    label: 'Статистика рекламы WB', timeoutMs: 60000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
+  })
+  const normalized = normalizeAdvertisingStats(statsPayload, campaigns)
+  return { ...normalized, period: { beginDate, endDate, days:30 }, truncated: allCampaigns.length > campaigns.length, totalCampaigns: allCampaigns.length }
+}
+
+async function advanceWarehouseRemainsTask(token, state, { deadlineAt = 0 } = {}) {
+  const base = 'https://seller-analytics-api.wildberries.ru/api/v1/warehouse_remains'
+  if (!state?.task_id) {
+    const created = await wbFetch(`${base}?locale=ru`, token, {
+      label: 'Создание отчёта остатков WB', timeoutMs: 30000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
+    })
+    const taskId = created?.data?.taskId
+    if (!taskId) throw Object.assign(new Error('Отчёт остатков WB: не получен taskId'), { status: 502 })
+    return { pending: true, taskId, taskStatus: 'new', nextAllowedAt: new Date(Date.now() + 30000).toISOString() }
   }
+
+  const taskId = state.task_id
+  const statusPayload = await wbFetch(`${base}/tasks/${encodeURIComponent(taskId)}/status`, token, {
+    label: 'Проверка отчёта остатков WB', timeoutMs: 25000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
+  })
+  const taskStatus = String(statusPayload?.data?.status || '').toLowerCase()
+  if (taskStatus === 'done') {
+    const report = await wbFetch(`${base}/tasks/${encodeURIComponent(taskId)}/download`, token, {
+      label: 'Загрузка отчёта остатков WB', timeoutMs: 60000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
+    })
+    return { pending: false, rows: normalizeWarehouseRemains(report), taskId: null, taskStatus: 'done' }
+  }
+  if (taskStatus === 'canceled' || taskStatus === 'purged') {
+    throw Object.assign(new Error(`Отчёт остатков WB завершён со статусом ${taskStatus}. Будет создан новый отчёт.`), { status: 502, resetTask: true })
+  }
+  return { pending: true, taskId, taskStatus: taskStatus || 'processing', nextAllowedAt: new Date(Date.now() + 30000).toISOString() }
 }
 
-async function loadStatistics(token, tokenInfo, previousData = {}, warnings = [], deadlineAt = 0) {
-  const orders = await safeSyncStage(
-    'Заказы',
-    () => wbFetch(
-      `https://statistics-api.wildberries.ru/api/v1/supplier/orders?dateFrom=${encodeURIComponent(isoDaysAgo(30))}&flag=0`,
-      token,
-      { label: 'Заказы WB', timeoutMs: 45000, maxAttempts: 2, maxRetryDelayMs: 10000, deadlineAt },
-    ),
-    previousData.orders,
-    warnings,
-  )
-  await sleep(1200)
+async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
+  const definition = WB_SYNC_STAGES[stage]
+  const fallback = previousStageValue(data, stage)
+  let state = (await pool.query('SELECT * FROM wb_sync_states WHERE connection_id=$1 AND stage=$2', [connection.id, stage])).rows[0] || null
+  const now = Date.now()
+  if (state?.next_allowed_at && new Date(state.next_allowed_at).getTime() > now) {
+    return { stage, status: state.status || 'cooldown', value: fallback, warning: `${definition.label}: следующий запрос разрешён ${new Date(state.next_allowed_at).toLocaleString('ru-RU')}.`, state }
+  }
+  const selected = chooseToken(tokens, definition.scope)
+  if (!selected) {
+    state = await updateSyncState(connection.id, stage, { status:'missing_token', lastAttemptAt:new Date().toISOString(), lastError:`Нужен токен с категорией «${WB_SCOPE_BITS[definition.scope].label}»`, nextAllowedAt:null })
+    return { stage, status:'missing_token', value:fallback, warning:`${definition.label}: добавьте токен с категорией «${WB_SCOPE_BITS[definition.scope].label}».`, state }
+  }
 
-  const sales = await safeSyncStage(
-    'Продажи',
-    () => wbFetch(
-      `https://statistics-api.wildberries.ru/api/v1/supplier/sales?dateFrom=${encodeURIComponent(isoDaysAgo(30))}&flag=0`,
-      token,
-      { label: 'Продажи WB', timeoutMs: 45000, maxAttempts: 2, maxRetryDelayMs: 10000, deadlineAt },
-    ),
-    previousData.sales,
-    warnings,
-  )
-  await sleep(1200)
-
-  const useAsyncReport = tokenInfo?.typeId === 1 && !wbClientSecret
-  const stocks = await safeSyncStage(
-    'Остатки',
-    () => useAsyncReport ? loadWarehouseRemainsReport(token, { deadlineAt }) : loadWbWarehouseStocks(token, { deadlineAt }),
-    previousData.stocks,
-    warnings,
-  )
-
-  return {
-    orders: Array.isArray(orders) ? orders : [],
-    sales: Array.isArray(sales) ? sales : [],
-    stocks: Array.isArray(stocks) ? stocks : [],
+  state = await updateSyncState(connection.id, stage, { status:'running', lastAttemptAt:new Date().toISOString(), lastError:null, nextAllowedAt:null })
+  try {
+    let value
+    if (stage === 'products') value = await loadProducts(selected.token, { deadlineAt })
+    else if (stage === 'orders' || stage === 'sales') value = await loadStatisticsRows(stage, selected.token, { deadlineAt, previousRows:fallback })
+    else if (stage === 'advertising') value = await loadAdvertising(selected.token, { deadlineAt })
+    else if (stage === 'stocks') {
+      const result = await advanceWarehouseRemainsTask(selected.token, state, { deadlineAt })
+      if (result.pending) {
+        state = await updateSyncState(connection.id, stage, {
+          status:'pending', lastAttemptAt:new Date().toISOString(), nextAllowedAt:result.nextAllowedAt,
+          lastError:null, taskId:result.taskId, metadata:{ taskStatus:result.taskStatus, tokenId:selected.row.id },
+        })
+        return { stage, status:'pending', value:fallback, warning:'Остатки: отчёт WB формируется в фоне. ELISEI проверит его автоматически.', state }
+      }
+      value = result.rows
+    }
+    const count = stageCount(stage, value)
+    state = await updateSyncState(connection.id, stage, {
+      status:'success', lastAttemptAt:new Date().toISOString(), lastSuccessAt:new Date().toISOString(), nextAllowedAt:null,
+      lastError:null, lastCount:count, taskId:null, metadata:{ tokenId:selected.row.id },
+    })
+    return { stage, status:'success', value, state }
+  } catch (error) {
+    const nextAllowedAt = error?.nextAllowedAt || (error?.retryAfterSeconds ? new Date(Date.now() + Number(error.retryAfterSeconds) * 1000).toISOString() : null)
+    const status = Number(error?.status) === 429 ? 'rate_limited' : Number(error?.status) === 403 ? 'forbidden' : 'error'
+    state = await updateSyncState(connection.id, stage, {
+      status, lastAttemptAt:new Date().toISOString(), nextAllowedAt, lastError:error.message,
+      taskId:error?.resetTask ? null : state?.task_id, metadata:{ ...(state?.metadata || {}), requestId:error?.requestId || null },
+    })
+    return { stage, status, value:fallback, warning:`${definition.label}: ${error.message}${stageCount(stage, fallback) ? ' Сохранены предыдущие данные.' : ''}`, state }
   }
 }
 
@@ -822,7 +1189,7 @@ function buildDashboard(data, settings = DEFAULT_BUSINESS_SETTINGS) { const summ
 app.get('/health', async (_req, res) => {
   let database = 'not-configured'
   if (pool) { try { await pool.query('SELECT 1'); database = 'ok' } catch { database = 'error' } }
-  res.json({ ok: true, service: 'elisei-api', version: '2.6.0', database })
+  res.json({ ok: true, service: 'elisei-api', version: '2.7.0', database })
 })
 
 app.post('/api/auth/register', async (req, res) => {
@@ -858,72 +1225,141 @@ app.get('/api/auth/me', authRequired, async (req, res) => {
 
 app.get('/api/wb/connection', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub)
-  res.json(publicConnection(connection))
+  if (!connection) return res.json(publicConnection(null))
+  const [tokens, states] = await Promise.all([getWbTokens(req.auth.sub, connection.id), getSyncStates(connection.id)])
+  res.json(publicConnection(connection, tokens, states))
 })
 
 app.post('/api/wb/connect', authRequired, async (req, res) => {
   try {
     const token = String(req.body?.token || '').trim()
+    const label = String(req.body?.label || '').trim().slice(0, 80) || 'API-токен'
     if (token.length < 40) return res.status(400).json({ error: 'API-ключ выглядит слишком коротким' })
-    const scopes = await probeToken(token)
-    const id = crypto.randomUUID()
-    const result = await pool.query(`
-      INSERT INTO marketplace_connections (id, user_id, marketplace, token_encrypted, scopes, status)
-      VALUES ($1,$2,'wildberries',$3,$4::jsonb,'connected')
-      ON CONFLICT (user_id, marketplace) DO UPDATE SET
-        token_encrypted = EXCLUDED.token_encrypted,
-        scopes = EXCLUDED.scopes,
-        status = 'connected',
-        updated_at = NOW()
-      RETURNING *
-    `, [id, req.auth.sub, encryptToken(token), JSON.stringify(scopes)])
-    res.json(publicConnection(result.rows[0]))
+    const info = await probeToken(token)
+    let connection = await getConnection(req.auth.sub)
+    if (connection?.seller_id && info.sellerId && connection.seller_id !== info.sellerId) {
+      return res.status(409).json({ error: 'Этот токен относится к другому кабинету продавца. Для другого кабинета потребуется отдельный магазин ELISEI.' })
+    }
+    if (!connection) {
+      const result = await pool.query(`
+        INSERT INTO marketplace_connections (id,user_id,marketplace,token_encrypted,scopes,status,seller_id)
+        VALUES ($1,$2,'wildberries',$3,$4::jsonb,'connected',$5)
+        RETURNING *
+      `, [crypto.randomUUID(), req.auth.sub, encryptToken(token), JSON.stringify(info.scopes), info.sellerId || null])
+      connection = result.rows[0]
+    }
+    const encrypted = encryptToken(token)
+    const fingerprint = tokenFingerprint(token)
+    await pool.query(`
+      INSERT INTO wb_tokens (id,connection_id,user_id,label,token_encrypted,token_fingerprint,seller_id,token_type,token_type_label,scopes,read_only,expires_at,status,last_checked_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,'active',NOW())
+      ON CONFLICT (user_id,token_fingerprint) DO UPDATE SET
+        label=EXCLUDED.label,token_encrypted=EXCLUDED.token_encrypted,seller_id=EXCLUDED.seller_id,
+        token_type=EXCLUDED.token_type,token_type_label=EXCLUDED.token_type_label,scopes=EXCLUDED.scopes,
+        read_only=EXCLUDED.read_only,expires_at=EXCLUDED.expires_at,status='active',last_checked_at=NOW(),updated_at=NOW()
+    `, [crypto.randomUUID(), connection.id, req.auth.sub, label, encrypted, fingerprint, info.sellerId || null, info.typeId, info.tokenType, JSON.stringify(info.scopes), info.readOnly, info.expiresAt])
+    const tokens = await getWbTokens(req.auth.sub, connection.id)
+    const scopes = unionTokenScopes(tokens)
+    const updated = await pool.query(`UPDATE marketplace_connections SET seller_id=COALESCE(seller_id,$1),scopes=$2::jsonb,status='connected',updated_at=NOW() WHERE id=$3 AND user_id=$4 RETURNING *`, [info.sellerId || null, JSON.stringify(scopes), connection.id, req.auth.sub])
+    const states = await getSyncStates(connection.id)
+    res.json(publicConnection(updated.rows[0], tokens, states))
   } catch (error) {
     res.status(error.status || 400).json({ error: error.message })
   }
 })
 
+app.delete('/api/wb/tokens/:tokenId', authRequired, async (req, res) => {
+  const connection = await getConnection(req.auth.sub)
+  if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
+  await pool.query('DELETE FROM wb_tokens WHERE id=$1 AND user_id=$2 AND connection_id=$3', [req.params.tokenId, req.auth.sub, connection.id])
+  const tokens = await getWbTokens(req.auth.sub, connection.id)
+  const scopes = unionTokenScopes(tokens)
+  const updated = await pool.query(`UPDATE marketplace_connections SET scopes=$1::jsonb,status=$2,updated_at=NOW() WHERE id=$3 AND user_id=$4 RETURNING *`, [JSON.stringify(scopes), tokens.length ? 'connected' : 'needs_token', connection.id, req.auth.sub])
+  const states = await getSyncStates(connection.id)
+  res.json(publicConnection(updated.rows[0], tokens, states))
+})
+
 app.get('/api/wb/status/:id', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, req.params.id)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
-  res.json(publicConnection(connection))
+  const [tokens, states] = await Promise.all([getWbTokens(req.auth.sub, connection.id), getSyncStates(connection.id)])
+  res.json(publicConnection(connection, tokens, states))
 })
 
 app.post('/api/wb/sync', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, String(req.body?.connectionId || '') || null)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено. Подключите Wildberries.' })
+  const requestedStages = Array.isArray(req.body?.stages) ? req.body.stages.filter(stage => WB_SYNC_STAGES[stage]) : Object.keys(WB_SYNC_STAGES)
+  if (!requestedStages.length) return res.status(400).json({ error: 'Не выбраны этапы синхронизации' })
 
   const syncKey = `${req.auth.sub}:${connection.id}`
   if (activeSyncs.has(syncKey)) return res.status(409).json({ error: 'Синхронизация уже выполняется. Дождитесь её завершения.' })
 
   activeSyncs.add(syncKey)
   const startedAt = Date.now()
-  const deadlineAt = startedAt + 95000
+  const deadlineAt = startedAt + 100000
   try {
-    const token = decryptToken(connection.token_encrypted)
-    const tokenInfo = inspectWbToken(token)
-    const previousData = connection.data || {}
+    const tokens = await getWbTokens(req.auth.sub, connection.id)
+    if (!tokens.length) return res.status(400).json({ error: 'Добавьте хотя бы один API-токен Wildberries' })
+    const data = { ...(connection.data || {}) }
+    const stageStatus = { ...(data.stageStatus || {}) }
     const warnings = []
+    const results = []
 
-    // Запросы идут последовательно. Долгие лимиты WB не удерживают HTTP-запрос часами:
-    // этап сохраняет предыдущие данные и возвращает понятное предупреждение.
-    const products = await safeSyncStage('Товары', () => loadProducts(token, { deadlineAt }), previousData.products, warnings)
-    await sleep(1200)
-    const stats = await loadStatistics(token, tokenInfo, previousData, warnings, deadlineAt)
+    for (const stage of requestedStages) {
+      if (Date.now() >= deadlineAt - 1500) {
+        const queuedState = await updateSyncState(connection.id, stage, {
+          status:'queued', lastAttemptAt:new Date().toISOString(), nextAllowedAt:new Date().toISOString(),
+          lastError:'Этап поставлен в фоновую очередь после достижения общего лимита времени.',
+        })
+        stageStatus[stage] = {
+          status:'queued', available:stageCount(stage, previousStageValue(data, stage)) > 0,
+          count:stageCount(stage, previousStageValue(data, stage)), lastSuccessAt:queuedState.last_success_at || null,
+          nextAllowedAt:queuedState.next_allowed_at || null, error:queuedState.last_error || null,
+        }
+        warnings.push(`${WB_SYNC_STAGES[stage].label}: этап поставлен в фоновую очередь из-за общего лимита времени.`)
+        continue
+      }
+      const result = await runSyncStage({ connection, tokens, data, stage, deadlineAt })
+      results.push(result)
+      if (result.warning) warnings.push(result.warning)
+      if (result.status === 'success') data[stageDataKey(stage)] = result.value
+      stageStatus[stage] = {
+        status: result.status,
+        available: result.status === 'success' || stageCount(stage, result.value) > 0,
+        count: stageCount(stage, result.value),
+        lastSuccessAt: result.state?.last_success_at || null,
+        nextAllowedAt: result.state?.next_allowed_at || null,
+        error: result.state?.last_error || null,
+      }
+    }
 
-    const enrichedProducts = enrichProducts(products, stats)
-    const data = { products: enrichedProducts, ...stats, syncWarnings: warnings }
-    const counts = { products: enrichedProducts.length, orders: stats.orders.length, sales: stats.sales.length, stocks: stats.stocks.length }
-    const history = withSyncLog(connection.sync_history, { status: 'success', durationMs: Date.now() - startedAt, counts, warnings })
-    const updated = await pool.query(`UPDATE marketplace_connections SET data=$1::jsonb, sync_history=$2::jsonb, last_sync_at=NOW(), updated_at=NOW(), status='connected' WHERE id=$3 AND user_id=$4 RETURNING *`, [JSON.stringify(data), JSON.stringify(history), connection.id, req.auth.sub])
+    data.stageStatus = stageStatus
+    data.syncWarnings = warnings
+    const stats = { orders: Array.isArray(data.orders) ? data.orders : [], sales: Array.isArray(data.sales) ? data.sales : [], stocks: Array.isArray(data.stocks) ? data.stocks : [] }
+    data.products = enrichProducts(Array.isArray(data.products) ? data.products : [], stats)
+    const counts = {
+      products: data.products.length,
+      orders: Array.isArray(data.orders) ? data.orders.length : 0,
+      sales: Array.isArray(data.sales) ? data.sales.length : 0,
+      stocks: Array.isArray(data.stocks) ? data.stocks.length : 0,
+      advertising: Array.isArray(data.advertising?.campaigns) ? data.advertising.campaigns.length : 0,
+    }
+    const hasSuccess = results.some(result => result.status === 'success')
+    const history = withSyncLog(connection.sync_history, {
+      status: hasSuccess ? 'success' : 'partial', durationMs: Date.now() - startedAt, counts, warnings,
+      stages: Object.fromEntries(results.map(result => [result.stage, result.status])),
+    })
+    const updated = await pool.query(`UPDATE marketplace_connections SET data=$1::jsonb,sync_history=$2::jsonb,last_sync_at=CASE WHEN $3 THEN NOW() ELSE last_sync_at END,updated_at=NOW(),status='connected' WHERE id=$4 AND user_id=$5 RETURNING *`, [JSON.stringify(data), JSON.stringify(history), hasSuccess, connection.id, req.auth.sub])
     const row = updated.rows[0]
     const settings = await getBusinessSettings(req.auth.sub)
     const core = buildCoreAnalytics(data, settings)
-    res.json({ ok: true, partial: warnings.length > 0, warnings, lastSync: row.last_sync_at, counts, dashboard: buildDashboard(data, settings), core, syncHistory: history })
+    const states = await getSyncStates(connection.id)
+    res.json({ ok:true, partial:warnings.length > 0, warnings, lastSync:row.last_sync_at, counts, dashboard:buildDashboard(data, settings), core, syncHistory:history, syncStates:states.map(publicSyncState) })
   } catch (error) {
-    const history = withSyncLog(connection.sync_history, { status: 'error', message: error.message, durationMs: Date.now() - startedAt })
-    await pool.query(`UPDATE marketplace_connections SET sync_history=$1::jsonb, updated_at=NOW(), status='error' WHERE id=$2 AND user_id=$3`, [JSON.stringify(history), connection.id, req.auth.sub])
-    res.status(error.status || 502).json({ error: error.message })
+    const history = withSyncLog(connection.sync_history, { status:'error', message:error.message, durationMs:Date.now() - startedAt })
+    await pool.query(`UPDATE marketplace_connections SET sync_history=$1::jsonb,updated_at=NOW(),status='error' WHERE id=$2 AND user_id=$3`, [JSON.stringify(history), connection.id, req.auth.sub])
+    res.status(error.status || 502).json({ error:error.message })
   } finally {
     activeSyncs.delete(syncKey)
   }
@@ -966,11 +1402,145 @@ app.get('/api/wb/products/:id', authRequired, async (req, res) => {
 })
 
 app.post('/api/wb/disconnect', authRequired, async (req, res) => {
-  const id = String(req.body?.connectionId || '')
-  await pool.query(`DELETE FROM marketplace_connections WHERE user_id=$1 AND marketplace='wildberries' AND ($2='' OR id=$2::uuid)`, [req.auth.sub, id])
+  const id = String(req.body?.connectionId || '').trim()
+  if (id) await pool.query(`DELETE FROM marketplace_connections WHERE user_id=$1 AND marketplace='wildberries' AND id=$2::uuid`, [req.auth.sub, id])
+  else await pool.query(`DELETE FROM marketplace_connections WHERE user_id=$1 AND marketplace='wildberries'`, [req.auth.sub])
   res.json({ ok: true })
 })
 
 app.use((error, _req, res, _next) => res.status(error.status || 500).json({ error: error.message || 'Внутренняя ошибка' }))
 
-initDatabase().then(() => app.listen(port, () => console.log(`ELISEI API listening on ${port}`))).catch(error => { console.error('Database initialization failed:', error); process.exit(1) })
+const backgroundStockLocks = new Set()
+async function processPendingStockReports() {
+  if (!pool) return
+  let pending = []
+  try {
+    const result = await pool.query(`
+      SELECT s.*, c.user_id, c.data, c.sync_history
+      FROM wb_sync_states s
+      JOIN marketplace_connections c ON c.id=s.connection_id
+      WHERE s.stage='stocks' AND s.status IN ('pending','rate_limited','queued')
+        AND (s.next_allowed_at IS NULL OR s.next_allowed_at <= NOW())
+      ORDER BY s.updated_at
+      LIMIT 10
+    `)
+    pending = result.rows
+  } catch (error) {
+    console.warn('Pending stock report scan failed:', error.message)
+    return
+  }
+
+  for (const row of pending) {
+    if (backgroundStockLocks.has(row.connection_id)) continue
+    backgroundStockLocks.add(row.connection_id)
+    try {
+      const tokens = await getWbTokens(row.user_id, row.connection_id)
+      const selected = chooseToken(tokens, 'analytics')
+      if (!selected) {
+        await updateSyncState(row.connection_id, 'stocks', { status:'missing_token', lastError:'Нужен токен с категорией «Аналитика»', nextAllowedAt:null })
+        continue
+      }
+      const result = await advanceWarehouseRemainsTask(selected.token, row, { deadlineAt:Date.now() + 55000 })
+      if (result.pending) {
+        await updateSyncState(row.connection_id, 'stocks', { status:'pending', nextAllowedAt:result.nextAllowedAt, taskId:result.taskId, metadata:{ taskStatus:result.taskStatus }, lastError:null })
+        continue
+      }
+      const data = { ...(row.data || {}), stocks:result.rows }
+      data.stageStatus = { ...(data.stageStatus || {}), stocks:{ status:'success', available:true, count:result.rows.length, lastSuccessAt:new Date().toISOString(), nextAllowedAt:null, error:null } }
+      data.syncWarnings = (Array.isArray(data.syncWarnings) ? data.syncWarnings : []).filter(text => !String(text).startsWith('Остатки:'))
+      const stats = { orders:Array.isArray(data.orders)?data.orders:[], sales:Array.isArray(data.sales)?data.sales:[], stocks:result.rows }
+      data.products = enrichProducts(Array.isArray(data.products)?data.products:[], stats)
+      await pool.query(`UPDATE marketplace_connections SET data=$1::jsonb,last_sync_at=NOW(),updated_at=NOW(),status='connected' WHERE id=$2`, [JSON.stringify(data), row.connection_id])
+      await updateSyncState(row.connection_id, 'stocks', { status:'success', lastSuccessAt:new Date().toISOString(), nextAllowedAt:null, lastError:null, lastCount:result.rows.length, taskId:null, metadata:{ taskStatus:'done' } })
+    } catch (error) {
+      const nextAllowedAt = error?.nextAllowedAt || new Date(Date.now() + 60000).toISOString()
+      await updateSyncState(row.connection_id, 'stocks', { status:Number(error?.status)===429?'rate_limited':'pending', nextAllowedAt, lastError:error.message, taskId:error?.resetTask?null:row.task_id })
+    } finally {
+      backgroundStockLocks.delete(row.connection_id)
+    }
+  }
+}
+
+
+const deferredStageLocks = new Set()
+async function processDueDeferredStages() {
+  if (!pool) return
+  let due = []
+  try {
+    const result = await pool.query(`
+      SELECT s.*, c.user_id, c.data, c.sync_history, c.id AS connection_id
+      FROM wb_sync_states s
+      JOIN marketplace_connections c ON c.id=s.connection_id
+      WHERE s.stage <> 'stocks' AND s.status IN ('rate_limited','queued')
+        AND s.next_allowed_at IS NOT NULL AND s.next_allowed_at <= NOW()
+      ORDER BY s.next_allowed_at
+      LIMIT 10
+    `)
+    due = result.rows
+  } catch (error) {
+    console.warn('Deferred WB stage scan failed:', error.message)
+    return
+  }
+
+  for (const row of due) {
+    const syncKey = `${row.user_id}:${row.connection_id}`
+    if (deferredStageLocks.has(row.connection_id) || activeSyncs.has(syncKey)) continue
+    deferredStageLocks.add(row.connection_id)
+    try {
+      const connectionResult = await pool.query('SELECT * FROM marketplace_connections WHERE id=$1 AND user_id=$2', [row.connection_id, row.user_id])
+      const connection = connectionResult.rows[0]
+      if (!connection) continue
+      const tokens = await getWbTokens(row.user_id, row.connection_id)
+      const data = { ...(connection.data || {}) }
+      const result = await runSyncStage({ connection, tokens, data, stage:row.stage, deadlineAt:Date.now() + 85000 })
+      const stageStatus = { ...(data.stageStatus || {}) }
+      stageStatus[row.stage] = {
+        status:result.status,
+        available:result.status === 'success' || stageCount(row.stage, result.value) > 0,
+        count:stageCount(row.stage, result.value),
+        lastSuccessAt:result.state?.last_success_at || null,
+        nextAllowedAt:result.state?.next_allowed_at || null,
+        error:result.state?.last_error || null,
+      }
+      data.stageStatus = stageStatus
+      if (result.status === 'success') data[stageDataKey(row.stage)] = result.value
+      const prefix = `${WB_SYNC_STAGES[row.stage]?.label || row.stage}:`
+      const previousWarnings = (Array.isArray(data.syncWarnings) ? data.syncWarnings : []).filter(text => !String(text).startsWith(prefix))
+      data.syncWarnings = result.warning ? [...previousWarnings, result.warning] : previousWarnings
+      const stats = {
+        orders:Array.isArray(data.orders) ? data.orders : [],
+        sales:Array.isArray(data.sales) ? data.sales : [],
+        stocks:Array.isArray(data.stocks) ? data.stocks : [],
+      }
+      data.products = enrichProducts(Array.isArray(data.products) ? data.products : [], stats)
+      const history = withSyncLog(connection.sync_history, {
+        status:result.status === 'success' ? 'success' : 'partial',
+        durationMs:0,
+        automatic:true,
+        counts:{ [row.stage]:stageCount(row.stage, result.value) },
+        warnings:result.warning ? [result.warning] : [],
+        stages:{ [row.stage]:result.status },
+      })
+      await pool.query(`
+        UPDATE marketplace_connections
+        SET data=$1::jsonb,sync_history=$2::jsonb,last_sync_at=CASE WHEN $3 THEN NOW() ELSE last_sync_at END,
+            updated_at=NOW(),status='connected'
+        WHERE id=$4 AND user_id=$5
+      `, [JSON.stringify(data), JSON.stringify(history), result.status === 'success', row.connection_id, row.user_id])
+    } catch (error) {
+      console.warn(`Deferred WB stage ${row.stage} failed:`, error.message)
+    } finally {
+      deferredStageLocks.delete(row.connection_id)
+    }
+  }
+}
+
+initDatabase().then(() => {
+  app.listen(port, () => console.log(`ELISEI API listening on ${port}`))
+  const stockTimer = setInterval(() => processPendingStockReports().catch(error => console.warn('Stock worker failed:', error.message)), 30000)
+  stockTimer.unref?.()
+  const deferredTimer = setInterval(() => processDueDeferredStages().catch(error => console.warn('Deferred WB worker failed:', error.message)), 60000)
+  deferredTimer.unref?.()
+  setTimeout(() => processPendingStockReports().catch(error => console.warn('Initial stock worker failed:', error.message)), 5000)
+  setTimeout(() => processDueDeferredStages().catch(error => console.warn('Initial deferred WB worker failed:', error.message)), 10000)
+}).catch(error => { console.error('Database initialization failed:', error); process.exit(1) })

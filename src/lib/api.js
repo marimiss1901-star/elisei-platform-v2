@@ -43,13 +43,14 @@ export const authApi = {
 
 export const wbApi = {
   current: () => request('/api/wb/connection'),
-  connect: (token) => request('/api/wb/connect', { method: 'POST', body: JSON.stringify({ token }) }),
+  connect: (token, label = '') => request('/api/wb/connect', { method: 'POST', body: JSON.stringify({ token, label }) }),
   status: (connectionId) => request(`/api/wb/status/${encodeURIComponent(connectionId)}`),
-  sync: (connectionId) => request('/api/wb/sync', { method: 'POST', body: JSON.stringify({ connectionId }), signal: AbortSignal.timeout(105000) }),
+  sync: (connectionId, stages = null) => request('/api/wb/sync', { method: 'POST', body: JSON.stringify({ connectionId, ...(Array.isArray(stages) ? { stages } : {}) }), signal: AbortSignal.timeout(110000) }),
   dashboard: (connectionId) => request(`/api/wb/dashboard/${encodeURIComponent(connectionId)}`),
   products: (connectionId) => request(`/api/wb/products/${encodeURIComponent(connectionId)}`),
   core: (connectionId) => request(`/api/wb/core/${encodeURIComponent(connectionId)}`),
   syncHistory: (connectionId) => request(`/api/wb/sync-history/${encodeURIComponent(connectionId)}`),
+  removeToken: (tokenId) => request(`/api/wb/tokens/${encodeURIComponent(tokenId)}`, { method: 'DELETE' }),
   disconnect: (connectionId) => request('/api/wb/disconnect', { method: 'POST', body: JSON.stringify({ connectionId }) }),
   configured: Boolean(API_BASE),
   baseUrl: API_BASE,
