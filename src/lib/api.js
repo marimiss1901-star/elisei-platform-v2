@@ -49,6 +49,7 @@ export const wbApi = {
   dashboard: (connectionId) => request(`/api/wb/dashboard/${encodeURIComponent(connectionId)}`),
   products: (connectionId) => request(`/api/wb/products/${encodeURIComponent(connectionId)}`),
   core: (connectionId) => request(`/api/wb/core/${encodeURIComponent(connectionId)}`),
+  repairStocks: (connectionId, taskId = '') => request(`/api/wb/stocks/${encodeURIComponent(connectionId)}/repair`, { method: 'POST', body: JSON.stringify({ ...(taskId ? { taskId } : {}) }), signal: AbortSignal.timeout(75000) }),
   syncHistory: (connectionId) => request(`/api/wb/sync-history/${encodeURIComponent(connectionId)}`),
   removeToken: (tokenId) => request(`/api/wb/tokens/${encodeURIComponent(tokenId)}`, { method: 'DELETE' }),
   setPrimaryToken: (tokenId) => request(`/api/wb/tokens/${encodeURIComponent(tokenId)}/primary`, { method: 'POST' }),

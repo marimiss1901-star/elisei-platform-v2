@@ -184,7 +184,7 @@ const WB_SYNC_STAGES = Object.freeze({
   advertising: { label: 'Реклама', scope: 'promotion' },
 })
 const CORE_SYNC_SCOPES = [...new Set(Object.values(WB_SYNC_STAGES).map(item => item.scope))]
-const STOCK_DATA_SCHEMA_VERSION = 3
+const STOCK_DATA_SCHEMA_VERSION = 4
 const STOCK_DATA_SOURCE = 'wb_warehouse_remains'
 
 function decodeJwtPayload(value, invalidMessage) {
@@ -278,7 +278,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.7.3 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.7.7 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -776,6 +776,7 @@ function buildStockMeta(rows = [], extra = {}) {
   const productIds = new Set(normalized.flatMap(productNmIds))
   const chrtIds = new Set(normalized.flatMap(productChrtIds))
   const barcodes = new Set(normalized.flatMap(productBarcodes))
+  const vendorCodes = new Set(normalized.flatMap(productVendorCodes).map(cleanVendorIdentity).filter(Boolean))
   const warehouses = new Set(normalized.map(row => String(row?.warehouseName || '').trim()).filter(Boolean))
   return {
     schemaVersion: STOCK_DATA_SCHEMA_VERSION,
@@ -787,6 +788,7 @@ function buildStockMeta(rows = [], extra = {}) {
     products: productIds.size,
     chrtIds: chrtIds.size,
     barcodes: barcodes.size,
+    vendorCodes: vendorCodes.size,
     warehouses: warehouses.size,
     receivedAt: new Date().toISOString(),
     ...extra,
@@ -1249,40 +1251,204 @@ async function loadProducts(token, { limit = 100, maxPages = 300, deadlineAt = 0
   return products
 }
 
+function firstDefined(sources = [], keys = [], fallback = null) {
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue
+    for (const key of keys) {
+      const value = source?.[key]
+      if (value !== undefined && value !== null && String(value).trim() !== '') return value
+    }
+  }
+  return fallback
+}
+
+function warehouseIdentitySources(item = {}) {
+  return [
+    item,
+    item?.product,
+    item?.nomenclature,
+    item?.good,
+    item?.card,
+    item?.item,
+    item?.info,
+    item?.productInfo,
+  ].filter(value => value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function warehouseArrayFrom(item = {}) {
+  for (const key of ['warehouses', 'warehouseRemains', 'warehouse_remains', 'stocks', 'offices', 'warehouseStocks']) {
+    if (Array.isArray(item?.[key])) return item[key]
+  }
+  return []
+}
+
+function looksLikeWarehouseRemainsItem(node = {}) {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return false
+  const sources = warehouseIdentitySources(node)
+  const hasIdentity = firstDefined(sources, [
+    'nmId','nmID','nm_id','nmIDValue','vendorCode','vendor_code','supplierArticle','supplier_article',
+    'article','barcode','barCode','bar_code','sku',
+  ], '') !== ''
+  const hasWarehouses = warehouseArrayFrom(node).length > 0 || [
+    'warehouses','warehouseRemains','warehouse_remains','stocks','offices','warehouseStocks',
+  ].some(key => Array.isArray(node?.[key]))
+  const hasFlatQuantity = firstDefined([node], [
+    'quantity','quantityFull','quantity_full','stock','stockCount','stock_count','totalQuantity','total_quantity',
+    'availableQuantity','available_quantity','readyForSaleQuantity','ready_for_sale_quantity','amount',
+  ], null) != null
+  return hasIdentity && (hasWarehouses || hasFlatQuantity)
+}
+
+function extractWarehouseRemainsItems(payload) {
+  const output = []
+  const seenObjects = new Set()
+  const seenRows = new Set()
+  const wrapperKeys = new Set(['data','result','items','rows','report','content','payload','response','products','goods','nomenclatures'])
+
+  const push = row => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return
+    const sources = warehouseIdentitySources(row)
+    const signature = [
+      firstDefined(sources, ['nmId','nmID','nm_id'], ''),
+      firstDefined(sources, ['vendorCode','vendor_code','supplierArticle','supplier_article','article'], ''),
+      firstDefined(sources, ['barcode','barCode','bar_code','sku'], ''),
+      firstDefined(sources, ['techSize','tech_size','sizeName','size_name','size','wbSize','wb_size'], ''),
+    ].map(cleanIdentity).join('|')
+    const key = `${signature}|${output.length}`
+    if (seenRows.has(key)) return
+    seenRows.add(key)
+    output.push(row)
+  }
+
+  const walk = node => {
+    if (!node) return
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item)
+      return
+    }
+    if (typeof node !== 'object' || seenObjects.has(node)) return
+    seenObjects.add(node)
+
+    if (looksLikeWarehouseRemainsItem(node)) {
+      push(node)
+      return
+    }
+
+    for (const [key, value] of Object.entries(node)) {
+      if (!value || typeof value !== 'object') continue
+      if (wrapperKeys.has(key) || Array.isArray(value)) walk(value)
+    }
+  }
+
+  walk(payload)
+  return output
+}
+
+function describeWarehouseRemainsPayload(payload) {
+  const rootType = Array.isArray(payload) ? 'array' : payload === null ? 'null' : typeof payload
+  const rootKeys = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? Object.keys(payload).slice(0, 20)
+    : []
+  const first = Array.isArray(payload) ? payload[0] : payload?.data?.[0] || payload?.result?.[0] || payload?.items?.[0] || null
+  return {
+    rootType,
+    rootKeys,
+    firstItemKeys: first && typeof first === 'object' ? Object.keys(first).slice(0, 30) : [],
+  }
+}
+
 function normalizeWarehouseRemains(report) {
   const rows = []
-  const quantityFrom = row => firstNumber(row, ['quantity','quantityFull','stock','stockCount','totalQuantity','availableQuantity'], 0)
-  const normalizeRow = (item = {}, warehouse = null) => ({
-    nmId: item?.nmId ?? item?.nmID ?? item?.nm_id ?? warehouse?.nmId ?? warehouse?.nmID ?? null,
-    vendorCode: item?.vendorCode || item?.supplierArticle || item?.article || warehouse?.vendorCode || warehouse?.supplierArticle || '',
-    chrtId: item?.chrtId ?? item?.chrtID ?? item?.chrt_id ?? item?.chrtid ?? item?.sizeId ?? warehouse?.chrtId ?? warehouse?.chrtID ?? warehouse?.chrt_id ?? null,
-    barcode: item?.barcode || item?.sku || warehouse?.barcode || warehouse?.sku || '',
-    techSize: item?.techSize || item?.sizeName || item?.size || item?.wbSize || warehouse?.techSize || warehouse?.sizeName || '',
-    brand: item?.brand || '',
-    subjectName: item?.subjectName || item?.subject || '',
-    warehouseName: String(warehouse?.warehouseName || warehouse?.warehouse || item?.warehouseName || item?.warehouse || 'Все склады').trim() || 'Все склады',
-    quantity: Math.max(0, Number(quantityFrom(warehouse || item)) || 0),
-  })
+  const items = extractWarehouseRemainsItems(report)
+  const quantityFrom = row => firstNumber(row, [
+    'quantity','quantityFull','quantity_full','stock','stockCount','stock_count','totalQuantity','total_quantity',
+    'availableQuantity','available_quantity','readyForSaleQuantity','ready_for_sale_quantity','amount',
+  ], 0)
 
-  for (const item of Array.isArray(report) ? report : []) {
-    const warehouses = Array.isArray(item?.warehouses) ? item.warehouses : []
+  const normalizeRow = (item = {}, warehouse = null) => {
+    const sources = warehouseIdentitySources(item)
+    const warehouseSources = warehouseIdentitySources(warehouse || {})
+    return {
+      nmId: firstDefined([...sources, ...warehouseSources], ['nmId','nmID','nm_id','nmIDValue'], null),
+      vendorCode: firstDefined([...sources, ...warehouseSources], [
+        'vendorCode','vendor_code','supplierArticle','supplier_article','article','sellerArticle','seller_article',
+      ], ''),
+      chrtId: firstDefined([...sources, ...warehouseSources], [
+        'chrtId','chrtID','chrt_id','chrtid','sizeId','size_id',
+      ], null),
+      barcode: firstDefined([...sources, ...warehouseSources], [
+        'barcode','barCode','bar_code','sku','skus',
+      ], ''),
+      techSize: firstDefined([...sources, ...warehouseSources], [
+        'techSize','tech_size','sizeName','size_name','size','wbSize','wb_size',
+      ], ''),
+      brand: firstDefined(sources, ['brand','brandName','brand_name'], ''),
+      subjectName: firstDefined(sources, ['subjectName','subject_name','subject','category'], ''),
+      warehouseName: String(firstDefined([warehouse || {}, item], [
+        'warehouseName','warehouse_name','warehouse','officeName','office_name','name',
+      ], 'Все склады')).trim() || 'Все склады',
+      quantity: Math.max(0, Number(quantityFrom(warehouse || item)) || 0),
+    }
+  }
+
+  for (const item of items) {
+    const warehouses = warehouseArrayFrom(item)
     const physical = warehouses.filter(row => {
-      const name = String(row?.warehouseName || row?.warehouse || '').trim().toLowerCase()
-      return name && name !== 'всего находится на складах' && !name.includes('в пути')
+      const name = String(firstDefined([row], ['warehouseName','warehouse_name','warehouse','officeName','office_name','name'], '')).trim().toLowerCase()
+      return name && name !== 'всего находится на складах' && name !== 'итого' && !name.includes('в пути')
     })
-    const source = physical.length
-      ? physical
-      : warehouses.filter(row => String(row?.warehouseName || row?.warehouse || '').trim().toLowerCase() === 'всего находится на складах')
+    const aggregate = warehouses.filter(row => {
+      const name = String(firstDefined([row], ['warehouseName','warehouse_name','warehouse','officeName','office_name','name'], '')).trim().toLowerCase()
+      return name === 'всего находится на складах' || name === 'итого'
+    })
+    const source = physical.length ? physical : aggregate
 
     if (source.length) {
       for (const warehouse of source) rows.push(normalizeRow(item, warehouse))
       continue
     }
 
-    // Некоторые версии отчёта отдают уже плоские строки без массива warehouses.
+    // Неразмерный товар или плоский вариант отчёта: идентификаторы остаются на строке товара.
     rows.push(normalizeRow(item))
   }
   return rows
+}
+
+function stockIdentityCounts(rows = []) {
+  const normalized = Array.isArray(rows) ? rows : []
+  return {
+    nmIds: new Set(normalized.flatMap(productNmIds)).size,
+    barcodes: new Set(normalized.flatMap(productBarcodes)).size,
+    vendorCodes: new Set(normalized.flatMap(productVendorCodes).map(cleanVendorIdentity).filter(Boolean)).size,
+  }
+}
+
+function validateWarehouseRemainsSnapshot(rows, meta, rawPayload) {
+  const counts = stockIdentityCounts(rows)
+  if (Number(meta?.totalQuantity || 0) > 0 && counts.nmIds === 0 && counts.barcodes === 0 && counts.vendorCodes === 0) {
+    const error = Object.assign(new Error('Отчёт остатков WB содержит количество, но идентификаторы товаров не распознаны. Снимок не сохранён, чтобы не потерять распределение по артикулам.'), {
+      status: 502,
+      code: 'WB_STOCK_IDENTIFIERS_MISSING',
+      payloadShape: describeWarehouseRemainsPayload(rawPayload),
+    })
+    throw error
+  }
+  return counts
+}
+
+async function downloadWarehouseRemainsReport(token, taskId, { deadlineAt = 0 } = {}) {
+  const base = 'https://seller-analytics-api.wildberries.ru/api/v1/warehouse_remains'
+  const report = await wbFetch(`${base}/tasks/${encodeURIComponent(taskId)}/download`, token, {
+    label: 'Загрузка отчёта остатков WB', timeoutMs: 60000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
+  })
+  const rows = normalizeWarehouseRemains(report)
+  const stockMeta = buildStockMeta(rows, {
+    taskId,
+    payloadShape: describeWarehouseRemainsPayload(report),
+    parserVersion: 2,
+  })
+  const identityCounts = validateWarehouseRemainsSnapshot(rows, stockMeta, report)
+  return { rows, stockMeta: { ...stockMeta, identityCounts } }
 }
 
 function stageDataKey(stage) {
@@ -1478,11 +1644,8 @@ async function advanceWarehouseRemainsTask(token, state, { deadlineAt = 0 } = {}
   })
   const taskStatus = String(statusPayload?.data?.status || '').toLowerCase()
   if (taskStatus === 'done') {
-    const report = await wbFetch(`${base}/tasks/${encodeURIComponent(taskId)}/download`, token, {
-      label: 'Загрузка отчёта остатков WB', timeoutMs: 60000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
-    })
-    const rows = normalizeWarehouseRemains(report)
-    return { pending: false, rows, stockMeta: buildStockMeta(rows, { taskId }), taskId: null, taskStatus: 'done' }
+    const downloaded = await downloadWarehouseRemainsReport(token, taskId, { deadlineAt })
+    return { pending: false, rows: downloaded.rows, stockMeta: downloaded.stockMeta, taskId: null, taskStatus: 'done' }
   }
   if (taskStatus === 'canceled' || taskStatus === 'purged') {
     throw Object.assign(new Error(`Отчёт остатков WB завершён со статусом ${taskStatus}. Будет создан новый отчёт.`), { status: 502, resetTask: true })
@@ -1599,7 +1762,7 @@ app.get('/health', async (_req, res) => {
   res.json({
     ok: true,
     service: 'elisei-api',
-    version: '2.7.6',
+    version: '2.7.7',
     database,
     backgroundWorker: {
       running: backgroundWorkerState.running,
@@ -1843,6 +2006,81 @@ app.get('/api/wb/core/:id', authRequired, async (req, res) => {
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
   const settings = await getBusinessSettings(req.auth.sub)
   res.json({ core: buildCoreAnalytics(connection.data || {}, settings), lastSync: connection.last_sync_at || null })
+})
+
+app.post('/api/wb/stocks/:id/repair', authRequired, async (req, res) => {
+  const connection = await getConnection(req.auth.sub, req.params.id)
+  if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
+
+  try {
+    const tokens = await getWbTokens(req.auth.sub, connection.id)
+    const selected = chooseToken(tokens, 'analytics')
+    if (!selected) return res.status(400).json({ error: 'Нужен токен WB с категорией «Аналитика»' })
+
+    const stateResult = await pool.query('SELECT * FROM wb_sync_states WHERE connection_id=$1 AND stage=$2', [connection.id, 'stocks'])
+    const state = stateResult.rows[0] || null
+    const data = { ...(connection.data || {}) }
+    const taskId = cleanIdentity(
+      req.body?.taskId || data?.stockMeta?.taskId || state?.task_id || state?.metadata?.taskId || state?.metadata?.task_id,
+    )
+
+    if (!taskId) {
+      const queued = await updateSyncState(connection.id, 'stocks', {
+        status:'queued', taskId:null, nextAllowedAt:new Date().toISOString(), lastError:'Старый снимок не содержит taskId. Будет создан новый официальный отчёт остатков WB.',
+      })
+      kickBackgroundWorkers(`stock-repair-new:${connection.id}`)
+      const states = await getSyncStates(connection.id)
+      return res.status(202).json({
+        ok:true, queued:true,
+        message:'Старый отчёт уже нельзя скачать повторно. ELISEI поставил создание нового снимка остатков в очередь.',
+        syncStates:states.map(publicSyncState), state:publicSyncState(queued),
+      })
+    }
+
+    try {
+      const downloaded = await downloadWarehouseRemainsReport(selected.token, taskId, { deadlineAt:Date.now() + 65000 })
+      if (!downloaded.rows.length && Number(data?.stockMeta?.totalQuantity || 0) > 0) {
+        throw Object.assign(new Error('Сохранённый отчёт WB больше недоступен для повторного скачивания.'), { status: 404, resetTask:true })
+      }
+      const persisted = await persistStockSnapshot(connection.id, downloaded.rows, {
+        ...downloaded.stockMeta,
+        repairedAt:new Date().toISOString(),
+        repairedFromTaskId:taskId,
+      })
+      await updateSyncState(connection.id, 'stocks', {
+        status:'success', lastAttemptAt:new Date().toISOString(), lastSuccessAt:new Date().toISOString(), nextAllowedAt:null,
+        lastError:null, lastCount:downloaded.rows.length, taskId:null,
+        metadata:{ taskStatus:'done', ...downloaded.stockMeta, persistedRows:persisted.persistedRows, persistedQuantity:persisted.persistedQuantity },
+      })
+
+      const refreshed = await getConnection(req.auth.sub, connection.id)
+      const [settings, states] = await Promise.all([getBusinessSettings(req.auth.sub), getSyncStates(connection.id)])
+      return res.json({
+        ok:true, queued:false, repaired:true,
+        message:`Детализация восстановлена: ${persisted.persistedRows} строк, ${Math.round(persisted.persistedQuantity)} шт.`,
+        core:buildCoreAnalytics(refreshed.data || {}, settings),
+        dashboard:buildDashboard(refreshed.data || {}, settings),
+        syncStates:states.map(publicSyncState),
+        lastSync:refreshed.last_sync_at || null,
+      })
+    } catch (error) {
+      const expired = [404, 410].includes(Number(error?.status)) || error?.resetTask || /не найден|недоступен|purged|expired/i.test(String(error?.message || ''))
+      if (!expired) throw error
+      const queued = await updateSyncState(connection.id, 'stocks', {
+        status:'queued', taskId:null, nextAllowedAt:new Date().toISOString(), lastError:'Предыдущий taskId истёк. Будет создан новый официальный отчёт остатков WB.',
+      })
+      kickBackgroundWorkers(`stock-repair-expired:${connection.id}`)
+      const states = await getSyncStates(connection.id)
+      return res.status(202).json({
+        ok:true, queued:true,
+        message:'Срок хранения предыдущего отчёта истёк. ELISEI поставил новый снимок остатков в очередь.',
+        syncStates:states.map(publicSyncState), state:publicSyncState(queued),
+      })
+    }
+  } catch (error) {
+    console.warn('WB stock repair failed:', error.code || error.status || '', error.message, error.payloadShape || '')
+    res.status(error.status || 502).json({ error:error.message, code:error.code || null })
+  }
 })
 
 app.get('/api/business/settings', authRequired, async (req, res) => {

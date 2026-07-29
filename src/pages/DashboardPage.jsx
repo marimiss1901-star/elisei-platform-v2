@@ -255,6 +255,28 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     finally { setSyncing(false) }
   }
 
+  const repairStockSnapshot = async () => {
+    if (!connection.connectionId || syncing) return
+    setSyncing(true)
+    try {
+      const result = await wbApi.repairStocks(connection.connectionId, coreData?.stockMeta?.taskId || '')
+      if (Array.isArray(result.syncStates)) {
+        const normalized = normalizeConnection({ connected:true, lastSync:result.lastSync, syncStates:result.syncStates }, connectionRef.current)
+        connectionRef.current = normalized
+        syncRevisionRef.current = syncDataRevision(normalized)
+        setConnection(normalized)
+      }
+      if (result.core) setCoreData(result.core)
+      if (result.dashboard) setDashboardData(result.dashboard)
+      await loadConnectionData(connection.connectionId)
+      notify(result.message || (result.queued ? 'Новый отчёт остатков поставлен в очередь.' : 'Детализация остатков восстановлена.'), result.queued ? 9000 : 5200)
+    } catch (error) {
+      notify(error.message, 9000)
+    } finally {
+      setSyncing(false)
+    }
+  }
+
   const saveConnection = async event => {
     event.preventDefault()
     if (!wbApi.configured) return notify('Добавьте VITE_API_BASE_URL в Render')
@@ -437,12 +459,13 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     const partialMapping = stockDetailsAvailable && Number(stockMeta?.unmatchedRows || 0) > 0
     const quantityMismatch = stockDetailsAvailable && Number(stockMeta?.calculatedQuantity || 0) !== Number(stockMeta?.totalQuantity || 0)
     const legacyIgnored = !stockAvailable && stockState?.lastCount > 0 && Number(stockState?.metadata?.schemaVersion || 0) < 2
-    const repairStockMapping = () => syncConnection(connection.connectionId, ['products'])
+    const reportHasNoIdentities = Number(stockMeta?.reportIdentityCounts?.nmIds || 0) === 0 && Number(stockMeta?.reportIdentityCounts?.barcodes || 0) === 0 && Number(stockMeta?.reportIdentityCounts?.vendorCodes || 0) === 0
+    const repairStockMapping = () => reportHasNoIdentities ? repairStockSnapshot() : syncConnection(connection.connectionId, ['products'])
 
     return <section className="app-page glass-panel"><div className="page-title"><span>Управление запасами</span><h1>Остатки</h1><p>Дни запаса, дефицит, излишки, замороженные деньги и план пополнения.</p></div>{requireConnection(<>
       {!stockAvailable && <div className="notice warning"><RefreshCw size={20}/><div><strong>{legacyIgnored ? 'Старые некорректные остатки скрыты' : stockState?.status === 'pending' ? 'Отчёт остатков формируется в WB' : 'Остатки ещё не загружены'}</strong><p>{legacyIgnored ? 'Предыдущие значения не имели подтверждённого источника WB и больше не участвуют в расчётах. Дождитесь нового отчёта.' : stockState?.lastError || (nextAttempt ? `Следующая автоматическая проверка: ${nextAttempt}.` : 'Запустите отдельный этап остатков. ELISEI создаст отчёт и заберёт его в фоне.')}</p></div><button disabled={syncing || stockState?.status === 'pending'} onClick={() => syncConnection(connection.connectionId, ['stocks'])}>{stockState?.status === 'pending' ? 'Формируется' : 'Загрузить остатки'}</button></div>}
-      {mappingNeedsRefresh && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Остатки получены, но каталог не совпал с отчётом</strong><p>WB вернул {formatNumber(stockMeta?.totalQuantity || 0)} шт. Официальный отчёт остатков сопоставляется по nmID, штрихкоду размера и артикулу продавца; chrtID для этого отчёта не требуется. ELISEI обновит каталог и повторно выполнит сопоставление уже сохранённого снимка без нового запроса остатков.</p><small>Отчёт: nmID {formatNumber(stockMeta?.reportIdentityCounts?.nmIds || 0)}, штрихкодов {formatNumber(stockMeta?.reportIdentityCounts?.barcodes || 0)}, артикулов {formatNumber(stockMeta?.reportIdentityCounts?.vendorCodes || 0)} · каталог: nmID {formatNumber(stockMeta?.catalogIdentityCounts?.nmIds || 0)}, штрихкодов {formatNumber(stockMeta?.catalogIdentityCounts?.barcodes || 0)}, артикулов {formatNumber(stockMeta?.catalogIdentityCounts?.vendorCodes || 0)}</small></div><button disabled={syncing} onClick={repairStockMapping}>Обновить каталог</button></div>}
-      {missingDetails && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Сумма остатков сохранена, но детализация потеряна</strong><p>WB вернул {formatNumber(stockMeta?.totalQuantity || 0)} шт., однако в базе нет строк по артикулам и складам. Общая сумма показана честно, а товары не помечаются нулевыми.</p></div><button disabled={syncing || stockState?.status === 'pending'} onClick={() => syncConnection(connection.connectionId, ['stocks'])}>Восстановить детализацию</button></div>}
+      {mappingNeedsRefresh && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Остатки получены, но каталог не совпал с отчётом</strong><p>{reportHasNoIdentities ? 'Сохранённый снимок старой версии содержит количества по складам, но потерял nmID, штрихкоды и артикулы. ELISEI повторно скачает готовый отчёт по сохранённому taskId; если срок его хранения истёк, новый снимок будет поставлен в очередь.' : 'Официальный отчёт остатков сопоставляется по nmID, штрихкоду размера и артикулу продавца; chrtID для этого отчёта не требуется. ELISEI обновит каталог и повторно выполнит сопоставление уже сохранённого снимка без нового запроса остатков.'}</p><small>Отчёт: nmID {formatNumber(stockMeta?.reportIdentityCounts?.nmIds || 0)}, штрихкодов {formatNumber(stockMeta?.reportIdentityCounts?.barcodes || 0)}, артикулов {formatNumber(stockMeta?.reportIdentityCounts?.vendorCodes || 0)} · каталог: nmID {formatNumber(stockMeta?.catalogIdentityCounts?.nmIds || 0)}, штрихкодов {formatNumber(stockMeta?.catalogIdentityCounts?.barcodes || 0)}, артикулов {formatNumber(stockMeta?.catalogIdentityCounts?.vendorCodes || 0)}</small></div><button disabled={syncing} onClick={repairStockMapping}>{reportHasNoIdentities ? 'Восстановить отчёт' : 'Обновить каталог'}</button></div>}
+      {missingDetails && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Сумма остатков сохранена, но детализация потеряна</strong><p>WB вернул {formatNumber(stockMeta?.totalQuantity || 0)} шт., однако в базе нет строк по артикулам и складам. Общая сумма показана честно, а товары не помечаются нулевыми.</p></div><button disabled={syncing || stockState?.status === 'pending'} onClick={repairStockSnapshot}>Восстановить детализацию</button></div>}
       {partialMapping && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Часть строк не сопоставлена с каталогом</strong><p>Привязано {formatNumber(stockMeta?.mappedRows || 0)} строк на {formatNumber(stockMeta?.mappedQuantity || 0)} шт.; не найдено {formatNumber(stockMeta?.unmatchedRows || 0)} строк на {formatNumber(stockMeta?.unmatchedQuantity || 0)} шт. Покрытие — {formatPercent(stockMeta?.mappingCoveragePercent)}.</p></div><button disabled={syncing || stockState?.status === 'pending'} onClick={repairStockMapping}>Повторить сопоставление</button></div>}
       {quantityMismatch && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Найдена разница в сохранённом снимке</strong><p>В отчёте WB {formatNumber(stockMeta?.totalQuantity || 0)} шт., в строках детализации — {formatNumber(stockMeta?.calculatedQuantity || 0)} шт. ELISEI использует сумму отчёта и предлагает обновить детализацию.</p></div></div>}
       {zeroSnapshot && <div className="notice info"><CheckCircle2 size={20}/><div><strong>Отчёт WB загружен: остаток равен нулю</strong><p>Wildberries вернул {formatNumber(stockMeta?.rows || 0)} строк по товарам и размерам, но суммарное доступное количество — 0 шт. Это не ошибка загрузки.</p></div></div>}
