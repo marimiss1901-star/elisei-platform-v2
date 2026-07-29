@@ -184,7 +184,7 @@ const WB_SYNC_STAGES = Object.freeze({
   advertising: { label: 'Реклама', scope: 'promotion' },
 })
 const CORE_SYNC_SCOPES = [...new Set(Object.values(WB_SYNC_STAGES).map(item => item.scope))]
-const STOCK_DATA_SCHEMA_VERSION = 2
+const STOCK_DATA_SCHEMA_VERSION = 3
 const STOCK_DATA_SOURCE = 'wb_warehouse_remains'
 
 function decodeJwtPayload(value, invalidMessage) {
@@ -680,19 +680,74 @@ function firstNumber(row, keys, fallback = 0) {
   return fallback
 }
 
+function cleanIdentity(value) {
+  return String(value ?? '').trim()
+}
+
+function uniqueIdentities(values = []) {
+  return [...new Set(values.map(cleanIdentity).filter(Boolean))]
+}
+
+function productNmIds(row = {}) {
+  return uniqueIdentities([row?.nmId, row?.nmID, row?.nm_id, ...(Array.isArray(row?.nmIds) ? row.nmIds : [])])
+}
+
+function productVendorCodes(row = {}) {
+  return uniqueIdentities([row?.vendorCode, row?.supplierArticle, row?.article, ...(Array.isArray(row?.vendorCodes) ? row.vendorCodes : [])])
+}
+
+function productChrtIds(row = {}) {
+  const nested = Array.isArray(row?.sizes)
+    ? row.sizes.flatMap(size => [size?.chrtId, size?.chrtID, size?.chrt_id, size?.chrtid, size?.id])
+    : []
+  return uniqueIdentities([
+    row?.chrtId, row?.chrtID, row?.chrt_id, row?.chrtid, row?.sizeId,
+    ...(Array.isArray(row?.chrtIds) ? row.chrtIds : []),
+    ...nested,
+  ])
+}
+
+function productBarcodes(row = {}) {
+  const nested = Array.isArray(row?.sizes)
+    ? row.sizes.flatMap(size => [
+      ...(Array.isArray(size?.skus) ? size.skus : []),
+      ...(Array.isArray(size?.barcodes) ? size.barcodes : []),
+      size?.sku, size?.barcode,
+    ])
+    : []
+  return uniqueIdentities([
+    row?.barcode, row?.sku,
+    ...(Array.isArray(row?.barcodes) ? row.barcodes : []),
+    ...(Array.isArray(row?.skus) ? row.skus : []),
+    ...nested,
+  ])
+}
+
+function identityAliases(row = {}) {
+  return [
+    ...productChrtIds(row).map(value => `chrt:${value}`),
+    ...productNmIds(row).map(value => `nm:${value}`),
+    ...productBarcodes(row).map(value => `barcode:${value}`),
+    ...productVendorCodes(row).map(value => `vendor:${value.toLowerCase()}`),
+  ]
+}
+
 function productKey(row) {
-  return String(row?.nmId ?? row?.nmID ?? row?.nm_id ?? '').trim()
+  return productNmIds(row)[0] || productVendorCodes(row)[0] || productChrtIds(row)[0] || productBarcodes(row)[0] || ''
 }
 
 function isTrustedStockSnapshot(data = {}) {
   const meta = data?.stockMeta && typeof data.stockMeta === 'object' ? data.stockMeta : {}
-  return Number(meta.schemaVersion || 0) === STOCK_DATA_SCHEMA_VERSION && meta.source === STOCK_DATA_SOURCE
+  const schemaVersion = Number(meta.schemaVersion || 0)
+  return schemaVersion >= 2 && schemaVersion <= STOCK_DATA_SCHEMA_VERSION && meta.source === STOCK_DATA_SOURCE
 }
 
 function buildStockMeta(rows = [], extra = {}) {
   const normalized = Array.isArray(rows) ? rows : []
   const totalQuantity = normalized.reduce((sum, row) => sum + Math.max(0, Number(row?.quantity || 0) || 0), 0)
-  const productIds = new Set(normalized.map(row => String(row?.nmId ?? row?.nmID ?? '').trim()).filter(Boolean))
+  const productIds = new Set(normalized.flatMap(productNmIds))
+  const chrtIds = new Set(normalized.flatMap(productChrtIds))
+  const barcodes = new Set(normalized.flatMap(productBarcodes))
   const warehouses = new Set(normalized.map(row => String(row?.warehouseName || '').trim()).filter(Boolean))
   return {
     schemaVersion: STOCK_DATA_SCHEMA_VERSION,
@@ -702,6 +757,8 @@ function buildStockMeta(rows = [], extra = {}) {
     nonZeroRows: normalized.filter(row => Number(row?.quantity || 0) > 0).length,
     zeroRows: normalized.filter(row => Number(row?.quantity || 0) <= 0).length,
     products: productIds.size,
+    chrtIds: chrtIds.size,
+    barcodes: barcodes.size,
     warehouses: warehouses.size,
     receivedAt: new Date().toISOString(),
     ...extra,
@@ -731,36 +788,44 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
   const periodDays = 30
   const productMap = new Map()
   const productAliases = new Map()
-  const aliasValues = row => [
-    row?.nmId, row?.nmID, row?.nm_id,
-    row?.vendorCode, row?.supplierArticle,
-    row?.barcode,
-  ].map(value => String(value ?? '').trim()).filter(Boolean)
+  const mergeUnique = (left = [], right = []) => uniqueIdentities([...(Array.isArray(left) ? left : []), ...(Array.isArray(right) ? right : [])])
   const registerAliases = (item, row = {}) => {
-    for (const alias of aliasValues(row)) productAliases.set(alias.toLowerCase(), item)
-    for (const alias of aliasValues(item)) productAliases.set(alias.toLowerCase(), item)
+    for (const alias of identityAliases(row)) productAliases.set(alias, item)
+    for (const alias of identityAliases(item)) productAliases.set(alias, item)
+  }
+  const resolveProduct = (row = {}) => {
+    for (const alias of identityAliases(row)) {
+      const existing = productAliases.get(alias)
+      if (existing) return existing
+    }
+    return null
   }
   const ensure = (row = {}) => {
-    const aliases = aliasValues(row)
-    for (const alias of aliases) {
-      const existing = productAliases.get(alias.toLowerCase())
-      if (existing) {
-        registerAliases(existing, row)
-        return existing
-      }
+    const existing = resolveProduct(row)
+    if (existing) {
+      registerAliases(existing, row)
+      return existing
     }
-    const key = productKey(row) || String(row.vendorCode || row.supplierArticle || row.barcode || '').trim()
+    const key = productKey(row)
     if (!key) return null
     if (!productMap.has(key)) {
+      const nmIds = productNmIds(row)
+      const vendorCodes = productVendorCodes(row)
+      const chrtIds = productChrtIds(row)
+      const barcodes = productBarcodes(row)
       productMap.set(key, {
         key,
-        nmID: row.nmID ?? row.nmId ?? null,
-        vendorCode: row.vendorCode || row.supplierArticle || '',
-        barcode: row.barcode || '',
+        nmID: nmIds[0] || null,
+        vendorCode: vendorCodes[0] || '',
+        barcode: barcodes[0] || '',
+        chrtIds,
+        barcodes,
+        sizes: Array.isArray(row?.sizes) ? row.sizes : [],
         title: row.title || row.subject || row.subjectName || 'Товар',
         brand: row.brand || '',
         photo: row.photo || '',
         stock: 0,
+        stockRows: 0,
         ordersCount: 0,
         salesCount: 0,
         returnsCount: 0,
@@ -769,8 +834,16 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
       })
     }
     const item = productMap.get(key)
-    if (!item.vendorCode) item.vendorCode = row.vendorCode || row.supplierArticle || ''
-    if (!item.barcode) item.barcode = row.barcode || ''
+    const nmIds = productNmIds(row)
+    const vendorCodes = productVendorCodes(row)
+    const chrtIds = productChrtIds(row)
+    const barcodes = productBarcodes(row)
+    if (!item.nmID && nmIds.length) item.nmID = nmIds[0]
+    if (!item.vendorCode && vendorCodes.length) item.vendorCode = vendorCodes[0]
+    if (!item.barcode && barcodes.length) item.barcode = barcodes[0]
+    item.chrtIds = mergeUnique(item.chrtIds, chrtIds)
+    item.barcodes = mergeUnique(item.barcodes, barcodes)
+    if ((!item.sizes || !item.sizes.length) && Array.isArray(row?.sizes)) item.sizes = row.sizes
     if ((!item.title || item.title === 'Товар') && (row.title || row.subjectName)) item.title = row.title || row.subjectName
     if (!item.brand && row.brand) item.brand = row.brand
     if (!item.photo && row.photo) item.photo = row.photo
@@ -780,19 +853,38 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
 
   rawProducts.forEach(row => ensure(row))
   const warehouses = new Map()
+  const unmatchedStockDetails = []
   let rawStockQuantity = 0
   let mappedStockQuantity = 0
+  let mappedStockRows = 0
   let unmatchedStockRows = 0
   for (const row of stocks) {
     const quantity = Math.max(0, firstNumber(row, ['quantity', 'quantityFull', 'stock', 'stockCount', 'totalQuantity', 'availableQuantity'], 0))
     rawStockQuantity += quantity
     const name = String(row.warehouseName || row.warehouse || row.officeName || 'Все склады').trim() || 'Все склады'
     warehouses.set(name, (warehouses.get(name) || 0) + quantity)
-    const item = ensure(row)
-    if (!item) { unmatchedStockRows += 1; continue }
+    const item = resolveProduct(row) || ((productNmIds(row).length || productVendorCodes(row).length) ? ensure(row) : null)
+    if (!item) {
+      unmatchedStockRows += 1
+      unmatchedStockDetails.push({
+        key: `unmatched:${unmatchedStockRows}:${productChrtIds(row)[0] || productBarcodes(row)[0] || name}`,
+        nmID: productNmIds(row)[0] || null,
+        vendorCode: productVendorCodes(row)[0] || '',
+        chrtId: productChrtIds(row)[0] || '',
+        barcode: productBarcodes(row)[0] || '',
+        techSize: row?.techSize || row?.sizeName || row?.size || '',
+        warehouseName: name,
+        quantity: Math.round(quantity),
+      })
+      continue
+    }
     item.stock += quantity
+    item.stockRows += 1
+    mappedStockRows += 1
     mappedStockQuantity += quantity
   }
+  const stockMappingReady = stocks.length > 0 && (rawStockQuantity === 0 || mappedStockRows > 0)
+  availability.stockDetails = Boolean(availability.stockDetails && stockMappingReady)
   const metaStockQuantity = Math.max(0, Number(stockMeta?.totalQuantity || 0) || 0)
   const resolvedStockQuantity = availability.stocks
     ? (stocks.length > 0 ? rawStockQuantity : metaStockQuantity)
@@ -955,17 +1047,18 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
   const stockDetailMap = new Map()
   if (availability.stockDetails) {
     for (const row of stocks) {
-      const key = productKey(row) || String(row?.vendorCode || '').trim()
-      const product = productMap.get(key)
+      const product = resolveProduct(row) || ((productNmIds(row).length || productVendorCodes(row).length) ? ensure(row) : null)
+      if (!product) continue
       const warehouseName = String(row?.warehouseName || row?.warehouse || 'Все склады').trim() || 'Все склады'
-      const techSize = String(row?.techSize || row?.size || '—').trim() || '—'
-      const barcode = String(row?.barcode || '').trim()
-      const detailKey = [key, barcode, techSize, warehouseName].join('|')
+      const techSize = String(row?.techSize || row?.sizeName || row?.size || '—').trim() || '—'
+      const barcode = productBarcodes(row)[0] || ''
+      const chrtId = productChrtIds(row)[0] || ''
+      const detailKey = [product.key, chrtId, barcode, techSize, warehouseName].join('|')
       const quantity = Math.max(0, firstNumber(row, ['quantity','quantityFull','stock','stockCount','totalQuantity','availableQuantity'], 0))
       const current = stockDetailMap.get(detailKey) || {
-        key:detailKey, nmID:row?.nmId ?? row?.nmID ?? product?.nmID ?? null,
-        vendorCode:row?.vendorCode || product?.vendorCode || '', title:product?.title || row?.subjectName || 'Товар',
-        brand:product?.brand || row?.brand || '', barcode, techSize, warehouseName, quantity:0,
+        key:detailKey, nmID:product.nmID || productNmIds(row)[0] || null,
+        vendorCode:product.vendorCode || productVendorCodes(row)[0] || '', title:product.title || row?.subjectName || 'Товар',
+        brand:product.brand || row?.brand || '', chrtId, barcode, techSize, warehouseName, quantity:0,
       }
       current.quantity += quantity
       stockDetailMap.set(detailKey, current)
@@ -1016,10 +1109,15 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
       ...stockMeta,
       persistedRows: stocks.length,
       calculatedQuantity: Math.round(rawStockQuantity),
+      mappedRows: mappedStockRows,
+      mappedProducts: products.filter(item => Number(item.stockRows || 0) > 0).length,
       mappedQuantity: Math.round(mappedStockQuantity),
       unmatchedQuantity: Math.max(0, Math.round(rawStockQuantity - mappedStockQuantity)),
       unmatchedRows: unmatchedStockRows,
-      detailsAvailable: stocks.length > 0,
+      mappingCoveragePercent: rawStockQuantity > 0 ? Math.round(mappedStockQuantity / rawStockQuantity * 1000) / 10 : 100,
+      detailsAvailable: availability.stockDetails,
+      needsIdentifierRefresh: rawStockQuantity > 0 && mappedStockRows === 0,
+      legacySnapshot: Number(stockMeta?.schemaVersion || 0) < STOCK_DATA_SCHEMA_VERSION,
       consistent: stocks.length > 0
         ? Math.round(rawStockQuantity) === Math.round(metaStockQuantity)
         : metaStockQuantity === 0,
@@ -1035,6 +1133,7 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     dailyTrend: [...dailyMap.values()].map(row => ({ ...row, revenue: Math.round(row.revenue) })),
     warehouses: [...warehouses.entries()].map(([name, quantity]) => ({ name, quantity: Math.round(quantity) })).sort((a, b) => b.quantity - a.quantity),
     stockDetails: [...stockDetailMap.values()].map(item => ({ ...item, quantity:Math.round(item.quantity) })).sort((a,b) => b.quantity - a.quantity),
+    unmatchedStockDetails: unmatchedStockDetails.sort((a,b) => b.quantity - a.quantity),
     categories: [...categoryMap.values()].sort((a, b) => b.revenue - a.revenue),
     recommendations: recommendations.slice(0, 30),
     syncWarnings: Array.isArray(data.syncWarnings) ? data.syncWarnings : [],
@@ -1058,13 +1157,24 @@ async function loadProducts(token, { limit = 100, maxPages = 300, deadlineAt = 0
       deadlineAt,
     })
     const cards = Array.isArray(result?.cards) ? result.cards : []
-    products.push(...cards.map(card => ({
-      nmID: card.nmID,
-      vendorCode: card.vendorCode,
-      title: card.title || card.subjectName || 'Товар',
-      brand: card.brand || '',
-      photo: card.photos?.[0]?.big || card.photos?.[0]?.square || '',
-    })))
+    products.push(...cards.map(card => {
+      const sizes = (Array.isArray(card?.sizes) ? card.sizes : []).map(size => ({
+        chrtID: size?.chrtID ?? size?.chrtId ?? size?.chrt_id ?? null,
+        techSize: size?.techSize || size?.wbSize || size?.sizeName || '',
+        wbSize: size?.wbSize || '',
+        skus: uniqueIdentities(Array.isArray(size?.skus) ? size.skus : [size?.sku, size?.barcode]),
+      }))
+      return {
+        nmID: card.nmID,
+        vendorCode: card.vendorCode,
+        title: card.title || card.subjectName || 'Товар',
+        brand: card.brand || '',
+        photo: card.photos?.[0]?.big || card.photos?.[0]?.square || '',
+        sizes,
+        chrtIds: uniqueIdentities(sizes.map(size => size.chrtID)),
+        barcodes: uniqueIdentities(sizes.flatMap(size => size.skus || [])),
+      }
+    }))
 
     const next = result?.cursor || {}
     if (cards.length < limit || !next.updatedAt || !next.nmID) break
@@ -1076,35 +1186,36 @@ async function loadProducts(token, { limit = 100, maxPages = 300, deadlineAt = 0
 
 function normalizeWarehouseRemains(report) {
   const rows = []
+  const quantityFrom = row => firstNumber(row, ['quantity','quantityFull','stock','stockCount','totalQuantity','availableQuantity'], 0)
+  const normalizeRow = (item = {}, warehouse = null) => ({
+    nmId: item?.nmId ?? item?.nmID ?? item?.nm_id ?? warehouse?.nmId ?? warehouse?.nmID ?? null,
+    vendorCode: item?.vendorCode || item?.supplierArticle || item?.article || warehouse?.vendorCode || warehouse?.supplierArticle || '',
+    chrtId: item?.chrtId ?? item?.chrtID ?? item?.chrt_id ?? item?.chrtid ?? item?.sizeId ?? warehouse?.chrtId ?? warehouse?.chrtID ?? warehouse?.chrt_id ?? null,
+    barcode: item?.barcode || item?.sku || warehouse?.barcode || warehouse?.sku || '',
+    techSize: item?.techSize || item?.sizeName || item?.size || item?.wbSize || warehouse?.techSize || warehouse?.sizeName || '',
+    brand: item?.brand || '',
+    subjectName: item?.subjectName || item?.subject || '',
+    warehouseName: String(warehouse?.warehouseName || warehouse?.warehouse || item?.warehouseName || item?.warehouse || 'Все склады').trim() || 'Все склады',
+    quantity: Math.max(0, Number(quantityFrom(warehouse || item)) || 0),
+  })
+
   for (const item of Array.isArray(report) ? report : []) {
     const warehouses = Array.isArray(item?.warehouses) ? item.warehouses : []
     const physical = warehouses.filter(row => {
-      const name = String(row?.warehouseName || '').trim().toLowerCase()
+      const name = String(row?.warehouseName || row?.warehouse || '').trim().toLowerCase()
       return name && name !== 'всего находится на складах' && !name.includes('в пути')
     })
     const source = physical.length
       ? physical
-      : warehouses.filter(row => String(row?.warehouseName || '').trim().toLowerCase() === 'всего находится на складах')
-    if (!source.length) {
-      rows.push({
-        nmId:item?.nmId ?? item?.nmID, vendorCode:item?.vendorCode || '', barcode:item?.barcode || '',
-        techSize:item?.techSize || '', warehouseName:'Все склады', quantity:0,
-      })
+      : warehouses.filter(row => String(row?.warehouseName || row?.warehouse || '').trim().toLowerCase() === 'всего находится на складах')
+
+    if (source.length) {
+      for (const warehouse of source) rows.push(normalizeRow(item, warehouse))
       continue
     }
-    for (const warehouse of source) {
-      const quantity = Number(warehouse?.quantity || 0)
-      rows.push({
-        nmId:item?.nmId ?? item?.nmID,
-        vendorCode:item?.vendorCode || '',
-        barcode:item?.barcode || '',
-        techSize:item?.techSize || '',
-        brand:item?.brand || '',
-        subjectName:item?.subjectName || '',
-        warehouseName:String(warehouse?.warehouseName || 'Все склады').trim() || 'Все склады',
-        quantity:Number.isFinite(quantity) ? Math.max(0, quantity) : 0,
-      })
-    }
+
+    // Некоторые версии отчёта отдают уже плоские строки без массива warehouses.
+    rows.push(normalizeRow(item))
   }
   return rows
 }
@@ -1365,34 +1476,50 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
 }
 
 function wbNmKey(row) {
-  return String(row?.nmId ?? row?.nmID ?? row?.nm_id ?? '').trim()
+  return productNmIds(row)[0] || ''
 }
 
 function enrichProducts(products, stats) {
-  const stockByNm = new Map()
-  const revenueByNm = new Map()
+  const rows = Array.isArray(products) ? products : []
+  const aliasToKey = new Map()
+  const stockByKey = new Map()
+  const revenueByKey = new Map()
+
+  for (const product of rows) {
+    const key = productKey(product)
+    if (!key) continue
+    for (const alias of identityAliases(product)) aliasToKey.set(alias, key)
+  }
+
+  const resolveKey = row => {
+    for (const alias of identityAliases(row)) {
+      const key = aliasToKey.get(alias)
+      if (key) return key
+    }
+    return productKey(row)
+  }
 
   for (const row of stats.stocks || []) {
-    const key = wbNmKey(row)
+    const key = resolveKey(row)
     if (!key) continue
-    const quantity = Number(row.quantity ?? row.quantityFull ?? row.stock ?? row.stockCount ?? row.totalQuantity ?? row.availableQuantity ?? 0)
-    stockByNm.set(key, (stockByNm.get(key) || 0) + (Number.isFinite(quantity) ? quantity : 0))
+    const quantity = firstNumber(row, ['quantity','quantityFull','stock','stockCount','totalQuantity','availableQuantity'], 0)
+    stockByKey.set(key, (stockByKey.get(key) || 0) + Math.max(0, Number.isFinite(quantity) ? quantity : 0))
   }
 
   for (const row of stats.sales || []) {
-    const key = wbNmKey(row)
+    const key = resolveKey(row)
     if (!key) continue
     const revenue = Number(row.forPay ?? row.finishedPrice ?? row.priceWithDisc ?? 0)
-    revenueByNm.set(key, (revenueByNm.get(key) || 0) + (Number.isFinite(revenue) ? revenue : 0))
+    revenueByKey.set(key, (revenueByKey.get(key) || 0) + (Number.isFinite(revenue) ? revenue : 0))
   }
 
-  return products.map(product => {
-    const key = wbNmKey(product)
-    const stock = stockByNm.get(key) || 0
+  return rows.map(product => {
+    const key = productKey(product)
+    const stock = stockByKey.get(key) || 0
     return {
       ...product,
       stock,
-      revenue: Math.round(revenueByNm.get(key) || 0),
+      revenue: Math.round(revenueByKey.get(key) || 0),
       status: stock === 0 ? 'Нет остатка' : stock < 10 ? 'Риск' : 'В норме',
     }
   })
@@ -1407,7 +1534,7 @@ app.get('/health', async (_req, res) => {
   res.json({
     ok: true,
     service: 'elisei-api',
-    version: '2.7.4',
+    version: '2.7.5',
     database,
     backgroundWorker: {
       running: backgroundWorkerState.running,
