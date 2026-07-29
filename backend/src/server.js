@@ -79,33 +79,132 @@ function authRequired(req, res, next) {
 }
 
 const isoDaysAgo = (days) => new Date(Date.now() - days * 86400000).toISOString()
-const authHeaders = token => ({ Authorization: token, Accept: 'application/json' })
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+const wbClientSecret = String(process.env.WB_CLIENT_SECRET || '').trim()
+const activeSyncs = new Set()
+
+const WB_SCOPE_BITS = {
+  content: { bit: 1, label: 'Контент' },
+  analytics: { bit: 2, label: 'Аналитика' },
+  statistics: { bit: 5, label: 'Статистика' },
+}
+const WB_TOKEN_TYPES = { 1: 'Базовый', 2: 'Тестовый', 3: 'Персональный', 4: 'Сервисный' }
+
+function decodeWbToken(token) {
+  try {
+    const parts = String(token || '').split('.')
+    if (parts.length < 2) throw new Error('not jwt')
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'))
+  } catch {
+    throw Object.assign(new Error('API-ключ Wildberries имеет неверный формат'), { status: 401 })
+  }
+}
+
+function inspectWbToken(token) {
+  const payload = decodeWbToken(token)
+  const scopeMask = Number(payload.s || 0)
+  const typeId = Number(payload.acc || 0)
+  const scopes = Object.entries(WB_SCOPE_BITS)
+    .filter(([, item]) => (scopeMask & (1 << item.bit)) !== 0)
+    .map(([key]) => key)
+  const missing = Object.entries(WB_SCOPE_BITS)
+    .filter(([, item]) => (scopeMask & (1 << item.bit)) === 0)
+    .map(([, item]) => item.label)
+
+  if (Number(payload.exp || 0) > 0 && Number(payload.exp) * 1000 <= Date.now()) {
+    throw Object.assign(new Error('API-ключ Wildberries истёк. Создайте новый ключ.'), { status: 401 })
+  }
+  if (Boolean(payload.t) || typeId === 2) {
+    throw Object.assign(new Error('Тестовый токен не имеет доступа к реальным данным кабинета'), { status: 403 })
+  }
+  if (missing.length) {
+    throw Object.assign(new Error(`В API-ключе не хватает категорий: ${missing.join(', ')}. Нужны Контент, Аналитика и Статистика.`), { status: 403 })
+  }
+  if ([1, 4].includes(typeId) && !wbClientSecret) {
+    throw Object.assign(new Error(`${WB_TOKEN_TYPES[typeId] || 'Этот'} токен требует сервисный секрет WB. В Render не задан WB_CLIENT_SECRET.`), { status: 403 })
+  }
+
+  return {
+    scopes,
+    typeId,
+    tokenType: WB_TOKEN_TYPES[typeId] || 'Неизвестный',
+    readOnly: (scopeMask & (1 << 30)) !== 0,
+  }
+}
+
+function retryDelayMs(response, attempt) {
+  const header = response.headers.get('x-ratelimit-retry') || response.headers.get('retry-after')
+  const seconds = Number(header)
+  const base = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : Math.min(20000, 1000 * (2 ** attempt))
+  const jitter = 0.85 + Math.random() * 0.3
+  return Math.max(1000, Math.round(base * jitter))
+}
+
+function authHeaders(token) {
+  const headers = {
+    Authorization: token,
+    Accept: 'application/json',
+    'User-Agent': 'ELISEI/2.5.3 (marketplace analytics)',
+  }
+  if (wbClientSecret) headers['X-Client-Secret'] = wbClientSecret
+  return headers
+}
 
 async function wbFetch(url, token, options = {}) {
-  const response = await fetch(url, { ...options, headers: { ...authHeaders(token), ...(options.headers || {}) }, signal: AbortSignal.timeout(18000) })
-  const text = await response.text()
-  let payload = null
-  try { payload = text ? JSON.parse(text) : null } catch { payload = text }
-  if (!response.ok) {
-    const error = new Error(payload?.detail || payload?.message || `Wildberries API: ${response.status}`)
-    error.status = response.status
-    error.payload = payload
+  const {
+    maxAttempts = 5,
+    timeoutMs = 45000,
+    label = 'WB API',
+    ...fetchOptions
+  } = options
+
+  let lastError = null
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    let response
+    try {
+      response = await fetch(url, {
+        ...fetchOptions,
+        headers: { ...authHeaders(token), ...(fetchOptions.headers || {}) },
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+    } catch (error) {
+      lastError = Object.assign(new Error(`${label}: сеть или таймаут запроса`), { status: 502, cause: error })
+      if (attempt + 1 >= Math.min(maxAttempts, 3)) throw lastError
+      await sleep(1000 * (2 ** attempt))
+      continue
+    }
+
+    const text = await response.text()
+    let payload = null
+    try { payload = text ? JSON.parse(text) : null } catch { payload = text }
+    const requestId = response.headers.get('x-request-id') || payload?.requestId || ''
+
+    if (response.ok) return payload
+
+    const detail = payload?.detail || payload?.message || payload?.title || `Wildberries API: ${response.status}`
+    const error = Object.assign(new Error(`${label}: ${detail}${requestId ? ` (requestId: ${requestId})` : ''}`), {
+      status: response.status,
+      payload,
+      requestId,
+    })
+    lastError = error
+
+    if (response.status === 429 && attempt + 1 < maxAttempts) {
+      await sleep(retryDelayMs(response, attempt))
+      continue
+    }
+    if (response.status >= 500 && attempt + 1 < Math.min(maxAttempts, 3)) {
+      await sleep(1000 * (2 ** attempt))
+      continue
+    }
     throw error
   }
-  return payload
+  throw lastError || Object.assign(new Error(`${label}: запрос не выполнен`), { status: 502 })
 }
 
 async function probeToken(token) {
-  const probes = [
-    { scope: 'analytics', run: () => loadWbWarehouseStocks(token, { limit: 1, maxPages: 1 }) },
-    { scope: 'content', run: () => wbFetch('https://content-api.wildberries.ru/content/v2/get/cards/list', token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings: { cursor: { limit: 1 }, filter: { withPhoto: -1 } } }) }) },
-  ]
-  const scopes = []
-  for (const probe of probes) {
-    try { await probe.run(); scopes.push(probe.scope) } catch (error) { if (error.status === 401) throw new Error('Wildberries отклонил API-ключ'); if (![403, 404].includes(error.status)) continue }
-  }
-  if (!scopes.length) throw new Error('Ключ принят, но не найдены права Content или Statistics')
-  return scopes
+  const info = inspectWbToken(token)
+  return info.scopes
 }
 
 function encryptToken(value) {
@@ -144,14 +243,38 @@ function publicConnection(row) {
   }
 }
 
-async function loadProducts(token) {
-  try {
-    const result = await wbFetch('https://content-api.wildberries.ru/content/v2/get/cards/list', token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings: { cursor: { limit: 100 }, filter: { withPhoto: -1 } } }) })
-    return (result?.cards || []).map(card => ({ nmID: card.nmID, vendorCode: card.vendorCode, title: card.title || card.subjectName || 'Товар', brand: card.brand || '', photo: card.photos?.[0]?.big || card.photos?.[0]?.square || '' }))
-  } catch { return [] }
+async function loadProducts(token, { limit = 100, maxPages = 300 } = {}) {
+  const endpoint = 'https://content-api.wildberries.ru/content/v2/get/cards/list'
+  const products = []
+  let cursor = { limit }
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const result = await wbFetch(endpoint, token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings: { cursor, filter: { withPhoto: -1 } } }),
+      label: 'Товары WB',
+      timeoutMs: 60000,
+    })
+    const cards = Array.isArray(result?.cards) ? result.cards : []
+    products.push(...cards.map(card => ({
+      nmID: card.nmID,
+      vendorCode: card.vendorCode,
+      title: card.title || card.subjectName || 'Товар',
+      brand: card.brand || '',
+      photo: card.photos?.[0]?.big || card.photos?.[0]?.square || '',
+    })))
+
+    const next = result?.cursor || {}
+    if (cards.length < limit || !next.updatedAt || !next.nmID) break
+    cursor = { limit, updatedAt: next.updatedAt, nmID: next.nmID }
+    await sleep(700)
+  }
+  return products
 }
 
 function extractStockRows(payload) {
+  if (Array.isArray(payload?.data?.items)) return payload.data.items
   if (Array.isArray(payload)) return payload
   if (Array.isArray(payload?.data)) return payload.data
   if (Array.isArray(payload?.stocks)) return payload.stocks
@@ -170,24 +293,41 @@ async function loadWbWarehouseStocks(token, { limit = 250000, maxPages = 20 } = 
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ limit, offset }),
+      label: 'Остатки WB',
+      timeoutMs: 120000,
+      maxAttempts: 5,
     })
     const batch = extractStockRows(payload)
     rows.push(...batch)
 
     if (batch.length < limit) break
     offset += batch.length
+    await sleep(21000)
   }
-
   return rows
 }
 
 async function loadStatistics(token) {
-  const [orders, sales, stocks] = await Promise.all([
-    wbFetch(`https://statistics-api.wildberries.ru/api/v1/supplier/orders?dateFrom=${encodeURIComponent(isoDaysAgo(30))}&flag=0`, token).catch(() => []),
-    wbFetch(`https://statistics-api.wildberries.ru/api/v1/supplier/sales?dateFrom=${encodeURIComponent(isoDaysAgo(30))}&flag=0`, token).catch(() => []),
-    loadWbWarehouseStocks(token),
-  ])
-  return { orders: Array.isArray(orders) ? orders : [], sales: Array.isArray(sales) ? sales : [], stocks }
+  const orders = await wbFetch(
+    `https://statistics-api.wildberries.ru/api/v1/supplier/orders?dateFrom=${encodeURIComponent(isoDaysAgo(30))}&flag=0`,
+    token,
+    { label: 'Заказы WB', timeoutMs: 90000, maxAttempts: 5 },
+  )
+  await sleep(1200)
+
+  const sales = await wbFetch(
+    `https://statistics-api.wildberries.ru/api/v1/supplier/sales?dateFrom=${encodeURIComponent(isoDaysAgo(30))}&flag=0`,
+    token,
+    { label: 'Продажи WB', timeoutMs: 90000, maxAttempts: 5 },
+  )
+  await sleep(1200)
+
+  const stocks = await loadWbWarehouseStocks(token)
+  return {
+    orders: Array.isArray(orders) ? orders : [],
+    sales: Array.isArray(sales) ? sales : [],
+    stocks,
+  }
 }
 
 function wbNmKey(row) {
@@ -230,7 +370,7 @@ function buildDashboard(data) { const sales = data.sales || []; const orders = d
 app.get('/health', async (_req, res) => {
   let database = 'not-configured'
   if (pool) { try { await pool.query('SELECT 1'); database = 'ok' } catch { database = 'error' } }
-  res.json({ ok: true, service: 'elisei-api', version: '2.5.2', database })
+  res.json({ ok: true, service: 'elisei-api', version: '2.5.3', database })
 })
 
 app.post('/api/auth/register', async (req, res) => {
@@ -300,10 +440,21 @@ app.get('/api/wb/status/:id', authRequired, async (req, res) => {
 app.post('/api/wb/sync', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, String(req.body?.connectionId || '') || null)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено. Подключите Wildberries.' })
+
+  const syncKey = `${req.auth.sub}:${connection.id}`
+  if (activeSyncs.has(syncKey)) return res.status(409).json({ error: 'Синхронизация уже выполняется. Дождитесь её завершения.' })
+
+  activeSyncs.add(syncKey)
   const startedAt = Date.now()
   try {
     const token = decryptToken(connection.token_encrypted)
-    const [products, stats] = await Promise.all([loadProducts(token), loadStatistics(token)])
+    inspectWbToken(token)
+
+    // Запросы идут последовательно: так один кабинет не бьётся о глобальный лимитер WB.
+    const products = await loadProducts(token)
+    await sleep(1200)
+    const stats = await loadStatistics(token)
+
     const enrichedProducts = enrichProducts(products, stats)
     const data = { products: enrichedProducts, ...stats }
     const counts = { products: enrichedProducts.length, orders: stats.orders.length, sales: stats.sales.length, stocks: stats.stocks.length }
@@ -315,6 +466,8 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
     const history = withSyncLog(connection.sync_history, { status: 'error', message: error.message, durationMs: Date.now() - startedAt })
     await pool.query(`UPDATE marketplace_connections SET sync_history=$1::jsonb, updated_at=NOW(), status='error' WHERE id=$2 AND user_id=$3`, [JSON.stringify(history), connection.id, req.auth.sub])
     res.status(error.status || 502).json({ error: error.message })
+  } finally {
+    activeSyncs.delete(syncKey)
   }
 })
 
