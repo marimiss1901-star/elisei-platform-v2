@@ -21,6 +21,22 @@ const defaultSettings = {
   fixedMonthly:0, taxPercent:0, defaultCostPercent:0, targetMarginPercent:20, productCosts:{}
 }
 
+const emptyConnection = {
+  connected:false, connectionId:'', scopes:[], tokens:[], syncStates:[], lastSync:null,
+  primaryToken:null, primaryTokenId:null, tokenMode:'none', coverageByStage:{}
+}
+
+const normalizeConnection = (value = {}, current = {}) => ({
+  ...emptyConnection,
+  ...current,
+  ...value,
+  connected:Boolean(value.connected ?? current.connected),
+  scopes:Array.isArray(value.scopes) ? value.scopes : (current.scopes || []),
+  tokens:Array.isArray(value.tokens) ? value.tokens : (current.tokens || []),
+  syncStates:Array.isArray(value.syncStates) ? value.syncStates : (current.syncStates || []),
+  coverageByStage:value.coverageByStage || current.coverageByStage || {},
+})
+
 const demoProducts = [
   { key:'demo-1', nmID:'1234567', vendorCode:'DEMO-01', title:'Товар для демонстрации', brand:'ELISEI Demo', revenue:286740, stock:124, salesCount:38, returnsCount:2, returnRate:5.3, stockCoverDays:98, stockStatus:'В наличии', abc:'A', xyz:'X', recommendation:'Контролировать динамику', profit:null, margin:null, unitCost:0, averagePrice:7546, breakevenPrice:null, targetPrice:null },
   { key:'demo-2', nmID:'7654321', vendorCode:'DEMO-02', title:'Ходовой товар', brand:'ELISEI Demo', revenue:198200, stock:8, salesCount:31, returnsCount:1, returnRate:3.2, stockCoverDays:8, stockStatus:'Заканчивается', abc:'A', xyz:'Y', recommendation:'Запланировать поставку', profit:null, margin:null, unitCost:0, averagePrice:6394, breakevenPrice:null, targetPrice:null },
@@ -53,7 +69,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [toast, setToast] = useState('')
   const [chat, setChat] = useState('')
   const [messages, setMessages] = useState([{ role:'el', text:`${greeting}${displayName ? `, ${displayName}` : ''}. Я готов разобрать продажи, остатки и прибыль.` }])
-  const [connection, setConnection] = useState({ connected:false, connectionId:'', scopes:[], tokens:[], syncStates:[], lastSync:null })
+  const [connection, setConnection] = useState(emptyConnection)
   const [tokenDraft, setTokenDraft] = useState('')
   const [tokenLabel, setTokenLabel] = useState('')
   const [showToken, setShowToken] = useState(false)
@@ -92,7 +108,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     Promise.all([wbApi.current(), businessApi.settings()]).then(async ([status, settingsResult]) => {
       if (settingsResult?.settings) setSettingsDraft(settingsResult.settings)
       if (!status.connected || !status.connectionId) return
-      setConnection({ connected:true, connectionId:status.connectionId, scopes:status.scopes || [], tokens:status.tokens || [], syncStates:status.syncStates || [], lastSync:status.lastSync || null })
+      setConnection(normalizeConnection(status))
       setSyncHistory(status.syncHistory || [])
       await loadConnectionData(status.connectionId)
     }).catch(error => notify(error.message, 8000))
@@ -108,7 +124,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         setConnection(current => {
           const previousStockSuccess = current.syncStates?.find(item => item.stage === 'stocks')?.lastSuccessAt
           shouldReload = Boolean(nextStockSuccess && nextStockSuccess !== previousStockSuccess) || Boolean(status.lastSync && status.lastSync !== current.lastSync)
-          return { ...current, scopes:status.scopes || [], tokens:status.tokens || [], syncStates:status.syncStates || [], lastSync:status.lastSync || current.lastSync }
+          return normalizeConnection(status, current)
         })
         if (shouldReload) await loadConnectionData(connection.connectionId)
       } catch { /* фоновая проверка не должна мешать работе интерфейса */ }
@@ -187,7 +203,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     setSyncing(true)
     try {
       const result = await wbApi.sync(connectionId, stages)
-      setConnection(current => ({ ...current, connected:true, lastSync:result.lastSync, syncStates:result.syncStates || current.syncStates }))
+      setConnection(current => normalizeConnection({ connected:true, lastSync:result.lastSync, syncStates:result.syncStates || current.syncStates }, current))
       setDashboardData(result.dashboard || null)
       setCoreData(result.core || null)
       setSyncHistory(result.syncHistory || [])
@@ -208,9 +224,9 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     setChecking(true)
     try {
       const result = await wbApi.connect(tokenDraft.trim(), tokenLabel.trim())
-      setConnection({ connected:true, connectionId:result.connectionId, scopes:result.scopes || [], tokens:result.tokens || [], syncStates:result.syncStates || [], lastSync:result.lastSync || null })
+      setConnection(normalizeConnection(result))
       setTokenDraft(''); setTokenLabel('')
-      notify('Токен добавлен. ELISEI автоматически распределит его по доступным разделам.')
+      notify(result.tokenMode === 'universal' ? 'Основной токен подключён и назначен всем доступным потокам.' : 'Токен подключён. ELISEI использует его только для доступных категорий.')
     } catch (error) { notify(error.message, 9000) }
     finally { setChecking(false) }
   }
@@ -219,8 +235,16 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     if (!window.confirm('Удалить этот API-токен из ELISEI? Уже загруженные данные сохранятся.')) return
     try {
       const result = await wbApi.removeToken(tokenId)
-      setConnection(current => ({ ...current, connected:Boolean(result.connected), connectionId:result.connectionId || current.connectionId, scopes:result.scopes || [], tokens:result.tokens || [], syncStates:result.syncStates || [] }))
+      setConnection(current => normalizeConnection(result, current))
       notify('API-токен удалён')
+    } catch (error) { notify(error.message, 8000) }
+  }
+
+  const setPrimaryToken = async tokenId => {
+    try {
+      const result = await wbApi.setPrimaryToken(tokenId)
+      setConnection(current => normalizeConnection(result, current))
+      notify('Основной токен выбран. Синхронизации будут использовать его в первую очередь.')
     } catch (error) { notify(error.message, 8000) }
   }
 
@@ -228,7 +252,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     if (!window.confirm('Отключить Wildberries? Загруженные данные этого подключения будут удалены.')) return
     try {
       await wbApi.disconnect(connection.connectionId)
-      setConnection({ connected:false, connectionId:'', scopes:[], tokens:[], syncStates:[], lastSync:null })
+      setConnection(emptyConnection)
       setDashboardData(null); setCoreData(null); setLiveProducts([]); setSyncHistory([])
       notify('Wildberries отключён')
     } catch (error) { notify(error.message, 8000) }
@@ -439,11 +463,21 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       if (state.status === 'running') return 'Загрузка'
       return state.lastError || 'Не загружено'
     }
-    return <section className="app-page glass-panel connections-page"><div className="page-title"><span>Интеграции</span><h1>Менеджер подключений Wildberries</h1><p>Добавляйте отдельные токены для разных категорий. ELISEI сам выбирает подходящий токен для каждого потока данных.</p></div>
-      <div className="wb-coverage-grid">{requirements.map(item => { const covered=connection.scopes?.includes(item.scope); const state=item.stage?syncStatus(item.stage):null; return <div className={`wb-coverage-card ${covered?'covered':'missing'}`} key={`${item.scope}:${item.stage || item.title}`}><span className="coverage-icon">{covered?<CheckCircle2 size={20}/>:<AlertTriangle size={20}/>}</span><div><strong>{item.title}</strong><p>{item.text}</p><small>{covered?(item.stage?stageLabel(state):'Токен подключён'):'Нужна категория доступа'}</small></div></div>})}</div>
-      {connection.tokens?.length > 0 && <div className="token-manager"><div className="section-title-row"><div><span>Безопасное хранилище</span><h2>Подключённые токены</h2></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Синхронизация':'Синхронизировать доступные разделы'}</button></div><div className="token-card-grid">{connection.tokens.map(item => <div className="saved-token-card" key={item.id}><div className="saved-token-head"><div className="token-shield"><ShieldCheck size={20}/></div><div><strong>{item.label}</strong><span>{item.tokenType} · {item.readOnly?'только чтение':'чтение и запись'}</span></div><button className="token-remove" onClick={() => removeToken(item.id)} title="Удалить токен"><X size={17}/></button></div><div className="token-scopes">{item.scopeLabels?.map(scope => <b key={scope}>{scope}</b>)}</div><small>Действует до: {item.expiresAt?new Date(item.expiresAt).toLocaleDateString('ru-RU'):'не указано'} · код {item.fingerprint}</small></div>)}</div></div>}
-      <div className="connection-card add-token-card"><div className="connection-logo">WB</div><div className="connection-copy"><div className="connection-title"><h3>{connection.tokens?.length?'Добавить ещё один токен':'Подключить Wildberries'}</h3><span className={connection.tokens?.length?'connection-status connected':'connection-status'}>{connection.tokens?.length?`${connection.tokens.length} токен(а) подключено`:'Не подключён'}</span></div><p>Для облачного ELISEI используйте Базовые токены. Разделяйте категории по назначению: Контент, Статистика, Аналитика и Продвижение можно подключить отдельными ключами. После регистрации сервиса подключение будет переведено на Сервисный токен или OAuth 2.0.</p><form className="token-form multi-token-form" onSubmit={saveConnection}><label>Название токена<input type="text" value={tokenLabel} onChange={e => setTokenLabel(e.target.value)} placeholder="Например: Реклама или Аналитика" maxLength="80"/></label><label>API-ключ Wildberries</label><div className="token-input"><input type={showToken?'text':'password'} value={tokenDraft} onChange={e => setTokenDraft(e.target.value)} placeholder="Вставьте официальный API-ключ" autoComplete="off"/><button type="button" onClick={() => setShowToken(value => !value)}>{showToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>Категории определятся автоматически. Сам ключ не возвращается в браузер после сохранения.</small><button className="primary-btn" disabled={checking}>{checking?<><RefreshCw className="spin" size={17}/> Проверяем</>:<><PlugZap size={17}/> Проверить и добавить</>}</button></form></div></div>
-      <div className="security-note"><ShieldCheck size={22}/><div><strong>Токены не смешиваются между клиентами</strong><p>AES-256-GCM, отдельная запись для каждого токена, проверка принадлежности одному кабинету продавца и независимые статусы синхронизации.</p></div></div>
+    const primary = connection.primaryToken || connection.tokens?.find(item => item.isPrimary)
+    const modeCopy = connection.tokenMode === 'universal'
+      ? { tone:'universal', title:'Один основной токен покрывает все рабочие потоки', text:'Товары, заказы, продажи, остатки и реклама будут синхронизироваться через один API-ключ. Дополнительные токены не требуются.' }
+      : connection.tokenMode === 'combined'
+        ? { tone:'combined', title:'Потоки собраны из нескольких токенов', text:'ELISEI использует основной токен в первую очередь, а дополнительный — только для отсутствующих в нём категорий.' }
+        : connection.tokens?.length
+          ? { tone:'partial', title:'Основной токен подключён не ко всем потокам', text:'Добавьте дополнительный токен только для категорий, которые отмечены ниже как недоступные.' }
+          : { tone:'empty', title:'Подключите один основной API-ключ WB', text:'Если в нём есть все нужные категории, этого ключа будет достаточно для всех потоков.' }
+
+    return <section className="app-page glass-panel connections-page"><div className="page-title"><span>Интеграции</span><h1>Подключение Wildberries</h1><p>ELISEI предпочитает один универсальный токен. Дополнительный ключ используется только когда в основном нет нужной категории.</p></div>
+      <div className={`token-mode-banner ${modeCopy.tone}`}><div className="token-mode-icon">{connection.tokenMode === 'universal' ? <CheckCircle2 size={24}/> : <ShieldCheck size={24}/>}</div><div><strong>{modeCopy.title}</strong><p>{modeCopy.text}</p>{primary && <small>Основной: {primary.label} · {primary.stageCoverageCount || 0}/5 рабочих потоков</small>}</div></div>
+      <div className="wb-coverage-grid">{requirements.map(item => { const covered=connection.scopes?.includes(item.scope); const state=item.stage?syncStatus(item.stage):null; const source=item.stage?connection.coverageByStage?.[item.stage]:connection.tokens?.find(token => token.scopes?.includes(item.scope)); return <div className={`wb-coverage-card ${covered?'covered':'missing'}`} key={`${item.scope}:${item.stage || item.title}`}><span className="coverage-icon">{covered?<CheckCircle2 size={20}/>:<AlertTriangle size={20}/>}</span><div><strong>{item.title}</strong><p>{item.text}</p><small>{covered ? `${source?.isPrimary ? 'Основной токен' : source?.label || 'Токен подключён'}${item.stage ? ` · ${stageLabel(state)}` : ''}` : 'Нужна категория доступа'}</small></div></div>})}</div>
+      {connection.tokens?.length > 0 && <div className="token-manager"><div className="section-title-row"><div><span>Безопасное хранилище</span><h2>API-токены кабинета</h2></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Синхронизация':'Синхронизировать доступные разделы'}</button></div><div className="token-card-grid">{connection.tokens.map(item => <div className={`saved-token-card ${item.isPrimary?'primary-token-card':''}`} key={item.id}><div className="saved-token-head"><div className="token-shield"><ShieldCheck size={20}/></div><div><div className="token-title-line"><strong>{item.label}</strong>{item.isPrimary && <b className="primary-token-badge">Основной</b>}</div><span>{item.tokenType} · {item.readOnly?'только чтение':'чтение и запись'}</span></div><button className="token-remove" onClick={() => removeToken(item.id)} title="Удалить токен"><X size={17}/></button></div><div className="token-flow-coverage"><strong>{item.stageCoverageCount || 0}/5 потоков</strong><span>{item.coversAllCoreFlows ? 'Покрывает всё рабочее ядро' : 'Используется только по своим категориям'}</span></div><div className="token-scopes">{item.scopeLabels?.map(scope => <b key={scope}>{scope}</b>)}</div><div className="token-card-foot"><small>До: {item.expiresAt?new Date(item.expiresAt).toLocaleDateString('ru-RU'):'не указано'} · код {item.fingerprint}</small>{!item.isPrimary && <button className="token-primary-btn" onClick={() => setPrimaryToken(item.id)}>Сделать основным</button>}</div></div>)}</div></div>}
+      <div className="connection-card add-token-card"><div className="connection-logo">WB</div><div className="connection-copy"><div className="connection-title"><h3>{connection.tokens?.length ? (connection.tokenMode === 'universal' ? 'Добавить резервный токен' : 'Дополнить недостающие категории') : 'Подключить основной токен'}</h3><span className={connection.tokens?.length?'connection-status connected':'connection-status'}>{connection.tokenMode === 'universal' ? 'Основной покрывает всё' : connection.tokens?.length ? `${connection.tokens.length} токен(а)` : 'Не подключён'}</span></div><p>{connection.tokenMode === 'universal' ? 'Основной токен уже покрывает рабочие потоки. Новый ключ добавляйте только как резервный или для будущих категорий — финансы, отзывы, чат и документы.' : 'Можно вставить один токен сразу со всеми нужными категориями. ELISEI автоматически сделает наиболее полный ключ основным и не будет дублировать запросы через остальные.'}</p><form className="token-form multi-token-form" onSubmit={saveConnection}><label>Название токена — необязательно<input type="text" value={tokenLabel} onChange={e => setTokenLabel(e.target.value)} placeholder={connection.tokens?.length ? 'Например: Резервный или Отзывы' : 'Например: Основной токен WB'} maxLength="80"/></label><label>API-ключ Wildberries</label><div className="token-input"><input type={showToken?'text':'password'} value={tokenDraft} onChange={e => setTokenDraft(e.target.value)} placeholder="Вставьте официальный API-ключ" autoComplete="off"/><button type="button" onClick={() => setShowToken(value => !value)}>{showToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>Категории определятся автоматически. Если ключ покрывает больше потоков, он станет основным. Сам токен обратно в браузер не возвращается.</small><button className="primary-btn" disabled={checking}>{checking?<><RefreshCw className="spin" size={17}/> Проверяем</>:<><PlugZap size={17}/> Проверить и добавить</>}</button></form></div></div>
+      <div className="security-note"><ShieldCheck size={22}/><div><strong>Один токен — один набор запросов</strong><p>ELISEI не дублирует обращения к WB через запасные ключи. Для каждого потока выбирается основной токен, а дополнительный включается только при отсутствии нужной категории.</p></div></div>
       {connection.connected && <div className="connection-danger-zone"><div><strong>Отключить магазин полностью</strong><p>Удалятся токены и загруженные данные этого магазина.</p></div><button className="danger-btn" onClick={disconnect}>Отключить Wildberries</button></div>}
     </section>
   }

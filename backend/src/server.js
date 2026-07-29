@@ -73,7 +73,9 @@ async function initDatabase() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE(user_id, token_fingerprint)
     );
+    ALTER TABLE wb_tokens ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE;
     CREATE INDEX IF NOT EXISTS wb_tokens_connection_idx ON wb_tokens(connection_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS wb_tokens_one_primary_idx ON wb_tokens(connection_id) WHERE is_primary = TRUE AND status = 'active';
     CREATE TABLE IF NOT EXISTS wb_sync_states (
       connection_id UUID NOT NULL REFERENCES marketplace_connections(id) ON DELETE CASCADE,
       stage TEXT NOT NULL,
@@ -90,6 +92,7 @@ async function initDatabase() {
     );
   `)
   await migrateLegacyWbTokens()
+  await ensurePrimaryTokens()
 }
 
 function requireBackendConfig() {
@@ -147,6 +150,7 @@ const WB_SYNC_STAGES = Object.freeze({
   stocks: { label: 'Остатки', scope: 'analytics' },
   advertising: { label: 'Реклама', scope: 'promotion' },
 })
+const CORE_SYNC_SCOPES = [...new Set(Object.values(WB_SYNC_STAGES).map(item => item.scope))]
 
 function decodeJwtPayload(value, invalidMessage) {
   try {
@@ -239,7 +243,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.7.0 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.7.1 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -348,14 +352,45 @@ function tokenFingerprint(token) {
   return crypto.createHash('sha256').update(String(token || '')).digest('hex')
 }
 
+function rowScopes(row) {
+  if (Array.isArray(row?.scopes)) return row.scopes
+  if (typeof row?.scopes === 'string') {
+    try { const parsed = JSON.parse(row.scopes); return Array.isArray(parsed) ? parsed : [] } catch { return [] }
+  }
+  return []
+}
+
+function tokenStageCoverage(row) {
+  const scopes = rowScopes(row)
+  return Object.entries(WB_SYNC_STAGES)
+    .filter(([, definition]) => scopes.includes(definition.scope))
+    .map(([stage, definition]) => ({ stage, label: definition.label }))
+}
+
+function tokenCoreCoverage(row) {
+  const scopes = rowScopes(row)
+  return CORE_SYNC_SCOPES.filter(scope => scopes.includes(scope)).length
+}
+
+function coversAllCoreFlows(row) {
+  const scopes = rowScopes(row)
+  return CORE_SYNC_SCOPES.every(scope => scopes.includes(scope))
+}
+
 function publicWbToken(row) {
+  const scopes = rowScopes(row)
+  const stageCoverage = tokenStageCoverage(row)
   return {
     id: row.id,
     label: row.label,
-    scopes: Array.isArray(row.scopes) ? row.scopes : [],
-    scopeLabels: (Array.isArray(row.scopes) ? row.scopes : []).map(scope => WB_SCOPE_BITS[scope]?.label || scope),
+    scopes,
+    scopeLabels: scopes.map(scope => WB_SCOPE_BITS[scope]?.label || scope),
     tokenType: row.token_type_label,
     readOnly: Boolean(row.read_only),
+    isPrimary: Boolean(row.is_primary),
+    coversAllCoreFlows: coversAllCoreFlows(row),
+    stageCoverage,
+    stageCoverageCount: stageCoverage.length,
     expiresAt: row.expires_at || null,
     status: row.status,
     lastCheckedAt: row.last_checked_at || null,
@@ -379,7 +414,7 @@ function publicSyncState(row) {
 }
 
 async function getWbTokens(userId, connectionId) {
-  const result = await pool.query(`SELECT * FROM wb_tokens WHERE user_id=$1 AND connection_id=$2 AND status='active' ORDER BY created_at`, [userId, connectionId])
+  const result = await pool.query(`SELECT * FROM wb_tokens WHERE user_id=$1 AND connection_id=$2 AND status='active' ORDER BY is_primary DESC, created_at`, [userId, connectionId])
   return result.rows
 }
 
@@ -414,14 +449,74 @@ async function updateSyncState(connectionId, stage, patch = {}) {
 }
 
 function unionTokenScopes(tokens) {
-  return [...new Set(tokens.flatMap(row => Array.isArray(row.scopes) ? row.scopes : []))]
+  return [...new Set(tokens.flatMap(row => rowScopes(row)))]
+}
+
+function selectTokenRow(tokens, scope) {
+  return [...tokens]
+    .filter(item => rowScopes(item).includes(scope))
+    .sort((a, b) => {
+      const primaryDiff = Number(Boolean(b.is_primary)) - Number(Boolean(a.is_primary))
+      if (primaryDiff) return primaryDiff
+      const coreDiff = tokenCoreCoverage(b) - tokenCoreCoverage(a)
+      if (coreDiff) return coreDiff
+      const scopeDiff = rowScopes(b).length - rowScopes(a).length
+      if (scopeDiff) return scopeDiff
+      return new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()
+    })[0] || null
 }
 
 function chooseToken(tokens, scope) {
-  const row = tokens.find(item => Array.isArray(item.scopes) && item.scopes.includes(scope))
+  const row = selectTokenRow(tokens, scope)
   if (!row) return null
   const token = decryptToken(row.token_encrypted)
   return { row, token, info: inspectWbToken(token) }
+}
+
+async function recomputePrimaryToken(connectionId) {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const result = await client.query(`SELECT * FROM wb_tokens WHERE connection_id=$1 AND status='active' ORDER BY created_at`, [connectionId])
+    if (!result.rows.length) {
+      await client.query('COMMIT')
+      return null
+    }
+    const selected = [...result.rows].sort((a, b) => {
+      const coreDiff = tokenCoreCoverage(b) - tokenCoreCoverage(a)
+      if (coreDiff) return coreDiff
+      const scopeDiff = rowScopes(b).length - rowScopes(a).length
+      if (scopeDiff) return scopeDiff
+      const primaryDiff = Number(Boolean(b.is_primary)) - Number(Boolean(a.is_primary))
+      if (primaryDiff) return primaryDiff
+      return new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()
+    })[0]
+    await client.query('UPDATE wb_tokens SET is_primary=FALSE,updated_at=NOW() WHERE connection_id=$1 AND is_primary=TRUE', [connectionId])
+    await client.query('UPDATE wb_tokens SET is_primary=TRUE,updated_at=NOW() WHERE id=$1 AND connection_id=$2', [selected.id, connectionId])
+    await client.query('UPDATE marketplace_connections SET token_encrypted=$1,updated_at=NOW() WHERE id=$2', [selected.token_encrypted, connectionId])
+    await client.query('COMMIT')
+    return { ...selected, is_primary: true }
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
+async function ensurePrimaryTokens() {
+  const result = await pool.query(`
+    SELECT DISTINCT wt.connection_id
+    FROM wb_tokens wt
+    WHERE wt.status='active'
+      AND NOT EXISTS (
+        SELECT 1 FROM wb_tokens primary_token
+        WHERE primary_token.connection_id=wt.connection_id
+          AND primary_token.status='active'
+          AND primary_token.is_primary=TRUE
+      )
+  `)
+  for (const row of result.rows) await recomputePrimaryToken(row.connection_id)
 }
 
 async function migrateLegacyWbTokens() {
@@ -456,7 +551,15 @@ async function getConnection(userId, id = null) {
 }
 
 function publicConnection(row, tokens = [], syncStates = []) {
-  const scopes = tokens.length ? unionTokenScopes(tokens) : (row?.scopes || [])
+  const scopes = tokens.length ? unionTokenScopes(tokens) : rowScopes(row)
+  const primaryRow = tokens.find(item => item.is_primary) || [...tokens].sort((a,b) => tokenCoreCoverage(b) - tokenCoreCoverage(a))[0] || null
+  const primaryToken = primaryRow ? publicWbToken(primaryRow) : null
+  const allCoreCovered = CORE_SYNC_SCOPES.every(scope => scopes.includes(scope))
+  const universal = Boolean(primaryRow && coversAllCoreFlows(primaryRow))
+  const coverageByStage = Object.fromEntries(Object.entries(WB_SYNC_STAGES).map(([stage, definition]) => {
+    const selected = selectTokenRow(tokens, definition.scope)
+    return [stage, selected ? { tokenId:selected.id, label:selected.label, isPrimary:Boolean(selected.is_primary) } : null]
+  }))
   return {
     connected: Boolean(row && tokens.length),
     hasConnection: Boolean(row),
@@ -465,6 +568,10 @@ function publicConnection(row, tokens = [], syncStates = []) {
     scopes,
     scopeLabels: scopes.map(scope => WB_SCOPE_BITS[scope]?.label || scope),
     tokens: tokens.map(publicWbToken),
+    primaryToken,
+    primaryTokenId: primaryToken?.id || null,
+    tokenMode: universal ? 'universal' : allCoreCovered ? 'combined' : tokens.length ? 'partial' : 'none',
+    coverageByStage,
     syncStates: syncStates.map(publicSyncState),
     status: row?.status || 'disconnected',
     connectedAt: row?.created_at || null,
@@ -1126,7 +1233,7 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       if (result.pending) {
         state = await updateSyncState(connection.id, stage, {
           status:'pending', lastAttemptAt:new Date().toISOString(), nextAllowedAt:result.nextAllowedAt,
-          lastError:null, taskId:result.taskId, metadata:{ taskStatus:result.taskStatus, tokenId:selected.row.id },
+          lastError:null, taskId:result.taskId, metadata:{ taskStatus:result.taskStatus, tokenId:selected.row.id, tokenLabel:selected.row.label, primary:Boolean(selected.row.is_primary) },
         })
         return { stage, status:'pending', value:fallback, warning:'Остатки: отчёт WB формируется в фоне. ELISEI проверит его автоматически.', state }
       }
@@ -1135,7 +1242,7 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
     const count = stageCount(stage, value)
     state = await updateSyncState(connection.id, stage, {
       status:'success', lastAttemptAt:new Date().toISOString(), lastSuccessAt:new Date().toISOString(), nextAllowedAt:null,
-      lastError:null, lastCount:count, taskId:null, metadata:{ tokenId:selected.row.id },
+      lastError:null, lastCount:count, taskId:null, metadata:{ tokenId:selected.row.id, tokenLabel:selected.row.label, primary:Boolean(selected.row.is_primary) },
     })
     return { stage, status:'success', value, state }
   } catch (error) {
@@ -1189,7 +1296,7 @@ function buildDashboard(data, settings = DEFAULT_BUSINESS_SETTINGS) { const summ
 app.get('/health', async (_req, res) => {
   let database = 'not-configured'
   if (pool) { try { await pool.query('SELECT 1'); database = 'ok' } catch { database = 'error' } }
-  res.json({ ok: true, service: 'elisei-api', version: '2.7.0', database })
+  res.json({ ok: true, service: 'elisei-api', version: '2.7.1', database })
 })
 
 app.post('/api/auth/register', async (req, res) => {
@@ -1233,9 +1340,10 @@ app.get('/api/wb/connection', authRequired, async (req, res) => {
 app.post('/api/wb/connect', authRequired, async (req, res) => {
   try {
     const token = String(req.body?.token || '').trim()
-    const label = String(req.body?.label || '').trim().slice(0, 80) || 'API-токен'
+    const requestedLabel = String(req.body?.label || '').trim().slice(0, 80)
     if (token.length < 40) return res.status(400).json({ error: 'API-ключ выглядит слишком коротким' })
     const info = await probeToken(token)
+    const label = requestedLabel || (CORE_SYNC_SCOPES.every(scope => info.scopes.includes(scope)) ? 'Основной токен WB' : 'Дополнительный токен WB')
     let connection = await getConnection(req.auth.sub)
     if (connection?.seller_id && info.sellerId && connection.seller_id !== info.sellerId) {
       return res.status(409).json({ error: 'Этот токен относится к другому кабинету продавца. Для другого кабинета потребуется отдельный магазин ELISEI.' })
@@ -1258,6 +1366,7 @@ app.post('/api/wb/connect', authRequired, async (req, res) => {
         token_type=EXCLUDED.token_type,token_type_label=EXCLUDED.token_type_label,scopes=EXCLUDED.scopes,
         read_only=EXCLUDED.read_only,expires_at=EXCLUDED.expires_at,status='active',last_checked_at=NOW(),updated_at=NOW()
     `, [crypto.randomUUID(), connection.id, req.auth.sub, label, encrypted, fingerprint, info.sellerId || null, info.typeId, info.tokenType, JSON.stringify(info.scopes), info.readOnly, info.expiresAt])
+    await recomputePrimaryToken(connection.id)
     const tokens = await getWbTokens(req.auth.sub, connection.id)
     const scopes = unionTokenScopes(tokens)
     const updated = await pool.query(`UPDATE marketplace_connections SET seller_id=COALESCE(seller_id,$1),scopes=$2::jsonb,status='connected',updated_at=NOW() WHERE id=$3 AND user_id=$4 RETURNING *`, [info.sellerId || null, JSON.stringify(scopes), connection.id, req.auth.sub])
@@ -1272,11 +1381,40 @@ app.delete('/api/wb/tokens/:tokenId', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
   await pool.query('DELETE FROM wb_tokens WHERE id=$1 AND user_id=$2 AND connection_id=$3', [req.params.tokenId, req.auth.sub, connection.id])
+  const remaining = await pool.query(`SELECT 1 FROM wb_tokens WHERE connection_id=$1 AND status='active' LIMIT 1`, [connection.id])
+  if (remaining.rows.length) await recomputePrimaryToken(connection.id)
   const tokens = await getWbTokens(req.auth.sub, connection.id)
   const scopes = unionTokenScopes(tokens)
   const updated = await pool.query(`UPDATE marketplace_connections SET scopes=$1::jsonb,status=$2,updated_at=NOW() WHERE id=$3 AND user_id=$4 RETURNING *`, [JSON.stringify(scopes), tokens.length ? 'connected' : 'needs_token', connection.id, req.auth.sub])
   const states = await getSyncStates(connection.id)
   res.json(publicConnection(updated.rows[0], tokens, states))
+})
+
+app.post('/api/wb/tokens/:tokenId/primary', authRequired, async (req, res) => {
+  try {
+    const connection = await getConnection(req.auth.sub)
+    if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
+    const tokenResult = await pool.query(`SELECT * FROM wb_tokens WHERE id=$1 AND user_id=$2 AND connection_id=$3 AND status='active'`, [req.params.tokenId, req.auth.sub, connection.id])
+    if (!tokenResult.rows[0]) return res.status(404).json({ error: 'API-токен не найден' })
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query('UPDATE wb_tokens SET is_primary=FALSE,updated_at=NOW() WHERE connection_id=$1 AND is_primary=TRUE', [connection.id])
+      await client.query('UPDATE wb_tokens SET is_primary=TRUE,updated_at=NOW() WHERE id=$1 AND connection_id=$2', [req.params.tokenId, connection.id])
+      await client.query('UPDATE marketplace_connections SET token_encrypted=$1,updated_at=NOW() WHERE id=$2', [tokenResult.rows[0].token_encrypted, connection.id])
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+    const refreshedConnection = await getConnection(req.auth.sub, connection.id)
+    const [tokens, states] = await Promise.all([getWbTokens(req.auth.sub, connection.id), getSyncStates(connection.id)])
+    res.json(publicConnection(refreshedConnection, tokens, states))
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message })
+  }
 })
 
 app.get('/api/wb/status/:id', authRequired, async (req, res) => {

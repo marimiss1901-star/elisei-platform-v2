@@ -51,6 +51,7 @@ export const wbApi = {
   core: (connectionId) => request(`/api/wb/core/${encodeURIComponent(connectionId)}`),
   syncHistory: (connectionId) => request(`/api/wb/sync-history/${encodeURIComponent(connectionId)}`),
   removeToken: (tokenId) => request(`/api/wb/tokens/${encodeURIComponent(tokenId)}`, { method: 'DELETE' }),
+  setPrimaryToken: (tokenId) => request(`/api/wb/tokens/${encodeURIComponent(tokenId)}/primary`, { method: 'POST' }),
   disconnect: (connectionId) => request('/api/wb/disconnect', { method: 'POST', body: JSON.stringify({ connectionId }) }),
   configured: Boolean(API_BASE),
   baseUrl: API_BASE,
