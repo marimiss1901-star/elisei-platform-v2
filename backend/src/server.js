@@ -278,7 +278,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.7.7 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.7.8 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -1610,13 +1610,33 @@ function normalizeAdvertisingStats(payload, campaigns) {
   return { campaigns: normalized, totals }
 }
 
+
+function buildAdvertisingMeta(value = {}) {
+  const campaigns = Array.isArray(value?.campaigns) ? value.campaigns : []
+  const campaignsWithStats = campaigns.filter(item =>
+    Number(item?.views || 0) > 0 || Number(item?.clicks || 0) > 0 || Number(item?.spend || 0) > 0 || Number(item?.orders || 0) > 0
+  ).length
+  return {
+    schemaVersion: 1,
+    source: 'wb_promotion_api',
+    campaigns: campaigns.length,
+    campaignsWithStats,
+    totalSpend: Math.round(Number(value?.totals?.spend || 0) * 100) / 100,
+    period: value?.period || null,
+    receivedAt: new Date().toISOString(),
+  }
+}
+
 async function loadAdvertising(token, { deadlineAt = 0 } = {}) {
   const campaignPayload = await wbFetch('https://advert-api.wildberries.ru/api/advert/v2/adverts?statuses=4,7,8,9,11', token, {
     label: 'Кампании WB', timeoutMs: 45000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
   })
   const allCampaigns = normalizeCampaignList(campaignPayload)
   const campaigns = allCampaigns.slice(0, 50)
-  if (!campaigns.length) return { campaigns: [], totals: { views:0, clicks:0, spend:0, orders:0, revenue:0, ctr:0, cpc:0, crr:null }, period: { days:30 }, truncated:false }
+  if (!campaigns.length) {
+    const empty = { campaigns: [], totals: { views:0, clicks:0, spend:0, orders:0, revenue:0, ctr:0, cpc:0, crr:null }, period: { days:30 }, truncated:false }
+    return { ...empty, meta: buildAdvertisingMeta(empty) }
+  }
   const endDate = new Date().toISOString().slice(0, 10)
   const beginDate = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10)
   const ids = campaigns.map(item => item.advertId).join(',')
@@ -1624,7 +1644,8 @@ async function loadAdvertising(token, { deadlineAt = 0 } = {}) {
     label: 'Статистика рекламы WB', timeoutMs: 60000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
   })
   const normalized = normalizeAdvertisingStats(statsPayload, campaigns)
-  return { ...normalized, period: { beginDate, endDate, days:30 }, truncated: allCampaigns.length > campaigns.length, totalCampaigns: allCampaigns.length }
+  const value = { ...normalized, period: { beginDate, endDate, days:30 }, truncated: allCampaigns.length > campaigns.length, totalCampaigns: allCampaigns.length }
+  return { ...value, meta: buildAdvertisingMeta(value) }
 }
 
 async function advanceWarehouseRemainsTask(token, state, { deadlineAt = 0 } = {}) {
@@ -1762,7 +1783,7 @@ app.get('/health', async (_req, res) => {
   res.json({
     ok: true,
     service: 'elisei-api',
-    version: '2.7.7',
+    version: '2.7.8',
     database,
     backgroundWorker: {
       running: backgroundWorkerState.running,
@@ -2006,6 +2027,21 @@ app.get('/api/wb/core/:id', authRequired, async (req, res) => {
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
   const settings = await getBusinessSettings(req.auth.sub)
   res.json({ core: buildCoreAnalytics(connection.data || {}, settings), lastSync: connection.last_sync_at || null })
+})
+
+app.get('/api/wb/advertising/:id', authRequired, async (req, res) => {
+  const connection = await getConnection(req.auth.sub, req.params.id)
+  if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
+  const advertising = connection.data?.advertising && typeof connection.data.advertising === 'object'
+    ? connection.data.advertising
+    : { campaigns: [], totals: {}, period: null, truncated: false }
+  const stateResult = await pool.query('SELECT * FROM wb_sync_states WHERE connection_id=$1 AND stage=$2', [connection.id, 'advertising'])
+  res.json({
+    advertising,
+    meta: advertising.meta || buildAdvertisingMeta(advertising),
+    syncState: stateResult.rows[0] ? publicSyncState(stateResult.rows[0]) : null,
+    lastSync: connection.last_sync_at || null,
+  })
 })
 
 app.post('/api/wb/stocks/:id/repair', authRequired, async (req, res) => {

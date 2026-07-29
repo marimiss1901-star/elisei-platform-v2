@@ -93,6 +93,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [savingSettings, setSavingSettings] = useState(false)
   const [dashboardData, setDashboardData] = useState(null)
   const [coreData, setCoreData] = useState(null)
+  const [advertisingSnapshot, setAdvertisingSnapshot] = useState(null)
   const [liveProducts, setLiveProducts] = useState([])
   const [syncHistory, setSyncHistory] = useState([])
   const [settingsDraft, setSettingsDraft] = useState(defaultSettings)
@@ -110,13 +111,14 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   }
 
   const loadConnectionData = async connectionId => {
-    const [dashboard, productResult, historyResult, coreResult] = await Promise.all([
-      wbApi.dashboard(connectionId), wbApi.products(connectionId), wbApi.syncHistory(connectionId), wbApi.core(connectionId)
+    const [dashboard, productResult, historyResult, coreResult, advertisingResult] = await Promise.all([
+      wbApi.dashboard(connectionId), wbApi.products(connectionId), wbApi.syncHistory(connectionId), wbApi.core(connectionId), wbApi.advertising(connectionId)
     ])
     setDashboardData(dashboard.dashboard || null)
     setLiveProducts(productResult.products || [])
     setSyncHistory(historyResult.history || [])
     setCoreData(coreResult.core || null)
+    setAdvertisingSnapshot(advertisingResult.advertising || coreResult.core?.advertising || null)
     if (coreResult.core?.settings) setSettingsDraft(coreResult.core.settings)
   }
 
@@ -163,7 +165,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   }, [connection.connected, connection.connectionId])
 
   useEffect(() => {
-    if (active !== 'Остатки' || !connection.connected || !connection.connectionId) return
+    if (!['Остатки','Реклама'].includes(active) || !connection.connected || !connection.connectionId) return
     loadConnectionData(connection.connectionId).catch(() => {})
   }, [active, connection.connected, connection.connectionId])
 
@@ -244,6 +246,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       setConnection(normalized)
       setDashboardData(result.dashboard || null)
       setCoreData(result.core || null)
+      setAdvertisingSnapshot(result.core?.advertising || null)
       setSyncHistory(result.syncHistory || [])
       const productResult = await wbApi.products(connectionId)
       setLiveProducts(productResult.products || [])
@@ -313,7 +316,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     try {
       await wbApi.disconnect(connection.connectionId)
       setConnection(emptyConnection)
-      setDashboardData(null); setCoreData(null); setLiveProducts([]); setSyncHistory([])
+      setDashboardData(null); setCoreData(null); setAdvertisingSnapshot(null); setLiveProducts([]); setSyncHistory([])
       notify('Wildberries отключён')
     } catch (error) { notify(error.message, 8000) }
   }
@@ -483,10 +486,11 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const renderPricing = () => <section className="app-page glass-panel"><div className="page-title"><span>Ценообразование</span><h1>Цены и акции</h1><p>Цена в ноль, целевая цена, цена пика и безопасные сценарии скидок.</p></div>{summary.cogs == null && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Добавьте себестоимость</strong><p>Без неё невозможно честно определить убыточные скидки.</p></div><button onClick={() => setActive('Финансы')}>Открыть финансы</button></div>}<div className="data-table pricing-table"><div className="data-row head pricing-row"><span>Товар</span><span>Текущая/средняя</span><span>Цена в 0</span><span>Целевая</span><span>Пик</span><span>−20%</span><span>−40%</span><span>Решение</span></div>{productRows.map(p => { const base=p.averagePrice || p.targetPrice || 0; const discount20=base*.8; const discount40=base*.6; return <div className="data-row pricing-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatMoney(base)}</span><span>{formatMoney(p.breakevenPrice)}</span><span>{formatMoney(p.targetPrice)}</span><span>{formatMoney(p.peakPrice)}</span><span className={p.breakevenPrice && discount20 < p.breakevenPrice ? 'negative' : 'positive'}>{formatMoney(discount20)}</span><span className={p.breakevenPrice && discount40 < p.breakevenPrice ? 'negative' : 'positive'}>{formatMoney(discount40)}</span><span>{p.profit != null && p.profit < 0 ? 'Повысить цену / снизить расходы' : p.status === 'Избыток' ? 'Допустима контролируемая акция' : 'Сохранять цену'}</span></div>})}</div></section>
 
   const renderAdvertising = () => {
-    const advertising = coreData?.advertising || { campaigns:[], totals:{}, source:'manual' }
+    const advertising = advertisingSnapshot || coreData?.advertising || { campaigns:[], totals:{}, source:'manual' }
     const campaigns = Array.isArray(advertising.campaigns) ? advertising.campaigns : []
     const totals = advertising.totals || {}
-    const apiAvailable = Boolean(coreData?.availability?.advertising)
+    const advertisingState = (connection.syncStates || []).find(item => item.stage === 'advertising')
+    const apiAvailable = Boolean(coreData?.availability?.advertising || campaigns.length > 0 || Number(advertisingState?.lastCount || 0) > 0)
     const hasPromotionToken = connection.scopes?.includes('promotion')
     const spend = apiAvailable ? Number(totals.spend || 0) : Number(settingsDraft.advertisingMonthly || 0)
     const crr = apiAvailable && totals.crr != null ? Number(totals.crr) : summary.revenue > 0 ? spend / summary.revenue * 100 : 0
@@ -496,6 +500,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       <div className="metrics-grid four"><MetricCard label="Расходы" value={formatMoney(spend)} delta={apiAvailable?'по API WB · 30 дней':'введено вручную'} icon={Megaphone}/><MetricCard label="Показы" value={apiAvailable?formatNumber(totals.views):'Не загружено'} delta={apiAvailable?`${formatNumber(totals.clicks)} кликов`:'нужен токен Продвижение'} icon={Eye}/><MetricCard label="Заказы из рекламы" value={apiAvailable?formatNumber(totals.orders):'Не загружено'} delta={apiAvailable?`CTR ${formatPercent(totals.ctr)}`:'данные отсутствуют'} icon={PackageSearch}/><MetricCard label="CRR" value={apiAvailable&&totals.crr==null?'—':formatPercent(crr)} delta={romi==null?'ROMI пока недоступен':`ROMI ${formatPercent(romi)}`} icon={Percent}/></div>
       {!hasPromotionToken && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Не подключена категория «Продвижение»</strong><p>Добавьте отдельный API-токен WB. Новый магазин создавать не нужно.</p></div><button onClick={() => setActive('Подключения')}>Добавить токен</button></div>}
       {hasPromotionToken && !apiAvailable && <div className="notice"><RefreshCw size={20}/><div><strong>Рекламный токен подключён</strong><p>Запустите этап «Реклама». Если WB установил паузу, ELISEI покажет точное время следующего разрешённого запроса и сохранит предыдущие данные.</p></div><button onClick={() => syncConnection(connection.connectionId, ['advertising'])}>Синхронизировать рекламу</button></div>}
+      {Number(advertisingState?.lastCount || 0) > 0 && campaigns.length === 0 && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Кампании сохранены, но экран ещё не перечитал их</strong><p>В журнале есть {formatNumber(advertisingState.lastCount)} кампаний. Обновляем данные напрямую из PostgreSQL без нового запроса к Wildberries.</p></div><button onClick={() => loadConnectionData(connection.connectionId).catch(error => notify(error.message, 8000))}>Обновить экран</button></div>}
       {campaigns.length > 0 && <><div className="section-title-row"><div><span>WB Продвижение</span><h2>Кампании за 30 дней</h2></div><small>{advertising.truncated ? `Показаны первые 50 из ${advertising.totalCampaigns || campaigns.length}` : `${campaigns.length} кампаний`}</small></div><div className="data-table ad-table"><div className="data-row head ad-row"><span>Кампания</span><span>Статус</span><span>Расход</span><span>Показы</span><span>Клики</span><span>Заказы</span><span>Выручка</span><span>CRR</span></div>{[...campaigns].sort((a,b)=>Number(b.spend||0)-Number(a.spend||0)).map(item => <div className="data-row ad-row" key={item.advertId}><span><strong>{item.name}</strong><small>ID {item.advertId}</small></span><span><b className={`status-badge ${item.status===9?'success':item.status===11?'warning':'info'}`}>{statusName(item.status)}</b></span><span>{formatMoney(item.spend)}</span><span>{formatNumber(item.views)}</span><span>{formatNumber(item.clicks)}</span><span>{formatNumber(item.orders)}</span><span>{formatMoney(item.revenue)}</span><span>{formatPercent(item.crr)}</span></div>)}</div></>}
       {!apiAvailable && <div className="settings-card ad-input-card"><h3>Резервный ручной расход</h3><p>Используется в P&amp;L только пока WB API рекламы не загрузил фактические расходы.</p><div className="inline-setting"><input type="number" min="0" value={settingsDraft.advertisingMonthly ?? 0} onChange={e => updateSetting('advertisingMonthly',e.target.value)}/><button className="primary-btn" onClick={saveSettings}><Save size={17}/> Сохранить</button></div></div>}
     </section>
