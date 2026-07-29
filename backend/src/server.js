@@ -717,6 +717,7 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
   // Доверяем только снимку, который прошёл новый нормализатор и имеет метаданные происхождения.
   const trustedStocks = isTrustedStockSnapshot(data)
   const stocks = trustedStocks && Array.isArray(data.stocks) ? data.stocks : []
+  const stockMeta = trustedStocks && data?.stockMeta && typeof data.stockMeta === 'object' ? { ...data.stockMeta } : null
   const advertisingData = data?.advertising && typeof data.advertising === 'object' ? data.advertising : { campaigns: [], totals: {} }
   const stageStatus = data?.stageStatus && typeof data.stageStatus === 'object' ? data.stageStatus : {}
   const availability = {
@@ -724,18 +725,38 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     orders: stageStatus.orders?.available ?? orders.length > 0,
     sales: stageStatus.sales?.available ?? salesRows.length > 0,
     stocks: trustedStocks && Boolean(stageStatus.stocks?.available ?? true),
+    stockDetails: trustedStocks && stocks.length > 0,
     advertising: stageStatus.advertising?.available ?? (Array.isArray(advertisingData.campaigns) && advertisingData.campaigns.length > 0),
   }
   const periodDays = 30
   const productMap = new Map()
+  const productAliases = new Map()
+  const aliasValues = row => [
+    row?.nmId, row?.nmID, row?.nm_id,
+    row?.vendorCode, row?.supplierArticle,
+    row?.barcode,
+  ].map(value => String(value ?? '').trim()).filter(Boolean)
+  const registerAliases = (item, row = {}) => {
+    for (const alias of aliasValues(row)) productAliases.set(alias.toLowerCase(), item)
+    for (const alias of aliasValues(item)) productAliases.set(alias.toLowerCase(), item)
+  }
   const ensure = (row = {}) => {
-    const key = productKey(row) || String(row.vendorCode || row.supplierArticle || '').trim()
+    const aliases = aliasValues(row)
+    for (const alias of aliases) {
+      const existing = productAliases.get(alias.toLowerCase())
+      if (existing) {
+        registerAliases(existing, row)
+        return existing
+      }
+    }
+    const key = productKey(row) || String(row.vendorCode || row.supplierArticle || row.barcode || '').trim()
     if (!key) return null
     if (!productMap.has(key)) {
       productMap.set(key, {
         key,
         nmID: row.nmID ?? row.nmId ?? null,
         vendorCode: row.vendorCode || row.supplierArticle || '',
+        barcode: row.barcode || '',
         title: row.title || row.subject || row.subjectName || 'Товар',
         brand: row.brand || '',
         photo: row.photo || '',
@@ -749,22 +770,33 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     }
     const item = productMap.get(key)
     if (!item.vendorCode) item.vendorCode = row.vendorCode || row.supplierArticle || ''
+    if (!item.barcode) item.barcode = row.barcode || ''
     if ((!item.title || item.title === 'Товар') && (row.title || row.subjectName)) item.title = row.title || row.subjectName
     if (!item.brand && row.brand) item.brand = row.brand
     if (!item.photo && row.photo) item.photo = row.photo
+    registerAliases(item, row)
     return item
   }
 
   rawProducts.forEach(row => ensure(row))
   const warehouses = new Map()
+  let rawStockQuantity = 0
+  let mappedStockQuantity = 0
+  let unmatchedStockRows = 0
   for (const row of stocks) {
-    const item = ensure(row)
-    if (!item) continue
     const quantity = Math.max(0, firstNumber(row, ['quantity', 'quantityFull', 'stock', 'stockCount', 'totalQuantity', 'availableQuantity'], 0))
-    item.stock += quantity
+    rawStockQuantity += quantity
     const name = String(row.warehouseName || row.warehouse || row.officeName || 'Все склады').trim() || 'Все склады'
     warehouses.set(name, (warehouses.get(name) || 0) + quantity)
+    const item = ensure(row)
+    if (!item) { unmatchedStockRows += 1; continue }
+    item.stock += quantity
+    mappedStockQuantity += quantity
   }
+  const metaStockQuantity = Math.max(0, Number(stockMeta?.totalQuantity || 0) || 0)
+  const resolvedStockQuantity = availability.stocks
+    ? (stocks.length > 0 ? rawStockQuantity : metaStockQuantity)
+    : 0
 
   const dailyMap = new Map()
   for (let offset = periodDays - 1; offset >= 0; offset -= 1) {
@@ -806,12 +838,11 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
   let totalSales = 0
   let totalReturns = 0
   let totalOrders = orders.length
-  let totalStock = 0
+  const totalStock = resolvedStockQuantity
   for (const item of productMap.values()) {
     totalRevenue += item.revenue
     totalSales += item.salesCount
     totalReturns += item.returnsCount
-    totalStock += item.stock
   }
 
   const sortedByRevenue = [...productMap.values()].sort((a, b) => b.revenue - a.revenue)
@@ -842,7 +873,7 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     const profit = hasCost ? item.revenue - cogs - commission - tax - logistics - allocatedShared : null
     const margin = profit != null && item.revenue > 0 ? profit / item.revenue * 100 : null
     const dailyAverage = item.salesCount / periodDays
-    const stockCoverDays = availability.stocks && dailyAverage > 0 ? item.stock / dailyAverage : null
+    const stockCoverDays = availability.stockDetails && dailyAverage > 0 ? item.stock / dailyAverage : null
     const values = [...dailyMap.keys()].map(day => item.dailySales[day] || 0)
     const mean = values.reduce((sum, value) => sum + value, 0) / values.length
     const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length
@@ -853,17 +884,17 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     const breakevenPrice = hasCost && denominator > 0 ? (unitCost + settings.logisticsPerSale) / denominator : null
     const targetDenominator = 1 - settings.targetMarginPercent / 100
     const targetPrice = breakevenPrice != null && targetDenominator > 0 ? breakevenPrice / targetDenominator : null
-    const frozenMoney = availability.stocks && item.salesCount === 0 && item.stock > 0 ? item.stock * (unitCost || averagePrice * 0.5) : 0
-    let stockStatus = availability.stocks ? 'В наличии' : 'Не загружено'
-    if (availability.stocks && item.stock <= 0) stockStatus = 'Нет остатка'
-    else if (availability.stocks && stockCoverDays != null && stockCoverDays < 14) stockStatus = 'Заканчивается'
-    else if (availability.stocks && stockCoverDays != null && stockCoverDays > 120) stockStatus = 'Избыток'
-    else if (availability.stocks && item.salesCount === 0 && item.stock > 20) stockStatus = 'Без движения'
+    const frozenMoney = availability.stockDetails && item.salesCount === 0 && item.stock > 0 ? item.stock * (unitCost || averagePrice * 0.5) : 0
+    let stockStatus = availability.stockDetails ? 'В наличии' : (availability.stocks ? 'Детализация ожидается' : 'Не загружено')
+    if (availability.stockDetails && item.stock <= 0) stockStatus = 'Нет остатка'
+    else if (availability.stockDetails && stockCoverDays != null && stockCoverDays < 14) stockStatus = 'Заканчивается'
+    else if (availability.stockDetails && stockCoverDays != null && stockCoverDays > 120) stockStatus = 'Избыток'
+    else if (availability.stockDetails && item.salesCount === 0 && item.stock > 20) stockStatus = 'Без движения'
 
-    let recommendation = availability.stocks ? 'Контролировать динамику' : 'Дождаться загрузки остатков WB'
-    if (availability.stocks && item.stock <= 0 && item.salesCount > 0) recommendation = 'Срочно пополнить остаток'
-    else if (availability.stocks && stockCoverDays != null && stockCoverDays < 14) recommendation = 'Запланировать поставку'
-    else if (availability.stocks && item.salesCount === 0 && item.stock > 20) recommendation = 'Проверить цену и запустить распродажу'
+    let recommendation = availability.stockDetails ? 'Контролировать динамику' : (availability.stocks ? 'Восстановить детализацию остатков WB' : 'Дождаться загрузки остатков WB')
+    if (availability.stockDetails && item.stock <= 0 && item.salesCount > 0) recommendation = 'Срочно пополнить остаток'
+    else if (availability.stockDetails && stockCoverDays != null && stockCoverDays < 14) recommendation = 'Запланировать поставку'
+    else if (availability.stockDetails && item.salesCount === 0 && item.stock > 20) recommendation = 'Проверить цену и запустить распродажу'
     else if (returnRate >= 20 && item.salesCount >= 3) recommendation = 'Проверить карточку и причины возвратов'
     else if (profit != null && profit < 0) recommendation = 'Повысить цену или сократить расходы'
     else if (item.abc === 'A' && stockCoverDays != null && stockCoverDays < 30) recommendation = 'Сохранить цену и пополнить запас'
@@ -871,8 +902,8 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     return {
       ...item,
       revenue: Math.round(item.revenue),
-      stock: availability.stocks ? Math.round(item.stock) : null,
-      stockAvailable: availability.stocks,
+      stock: availability.stockDetails ? Math.round(item.stock) : null,
+      stockAvailable: availability.stockDetails,
       netUnits,
       averagePrice: Math.round(averagePrice),
       unitCost: Math.round(unitCost * 100) / 100,
@@ -913,16 +944,16 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     recommendations.push({ id: `${type}:${product?.key || recommendations.length}`, priority, type, productKey: product?.key || null, title, text, effect })
   }
   for (const item of products) {
-    if (availability.stocks && item.stock <= 0 && item.salesCount > 0) pushRecommendation(1, 'stock', item, `Пополнить «${item.title}»`, `За 30 дней было ${item.salesCount} продаж, но текущий остаток равен нулю.`, `Риск потерять продажи`)
-    else if (availability.stocks && item.stockCoverDays != null && item.stockCoverDays < 14) pushRecommendation(2, 'stock', item, `Запланировать поставку «${item.title}»`, `Запаса примерно на ${item.stockCoverDays} дней.`, `${item.stock} шт. на складах`)
-    if (availability.stocks && item.salesCount === 0 && item.stock > 20) pushRecommendation(3, 'slow', item, `Разобрать неликвид «${item.title}»`, `Нет продаж за 30 дней при остатке ${item.stock} шт.`, item.frozenMoney ? `Заморожено ≈ ${item.frozenMoney} ₽` : '')
+    if (availability.stockDetails && item.stock <= 0 && item.salesCount > 0) pushRecommendation(1, 'stock', item, `Пополнить «${item.title}»`, `За 30 дней было ${item.salesCount} продаж, но текущий остаток равен нулю.`, `Риск потерять продажи`)
+    else if (availability.stockDetails && item.stockCoverDays != null && item.stockCoverDays < 14) pushRecommendation(2, 'stock', item, `Запланировать поставку «${item.title}»`, `Запаса примерно на ${item.stockCoverDays} дней.`, `${item.stock} шт. на складах`)
+    if (availability.stockDetails && item.salesCount === 0 && item.stock > 20) pushRecommendation(3, 'slow', item, `Разобрать неликвид «${item.title}»`, `Нет продаж за 30 дней при остатке ${item.stock} шт.`, item.frozenMoney ? `Заморожено ≈ ${item.frozenMoney} ₽` : '')
     if (item.returnRate >= 20 && item.salesCount >= 3) pushRecommendation(2, 'quality', item, `Проверить качество «${item.title}»`, `Возвраты составляют ${item.returnRate}% от продаж.`, `${item.returnsCount} возвратов`)
     if (item.profit != null && item.profit < 0) pushRecommendation(1, 'price', item, `Исправить экономику «${item.title}»`, `Расчётная прибыль отрицательная: ${item.profit} ₽.`, item.breakevenPrice ? `Цена в 0: ${item.breakevenPrice} ₽` : '')
   }
   recommendations.sort((a, b) => a.priority - b.priority)
 
   const stockDetailMap = new Map()
-  if (availability.stocks) {
+  if (availability.stockDetails) {
     for (const row of stocks) {
       const key = productKey(row) || String(row?.vendorCode || '').trim()
       const product = productMap.get(key)
@@ -947,7 +978,7 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     const current = categoryMap.get(key) || { name: key, revenue: 0, sales: 0, stock: 0, profit: 0 }
     current.revenue += item.revenue
     current.sales += item.salesCount
-    current.stock += item.stock
+    current.stock += Number(item.stock || 0)
     if (item.profit != null) current.profit += item.profit
     categoryMap.set(key, current)
   }
@@ -963,9 +994,9 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
       returnRate: availability.sales ? (totalSales > 0 ? Math.round(totalReturns / totalSales * 1000) / 10 : 0) : null,
       stockUnits: availability.stocks ? Math.round(totalStock) : null,
       activeProducts: products.length,
-      zeroStock: availability.stocks ? products.filter(item => item.stock <= 0).length : null,
-      lowStock: availability.stocks ? products.filter(item => item.stockStatus === 'Заканчивается').length : null,
-      slowStock: availability.stocks ? products.filter(item => ['Избыток', 'Без движения'].includes(item.stockStatus)).length : null,
+      zeroStock: availability.stockDetails ? products.filter(item => item.stock <= 0).length : null,
+      lowStock: availability.stockDetails ? products.filter(item => item.stockStatus === 'Заканчивается').length : null,
+      slowStock: availability.stockDetails ? products.filter(item => ['Избыток', 'Без движения'].includes(item.stockStatus)).length : null,
       stockCoverDays: stockCoverDays == null ? null : Math.round(stockCoverDays),
       cogs: costConfigured ? Math.round(totals.cogs) : null,
       commission: Math.round(totals.commission),
@@ -981,6 +1012,18 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     settings,
     availability,
     stageStatus,
+    stockMeta: stockMeta ? {
+      ...stockMeta,
+      persistedRows: stocks.length,
+      calculatedQuantity: Math.round(rawStockQuantity),
+      mappedQuantity: Math.round(mappedStockQuantity),
+      unmatchedQuantity: Math.max(0, Math.round(rawStockQuantity - mappedStockQuantity)),
+      unmatchedRows: unmatchedStockRows,
+      detailsAvailable: stocks.length > 0,
+      consistent: stocks.length > 0
+        ? Math.round(rawStockQuantity) === Math.round(metaStockQuantity)
+        : metaStockQuantity === 0,
+    } : null,
     advertising: {
       campaigns: Array.isArray(advertisingData.campaigns) ? advertisingData.campaigns : [],
       totals: advertisingData.totals || {},
@@ -1364,7 +1407,7 @@ app.get('/health', async (_req, res) => {
   res.json({
     ok: true,
     service: 'elisei-api',
-    version: '2.7.3',
+    version: '2.7.4',
     database,
     backgroundWorker: {
       running: backgroundWorkerState.running,
@@ -1641,6 +1684,53 @@ app.post('/api/wb/disconnect', authRequired, async (req, res) => {
 
 app.use((error, _req, res, _next) => res.status(error.status || 500).json({ error: error.message || 'Внутренняя ошибка' }))
 
+async function persistStockSnapshot(connectionId, rows, stockMeta) {
+  const normalizedRows = Array.isArray(rows) ? rows : []
+  const normalizedMeta = stockMeta || buildStockMeta(normalizedRows)
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const current = await client.query('SELECT data FROM marketplace_connections WHERE id=$1 FOR UPDATE', [connectionId])
+    if (!current.rowCount) throw new Error('Подключение WB не найдено при сохранении остатков')
+    const data = { ...(current.rows[0].data || {}) }
+    data.stocks = normalizedRows
+    data.stockMeta = normalizedMeta
+    data.stageStatus = {
+      ...(data.stageStatus || {}),
+      stocks: {
+        status:'success', available:true, count:normalizedRows.length, totalQuantity:normalizedMeta.totalQuantity,
+        lastSuccessAt:new Date().toISOString(), nextAllowedAt:null, error:null,
+      },
+    }
+    data.syncWarnings = (Array.isArray(data.syncWarnings) ? data.syncWarnings : []).filter(text => !String(text).startsWith('Остатки:'))
+    const stats = {
+      orders:Array.isArray(data.orders) ? data.orders : [],
+      sales:Array.isArray(data.sales) ? data.sales : [],
+      stocks:normalizedRows,
+    }
+    data.products = enrichProducts(Array.isArray(data.products) ? data.products : [], stats)
+    const updated = await client.query(`
+      UPDATE marketplace_connections
+      SET data=$1::jsonb,last_sync_at=NOW(),updated_at=NOW(),status='connected'
+      WHERE id=$2
+      RETURNING jsonb_array_length(COALESCE(data->'stocks','[]'::jsonb)) AS persisted_rows,
+                COALESCE((data->'stockMeta'->>'totalQuantity')::numeric,0) AS persisted_quantity
+    `, [JSON.stringify(data), connectionId])
+    const persistedRows = Number(updated.rows[0]?.persisted_rows || 0)
+    const persistedQuantity = Number(updated.rows[0]?.persisted_quantity || 0)
+    if (persistedRows !== normalizedRows.length || Math.round(persistedQuantity) !== Math.round(Number(normalizedMeta.totalQuantity || 0))) {
+      throw new Error(`Остатки WB не прошли проверку сохранения: ${persistedRows}/${normalizedRows.length} строк, ${persistedQuantity}/${normalizedMeta.totalQuantity || 0} шт.`)
+    }
+    await client.query('COMMIT')
+    return { data, persistedRows, persistedQuantity }
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
 const backgroundStockLocks = new Set()
 async function processPendingStockReports() {
   if (!pool) return
@@ -1676,13 +1766,13 @@ async function processPendingStockReports() {
         await updateSyncState(row.connection_id, 'stocks', { status:'pending', nextAllowedAt:result.nextAllowedAt, taskId:result.taskId, metadata:{ taskStatus:result.taskStatus }, lastError:null })
         continue
       }
-      const data = { ...(row.data || {}), stocks:result.rows, stockMeta:result.stockMeta || buildStockMeta(result.rows) }
-      data.stageStatus = { ...(data.stageStatus || {}), stocks:{ status:'success', available:true, count:result.rows.length, totalQuantity:data.stockMeta.totalQuantity, lastSuccessAt:new Date().toISOString(), nextAllowedAt:null, error:null } }
-      data.syncWarnings = (Array.isArray(data.syncWarnings) ? data.syncWarnings : []).filter(text => !String(text).startsWith('Остатки:'))
-      const stats = { orders:Array.isArray(data.orders)?data.orders:[], sales:Array.isArray(data.sales)?data.sales:[], stocks:result.rows }
-      data.products = enrichProducts(Array.isArray(data.products)?data.products:[], stats)
-      await pool.query(`UPDATE marketplace_connections SET data=$1::jsonb,last_sync_at=NOW(),updated_at=NOW(),status='connected' WHERE id=$2`, [JSON.stringify(data), row.connection_id])
-      await updateSyncState(row.connection_id, 'stocks', { status:'success', lastSuccessAt:new Date().toISOString(), nextAllowedAt:null, lastError:null, lastCount:result.rows.length, taskId:null, metadata:{ taskStatus:'done', ...data.stockMeta } })
+      const stockMeta = result.stockMeta || buildStockMeta(result.rows)
+      const persisted = await persistStockSnapshot(row.connection_id, result.rows, stockMeta)
+      await updateSyncState(row.connection_id, 'stocks', {
+        status:'success', lastSuccessAt:new Date().toISOString(), nextAllowedAt:null, lastError:null,
+        lastCount:result.rows.length, taskId:null,
+        metadata:{ taskStatus:'done', ...stockMeta, persistedRows:persisted.persistedRows, persistedQuantity:persisted.persistedQuantity },
+      })
     } catch (error) {
       const nextAllowedAt = error?.nextAllowedAt || new Date(Date.now() + 60000).toISOString()
       await updateSyncState(row.connection_id, 'stocks', { status:Number(error?.status)===429?'rate_limited':'pending', nextAllowedAt, lastError:error.message, taskId:error?.resetTask?null:row.task_id })
