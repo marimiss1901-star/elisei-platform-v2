@@ -681,19 +681,39 @@ function firstNumber(row, keys, fallback = 0) {
 }
 
 function cleanIdentity(value) {
-  return String(value ?? '').trim()
+  if (value == null) return ''
+  if (typeof value === 'number' && Number.isFinite(value)) return String(Math.trunc(value))
+  return String(value)
+    .normalize('NFKC')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim()
 }
 
-function uniqueIdentities(values = []) {
-  return [...new Set(values.map(cleanIdentity).filter(Boolean))]
+function cleanNumericIdentity(value) {
+  const raw = cleanIdentity(value)
+  if (!raw) return ''
+  const digits = raw.replace(/\D+/g, '')
+  return digits || raw
+}
+
+function cleanVendorIdentity(value) {
+  return cleanIdentity(value).toLocaleLowerCase('ru-RU')
+}
+
+function cleanVendorLooseIdentity(value) {
+  return cleanVendorIdentity(value).replace(/[^0-9a-zа-яё]+/giu, '')
+}
+
+function uniqueIdentities(values = [], cleaner = cleanIdentity) {
+  return [...new Set(values.map(cleaner).filter(Boolean))]
 }
 
 function productNmIds(row = {}) {
-  return uniqueIdentities([row?.nmId, row?.nmID, row?.nm_id, ...(Array.isArray(row?.nmIds) ? row.nmIds : [])])
+  return uniqueIdentities([row?.nmId, row?.nmID, row?.nm_id, ...(Array.isArray(row?.nmIds) ? row.nmIds : [])], cleanNumericIdentity)
 }
 
 function productVendorCodes(row = {}) {
-  return uniqueIdentities([row?.vendorCode, row?.supplierArticle, row?.article, ...(Array.isArray(row?.vendorCodes) ? row.vendorCodes : [])])
+  return uniqueIdentities([row?.vendorCode, row?.supplierArticle, row?.article, ...(Array.isArray(row?.vendorCodes) ? row.vendorCodes : [])], cleanIdentity)
 }
 
 function productChrtIds(row = {}) {
@@ -720,16 +740,24 @@ function productBarcodes(row = {}) {
     ...(Array.isArray(row?.barcodes) ? row.barcodes : []),
     ...(Array.isArray(row?.skus) ? row.skus : []),
     ...nested,
-  ])
+  ], cleanNumericIdentity)
 }
 
 function identityAliases(row = {}) {
+  const vendorCodes = productVendorCodes(row)
   return [
-    ...productChrtIds(row).map(value => `chrt:${value}`),
+    // В официальном warehouse_remains chrtID не является обязательным полем.
+    // Основной ключ — nmID, затем баркод размера и артикул продавца.
     ...productNmIds(row).map(value => `nm:${value}`),
     ...productBarcodes(row).map(value => `barcode:${value}`),
-    ...productVendorCodes(row).map(value => `vendor:${value.toLowerCase()}`),
+    ...vendorCodes.map(value => `vendor:${cleanVendorIdentity(value)}`),
+    ...vendorCodes.map(value => `vendor-loose:${cleanVendorLooseIdentity(value)}`).filter(value => !value.endsWith(':')),
+    ...productChrtIds(row).map(value => `chrt:${value}`),
   ]
+}
+
+function aliasType(alias = '') {
+  return String(alias).split(':', 1)[0] || 'unknown'
 }
 
 function productKey(row) {
@@ -793,13 +821,14 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     for (const alias of identityAliases(row)) productAliases.set(alias, item)
     for (const alias of identityAliases(item)) productAliases.set(alias, item)
   }
-  const resolveProduct = (row = {}) => {
+  const resolveProductDetailed = (row = {}) => {
     for (const alias of identityAliases(row)) {
       const existing = productAliases.get(alias)
-      if (existing) return existing
+      if (existing) return { item: existing, method: aliasType(alias), alias }
     }
-    return null
+    return { item: null, method: null, alias: null }
   }
+  const resolveProduct = (row = {}) => resolveProductDetailed(row).item
   const ensure = (row = {}) => {
     const existing = resolveProduct(row)
     if (existing) {
@@ -852,8 +881,28 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
   }
 
   rawProducts.forEach(row => ensure(row))
+
+  // Заказы и продажи часто содержат полные nmID/баркоды даже тогда, когда
+  // старый снимок каталога был сохранён без размеров. Используем их как
+  // безопасный мост идентификаторов до распределения остатков.
+  for (const row of [...orders, ...salesRows]) {
+    const item = resolveProduct(row)
+    if (!item) continue
+    const nmIds = productNmIds(row)
+    const vendorCodes = productVendorCodes(row)
+    const chrtIds = productChrtIds(row)
+    const barcodes = productBarcodes(row)
+    if (!item.nmID && nmIds.length) item.nmID = nmIds[0]
+    if (!item.vendorCode && vendorCodes.length) item.vendorCode = vendorCodes[0]
+    if (!item.barcode && barcodes.length) item.barcode = barcodes[0]
+    item.chrtIds = mergeUnique(item.chrtIds, chrtIds)
+    item.barcodes = mergeUnique(item.barcodes, barcodes)
+    registerAliases(item, row)
+  }
+
   const warehouses = new Map()
   const unmatchedStockDetails = []
+  const stockMatchMethods = { nm: 0, barcode: 0, vendor: 0, 'vendor-loose': 0, chrt: 0 }
   let rawStockQuantity = 0
   let mappedStockQuantity = 0
   let mappedStockRows = 0
@@ -863,7 +912,8 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     rawStockQuantity += quantity
     const name = String(row.warehouseName || row.warehouse || row.officeName || 'Все склады').trim() || 'Все склады'
     warehouses.set(name, (warehouses.get(name) || 0) + quantity)
-    const item = resolveProduct(row) || ((productNmIds(row).length || productVendorCodes(row).length) ? ensure(row) : null)
+    const matched = resolveProductDetailed(row)
+    const item = matched.item
     if (!item) {
       unmatchedStockRows += 1
       unmatchedStockDetails.push({
@@ -882,6 +932,7 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     item.stockRows += 1
     mappedStockRows += 1
     mappedStockQuantity += quantity
+    if (matched.method && Object.prototype.hasOwnProperty.call(stockMatchMethods, matched.method)) stockMatchMethods[matched.method] += 1
   }
   const stockMappingReady = stocks.length > 0 && (rawStockQuantity === 0 || mappedStockRows > 0)
   availability.stockDetails = Boolean(availability.stockDetails && stockMappingReady)
@@ -1047,7 +1098,7 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
   const stockDetailMap = new Map()
   if (availability.stockDetails) {
     for (const row of stocks) {
-      const product = resolveProduct(row) || ((productNmIds(row).length || productVendorCodes(row).length) ? ensure(row) : null)
+      const product = resolveProduct(row)
       if (!product) continue
       const warehouseName = String(row?.warehouseName || row?.warehouse || 'Все склады').trim() || 'Все склады'
       const techSize = String(row?.techSize || row?.sizeName || row?.size || '—').trim() || '—'
@@ -1115,8 +1166,22 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
       unmatchedQuantity: Math.max(0, Math.round(rawStockQuantity - mappedStockQuantity)),
       unmatchedRows: unmatchedStockRows,
       mappingCoveragePercent: rawStockQuantity > 0 ? Math.round(mappedStockQuantity / rawStockQuantity * 1000) / 10 : 100,
+      matchMethods: stockMatchMethods,
+      reportIdentityCounts: {
+        nmIds: new Set(stocks.flatMap(productNmIds)).size,
+        barcodes: new Set(stocks.flatMap(productBarcodes)).size,
+        vendorCodes: new Set(stocks.flatMap(productVendorCodes).map(cleanVendorIdentity)).size,
+        chrtIds: new Set(stocks.flatMap(productChrtIds)).size,
+      },
+      catalogIdentityCounts: {
+        nmIds: new Set(rawProducts.flatMap(productNmIds)).size,
+        barcodes: new Set(rawProducts.flatMap(productBarcodes)).size,
+        vendorCodes: new Set(rawProducts.flatMap(productVendorCodes).map(cleanVendorIdentity)).size,
+        chrtIds: new Set(rawProducts.flatMap(productChrtIds)).size,
+      },
       detailsAvailable: availability.stockDetails,
-      needsIdentifierRefresh: rawStockQuantity > 0 && mappedStockRows === 0,
+      needsCatalogRefresh: rawStockQuantity > 0 && mappedStockRows === 0,
+      needsIdentifierRefresh: false,
       legacySnapshot: Number(stockMeta?.schemaVersion || 0) < STOCK_DATA_SCHEMA_VERSION,
       consistent: stocks.length > 0
         ? Math.round(rawStockQuantity) === Math.round(metaStockQuantity)
@@ -1534,7 +1599,7 @@ app.get('/health', async (_req, res) => {
   res.json({
     ok: true,
     service: 'elisei-api',
-    version: '2.7.5',
+    version: '2.7.6',
     database,
     backgroundWorker: {
       running: backgroundWorkerState.running,
