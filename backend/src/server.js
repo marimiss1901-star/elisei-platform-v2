@@ -120,8 +120,8 @@ function inspectWbToken(token) {
   if (missing.length) {
     throw Object.assign(new Error(`В API-ключе не хватает категорий: ${missing.join(', ')}. Нужны Контент, Аналитика и Статистика.`), { status: 403 })
   }
-  if ([1, 4].includes(typeId) && !wbClientSecret) {
-    throw Object.assign(new Error(`${WB_TOKEN_TYPES[typeId] || 'Этот'} токен требует сервисный секрет WB. В Render не задан WB_CLIENT_SECRET.`), { status: 403 })
+  if (typeId === 4 && !wbClientSecret) {
+    throw Object.assign(new Error('Сервисный токен WB требует секрет сервиса. В Render не задан WB_CLIENT_SECRET.'), { status: 403 })
   }
 
   return {
@@ -144,7 +144,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.5.3 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.5.4 (marketplace analytics)',
   }
   if (wbClientSecret) headers['X-Client-Secret'] = wbClientSecret
   return headers
@@ -204,6 +204,13 @@ async function wbFetch(url, token, options = {}) {
 
 async function probeToken(token) {
   const info = inspectWbToken(token)
+  // Лёгкий официальный /ping подтверждает, что токен активен и принимается WB.
+  // Он не расходует лимит тяжёлого отчёта остатков.
+  await wbFetch('https://common-api.wildberries.ru/ping', token, {
+    label: 'Проверка токена WB',
+    timeoutMs: 15000,
+    maxAttempts: 2,
+  })
   return info.scopes
 }
 
@@ -370,7 +377,7 @@ function buildDashboard(data) { const sales = data.sales || []; const orders = d
 app.get('/health', async (_req, res) => {
   let database = 'not-configured'
   if (pool) { try { await pool.query('SELECT 1'); database = 'ok' } catch { database = 'error' } }
-  res.json({ ok: true, service: 'elisei-api', version: '2.5.3', database })
+  res.json({ ok: true, service: 'elisei-api', version: '2.5.4', database })
 })
 
 app.post('/api/auth/register', async (req, res) => {
@@ -427,7 +434,7 @@ app.post('/api/wb/connect', authRequired, async (req, res) => {
     `, [id, req.auth.sub, encryptToken(token), JSON.stringify(scopes)])
     res.json(publicConnection(result.rows[0]))
   } catch (error) {
-    res.status(error.status === 429 ? 429 : 400).json({ error: error.message })
+    res.status(error.status || 400).json({ error: error.message })
   }
 })
 
