@@ -119,3 +119,17 @@ body{background:radial-gradient(circle at 72% 7%,rgba(124,58,237,.18),transparen
 @keyframes orbit-spin{to{transform:rotate(360deg)}}@keyframes el-breathe{50%{transform:scale(1.08);opacity:.72}}@keyframes el-core{50%{filter:brightness(1.35);transform:scale(1.08)}}@keyframes el-blink{0%,45%,49%,100%{transform:scaleY(1)}47%{transform:scaleY(.08)}}
 @media(max-width:1180px){.brand-hero{grid-template-columns:1fr}.brand-mascot-stage{min-height:280px}.brand-metrics{grid-template-columns:1fr 1fr}.brand-grid{grid-template-columns:1fr}.recommendation-cards{grid-template-columns:1fr 1fr 1fr}}
 @media(max-width:760px){.brand-hero{padding:28px 24px}.brand-hero h1{font-size:48px}.brand-metrics,.recommendation-cards{grid-template-columns:1fr}.brand-hero-actions{align-items:stretch;flex-direction:column}.brand-secondary{justify-content:center}.brand-mascot-stage>.el{width:220px}.el-speech{right:0}.brand-grid{display:block}.el-profile-card{margin-top:14px}}
+
+/* ELISEI 5.1 — premium 3D El + personalized greeting */
+.brand-mascot-stage{isolation:isolate;overflow:hidden}
+.brand-mascot-stage>.el{width:min(390px,100%);height:350px;align-self:end;margin-bottom:-8px;filter:none}
+.el{position:relative;display:grid;place-items:center;isolation:isolate}
+.el .el-render{position:relative;z-index:2;display:block;width:100%;height:100%;object-fit:cover;object-position:50% 43%;user-select:none;-webkit-user-drag:none;filter:drop-shadow(0 26px 34px rgba(4,5,24,.42));border-radius:38% 38% 18% 18%;-webkit-mask-image:radial-gradient(ellipse 72% 72% at 57% 52%,#000 64%,rgba(0,0,0,.88) 75%,transparent 100%);mask-image:radial-gradient(ellipse 72% 72% at 57% 52%,#000 64%,rgba(0,0,0,.88) 75%,transparent 100%)}
+.el .el-aura{z-index:1;inset:14% 2% 5%;background:radial-gradient(circle at 58% 45%,rgba(172,74,255,.52),rgba(59,130,246,.16) 42%,transparent 72%);filter:blur(24px);animation:el-breathe 3.6s ease-in-out infinite}
+.el.compact{width:100%;height:100%;overflow:hidden;border-radius:inherit}
+.el.compact .el-render{width:118%;height:118%;object-position:50% 43%;border-radius:0;-webkit-mask-image:radial-gradient(circle at 50% 48%,#000 62%,transparent 93%);mask-image:radial-gradient(circle at 50% 48%,#000 62%,transparent 93%);filter:drop-shadow(0 10px 18px rgba(5,5,28,.36))}
+.el.compact .el-aura{inset:8%;filter:blur(12px)}
+.brand-orbit{z-index:0}.el-speech{z-index:4;backdrop-filter:blur(16px)}
+.brand-hero h1 em{text-transform:none}
+@media(max-width:1180px){.brand-mascot-stage>.el{height:315px;width:350px}}
+@media(max-width:760px){.brand-mascot-stage>.el{height:275px;width:305px;margin-bottom:0}}

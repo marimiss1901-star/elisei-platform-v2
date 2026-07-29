@@ -21,12 +21,18 @@ const products = [
 
 const formatMoney = value => value == null ? '—' : new Intl.NumberFormat('ru-RU').format(value) + ' ₽'
 
-export default function DashboardPage({ onNavigate, onLogout }) {
+export default function DashboardPage({ onNavigate, onLogout, user }) {
+  const rawName = String(user?.name || '').trim()
+  const firstName = rawName ? rawName.split(/\s+/)[0] : ''
+  const displayName = firstName || ''
+  const profileInitial = displayName ? displayName.slice(0, 1).toUpperCase() : 'Э'
+  const hour = new Date().getHours()
+  const greeting = hour < 12 ? 'Доброе утро' : hour < 18 ? 'Добрый день' : 'Добрый вечер'
   const [active, setActive] = useState('Главная')
   const [query, setQuery] = useState('')
   const [toast, setToast] = useState('')
   const [chat, setChat] = useState('')
-  const [messages, setMessages] = useState([{role:'el', text:'Доброе утро, Мария. Я уже проверил продажи, рекламу и остатки. С чего начнём?'}])
+  const [messages, setMessages] = useState([{role:'el', text:`${greeting}${displayName ? `, ${displayName}` : ''}. Я уже проверил продажи, рекламу и остатки. С чего начнём?`}])
   const [connection, setConnection] = useState({ connected:false, connectionId:'', scopes:[], lastSync:null })
   const [tokenDraft, setTokenDraft] = useState('')
   const [showToken, setShowToken] = useState(false)
@@ -149,7 +155,7 @@ export default function DashboardPage({ onNavigate, onLogout }) {
       <div className="brand-hero glass-panel">
         <div className="brand-hero-copy">
           <span className="brand-kicker"><Sparkles size={15}/> ЭЛ уже всё проверил</span>
-          <h1>Доброе утро,<br/><em>Мария</em></h1>
+          <h1>{greeting}{displayName ? ',' : '!'}{displayName && <><br/><em>{displayName}</em></>}</h1>
           <p>{connection.connected ? `Я проверил ${productRows.length} товаров, продажи и остатки. Нашёл ${opportunities} возможностей для роста.` : 'Подключите Wildberries — и я начну анализировать продажи, остатки, рекламу и прибыль.'}</p>
           <div className="brand-hero-actions">
             <button className="primary-btn brand-primary" onClick={()=>connection.connected?setActive('Спросить ЭЛа'):setActive('Подключения')}><MessageCircle size={18}/>{connection.connected?'Обсудить с Элом':'Подключить Wildberries'}</button>
@@ -199,5 +205,5 @@ export default function DashboardPage({ onNavigate, onLogout }) {
 
   const content = active==='Главная' ? renderHome() : active==='Аналитика' ? renderAnalytics() : active==='Товары' ? renderProducts() : active==='Спросить ЭЛа' ? renderChat() : active==='Подключения' ? renderConnections() : active==='Синхронизации' ? renderSyncHistory() : renderGeneric()
 
-  return <div className="shell"><aside className="sidebar glass-panel"><button className="brand brand-button" onClick={()=>onNavigate('/')}><div className="brand-mark">E</div><div><strong>ELISEI</strong><span>AI Operating System</span></div></button><nav>{nav.map(([label,Icon])=><button key={label} className={active===label?'nav-item active':'nav-item'} onClick={()=>setActive(label)}><Icon size={18}/><span>{label}</span></button>)}</nav><div className="sidebar-foot"><div className="status-dot"/><span>{connection.connected?'Wildberries подключён':'Демо-режим'}</span></div></aside><main className="main"><header className="topbar"><div className="search"><Search size={17}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Найти товар, модель или отчёт"/></div><div className="top-actions"><button className="icon-btn" onClick={()=>notify('Новых уведомлений нет')}><Bell size={18}/><span className="ping"/></button><button className="icon-btn" title="Подключения" onClick={()=>setActive('Подключения')}><PlugZap size={18}/></button><button className="icon-btn" title="Выйти" onClick={onLogout}><LogOut size={18}/></button><button className="profile">М</button></div></header>{content}</main>{toast&&<div className="app-toast"><CheckCircle2 size={18}/>{toast}</div>}</div>
+  return <div className="shell"><aside className="sidebar glass-panel"><button className="brand brand-button" onClick={()=>onNavigate('/')}><div className="brand-mark">E</div><div><strong>ELISEI</strong><span>AI Operating System</span></div></button><nav>{nav.map(([label,Icon])=><button key={label} className={active===label?'nav-item active':'nav-item'} onClick={()=>setActive(label)}><Icon size={18}/><span>{label}</span></button>)}</nav><div className="sidebar-foot"><div className="status-dot"/><span>{connection.connected?'Wildberries подключён':'Демо-режим'}</span></div></aside><main className="main"><header className="topbar"><div className="search"><Search size={17}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Найти товар, модель или отчёт"/></div><div className="top-actions"><button className="icon-btn" onClick={()=>notify('Новых уведомлений нет')}><Bell size={18}/><span className="ping"/></button><button className="icon-btn" title="Подключения" onClick={()=>setActive('Подключения')}><PlugZap size={18}/></button><button className="icon-btn" title="Выйти" onClick={onLogout}><LogOut size={18}/></button><button className="profile" title={rawName || 'Профиль'}>{profileInitial}</button></div></header>{content}</main>{toast&&<div className="app-toast"><CheckCircle2 size={18}/>{toast}</div>}</div>
 }
