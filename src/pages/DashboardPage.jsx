@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle, BarChart3, Bell, Boxes, Calculator, CalendarDays, CheckCircle2, ChevronDown,
   ChevronRight, ChevronUp, CircleDollarSign, Download, Eye, EyeOff, FileText, Home, LogOut,
@@ -36,6 +36,21 @@ const normalizeConnection = (value = {}, current = {}) => ({
   syncStates:Array.isArray(value.syncStates) ? value.syncStates : (current.syncStates || []),
   coverageByStage:value.coverageByStage || current.coverageByStage || {},
 })
+
+const syncDataRevision = (value = {}) => JSON.stringify(
+  [...(Array.isArray(value.syncStates) ? value.syncStates : [])]
+    .sort((a,b) => String(a.stage || '').localeCompare(String(b.stage || '')))
+    .map(item => ({
+      stage:item.stage || '',
+      status:item.status || '',
+      lastSuccessAt:item.lastSuccessAt || null,
+      lastCount:Number(item.lastCount || 0),
+      nextAllowedAt:item.nextAllowedAt || null,
+      rows:Number(item.metadata?.rows || 0),
+      totalQuantity:Number(item.metadata?.totalQuantity || 0),
+      receivedAt:item.metadata?.receivedAt || null,
+    }))
+)
 
 const demoProducts = [
   { key:'demo-1', nmID:'1234567', vendorCode:'DEMO-01', title:'Товар для демонстрации', brand:'ELISEI Demo', revenue:286740, stock:124, salesCount:38, returnsCount:2, returnRate:5.3, stockCoverDays:98, stockStatus:'В наличии', abc:'A', xyz:'X', recommendation:'Контролировать динамику', profit:null, margin:null, unitCost:0, averagePrice:7546, breakevenPrice:null, targetPrice:null },
@@ -85,6 +100,8 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [productSort, setProductSort] = useState({ key:'revenue', direction:'desc' })
   const [selectedProduct, setSelectedProduct] = useState(null)
   const [importResult, setImportResult] = useState(null)
+  const connectionRef = useRef(emptyConnection)
+  const syncRevisionRef = useRef('')
 
   const notify = (text, duration = 4200) => {
     setToast(text)
@@ -104,11 +121,18 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   }
 
   useEffect(() => {
+    connectionRef.current = connection
+  }, [connection])
+
+  useEffect(() => {
     if (!wbApi.configured) return
     Promise.all([wbApi.current(), businessApi.settings()]).then(async ([status, settingsResult]) => {
       if (settingsResult?.settings) setSettingsDraft(settingsResult.settings)
       if (!status.connected || !status.connectionId) return
-      setConnection(normalizeConnection(status))
+      const normalized = normalizeConnection(status)
+      connectionRef.current = normalized
+      syncRevisionRef.current = syncDataRevision(normalized)
+      setConnection(normalized)
       setSyncHistory(status.syncHistory || [])
       await loadConnectionData(status.connectionId)
     }).catch(error => notify(error.message, 8000))
@@ -116,21 +140,32 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
   useEffect(() => {
     if (!connection.connected || !connection.connectionId) return undefined
+    const connectionId = connection.connectionId
     const timer = window.setInterval(async () => {
       try {
-        const status = await wbApi.status(connection.connectionId)
-        const nextStockSuccess = status.syncStates?.find(item => item.stage === 'stocks')?.lastSuccessAt
-        let shouldReload = false
-        setConnection(current => {
-          const previousStockSuccess = current.syncStates?.find(item => item.stage === 'stocks')?.lastSuccessAt
-          shouldReload = Boolean(nextStockSuccess && nextStockSuccess !== previousStockSuccess) || Boolean(status.lastSync && status.lastSync !== current.lastSync)
-          return normalizeConnection(status, current)
-        })
-        if (shouldReload) await loadConnectionData(connection.connectionId)
+        const status = await wbApi.status(connectionId)
+        const current = connectionRef.current
+        const normalized = normalizeConnection(status, current)
+        const nextRevision = syncDataRevision(normalized)
+        const shouldReload = nextRevision !== syncRevisionRef.current || Boolean(normalized.lastSync && normalized.lastSync !== current.lastSync)
+
+        syncRevisionRef.current = nextRevision
+        connectionRef.current = normalized
+        setConnection(normalized)
+
+        // Данные статуса и расчётное ядро приходят из разных endpoint'ов.
+        // После фонового завершения отчёта обязательно перечитываем core,
+        // иначе журнал уже показывает новый остаток, а раздел «Остатки» остаётся на старом снимке.
+        if (shouldReload) await loadConnectionData(connectionId)
       } catch { /* фоновая проверка не должна мешать работе интерфейса */ }
     }, 15000)
     return () => window.clearInterval(timer)
   }, [connection.connected, connection.connectionId])
+
+  useEffect(() => {
+    if (active !== 'Остатки' || !connection.connected || !connection.connectionId) return
+    loadConnectionData(connection.connectionId).catch(() => {})
+  }, [active, connection.connected, connection.connectionId])
 
   const nav = [
     ['Главная', Home], ['Аналитика', BarChart3], ['Товары', PackageSearch], ['Остатки', Boxes],
@@ -203,7 +238,10 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     setSyncing(true)
     try {
       const result = await wbApi.sync(connectionId, stages)
-      setConnection(current => normalizeConnection({ connected:true, lastSync:result.lastSync, syncStates:result.syncStates || current.syncStates }, current))
+      const normalized = normalizeConnection({ connected:true, lastSync:result.lastSync, syncStates:result.syncStates || connectionRef.current.syncStates }, connectionRef.current)
+      connectionRef.current = normalized
+      syncRevisionRef.current = syncDataRevision(normalized)
+      setConnection(normalized)
       setDashboardData(result.dashboard || null)
       setCoreData(result.core || null)
       setSyncHistory(result.syncHistory || [])
