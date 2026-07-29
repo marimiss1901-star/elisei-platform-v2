@@ -132,19 +132,29 @@ function inspectWbToken(token) {
   }
 }
 
-function retryDelayMs(response, attempt) {
+function retryAfterSeconds(response, attempt) {
   const header = response.headers.get('x-ratelimit-retry') || response.headers.get('retry-after')
   const seconds = Number(header)
-  const base = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : Math.min(20000, 1000 * (2 ** attempt))
+  return Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : Math.min(20, 2 ** attempt)
+}
+
+function retryDelayMs(response, attempt) {
+  const base = retryAfterSeconds(response, attempt) * 1000
   const jitter = 0.85 + Math.random() * 0.3
   return Math.max(1000, Math.round(base * jitter))
+}
+
+function humanWait(seconds) {
+  if (seconds >= 3600) return `${Math.ceil(seconds / 3600)} ч.`
+  if (seconds >= 60) return `${Math.ceil(seconds / 60)} мин.`
+  return `${Math.max(1, Math.ceil(seconds))} сек.`
 }
 
 function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.5.4 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.5.5 (marketplace analytics)',
   }
   if (wbClientSecret) headers['X-Client-Secret'] = wbClientSecret
   return headers
@@ -152,20 +162,26 @@ function authHeaders(token) {
 
 async function wbFetch(url, token, options = {}) {
   const {
-    maxAttempts = 5,
+    maxAttempts = 3,
     timeoutMs = 45000,
+    maxRetryDelayMs = 45000,
+    deadlineAt = 0,
     label = 'WB API',
     ...fetchOptions
   } = options
 
   let lastError = null
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const remainingMs = deadlineAt ? deadlineAt - Date.now() : timeoutMs
+    if (remainingMs <= 1000) {
+      throw Object.assign(new Error(`${label}: достигнут общий лимит времени синхронизации`), { status: 504 })
+    }
     let response
     try {
       response = await fetch(url, {
         ...fetchOptions,
         headers: { ...authHeaders(token), ...(fetchOptions.headers || {}) },
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(Math.max(1000, Math.min(timeoutMs, remainingMs))),
       })
     } catch (error) {
       lastError = Object.assign(new Error(`${label}: сеть или таймаут запроса`), { status: 502, cause: error })
@@ -190,7 +206,18 @@ async function wbFetch(url, token, options = {}) {
     lastError = error
 
     if (response.status === 429 && attempt + 1 < maxAttempts) {
-      await sleep(retryDelayMs(response, attempt))
+      const retrySeconds = retryAfterSeconds(response, attempt)
+      const delayMs = retryDelayMs(response, attempt)
+      error.retryAfterSeconds = retrySeconds
+      if (delayMs > maxRetryDelayMs) {
+        error.message = `${label}: Wildberries установил паузу ${humanWait(retrySeconds)}. Долгое ожидание отменено — повторите синхронизацию позже.`
+        throw error
+      }
+      if (deadlineAt && Date.now() + delayMs >= deadlineAt) {
+        error.message = `${label}: лимит WB требует ожидания, но достигнут общий лимит времени синхронизации.`
+        throw error
+      }
+      await sleep(delayMs)
       continue
     }
     if (response.status >= 500 && attempt + 1 < Math.min(maxAttempts, 3)) {
@@ -250,7 +277,7 @@ function publicConnection(row) {
   }
 }
 
-async function loadProducts(token, { limit = 100, maxPages = 300 } = {}) {
+async function loadProducts(token, { limit = 100, maxPages = 300, deadlineAt = 0 } = {}) {
   const endpoint = 'https://content-api.wildberries.ru/content/v2/get/cards/list'
   const products = []
   let cursor = { limit }
@@ -261,7 +288,10 @@ async function loadProducts(token, { limit = 100, maxPages = 300 } = {}) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ settings: { cursor, filter: { withPhoto: -1 } } }),
       label: 'Товары WB',
-      timeoutMs: 60000,
+      timeoutMs: 45000,
+      maxAttempts: 2,
+      maxRetryDelayMs: 10000,
+      deadlineAt,
     })
     const cards = Array.isArray(result?.cards) ? result.cards : []
     products.push(...cards.map(card => ({
@@ -290,7 +320,7 @@ function extractStockRows(payload) {
   return []
 }
 
-async function loadWbWarehouseStocks(token, { limit = 250000, maxPages = 20 } = {}) {
+async function loadWbWarehouseStocks(token, { limit = 250000, maxPages = 20, deadlineAt = 0 } = {}) {
   const endpoint = 'https://seller-analytics-api.wildberries.ru/api/analytics/v1/stocks-report/wb-warehouses'
   const rows = []
   let offset = 0
@@ -302,7 +332,9 @@ async function loadWbWarehouseStocks(token, { limit = 250000, maxPages = 20 } = 
       body: JSON.stringify({ limit, offset }),
       label: 'Остатки WB',
       timeoutMs: 120000,
-      maxAttempts: 5,
+      maxAttempts: 2,
+      maxRetryDelayMs: 15000,
+      deadlineAt,
     })
     const batch = extractStockRows(payload)
     rows.push(...batch)
@@ -314,26 +346,121 @@ async function loadWbWarehouseStocks(token, { limit = 250000, maxPages = 20 } = 
   return rows
 }
 
-async function loadStatistics(token) {
-  const orders = await wbFetch(
-    `https://statistics-api.wildberries.ru/api/v1/supplier/orders?dateFrom=${encodeURIComponent(isoDaysAgo(30))}&flag=0`,
-    token,
-    { label: 'Заказы WB', timeoutMs: 90000, maxAttempts: 5 },
+
+function normalizeWarehouseRemains(report) {
+  const rows = []
+  for (const item of Array.isArray(report) ? report : []) {
+    const warehouses = Array.isArray(item?.warehouses) ? item.warehouses : []
+    const totalRow = warehouses.find(row => String(row?.warehouseName || '').trim().toLowerCase() === 'всего находится на складах')
+    const quantity = totalRow
+      ? Number(totalRow.quantity || 0)
+      : warehouses
+          .filter(row => !String(row?.warehouseName || '').toLowerCase().includes('в пути'))
+          .reduce((sum, row) => sum + Number(row?.quantity || 0), 0)
+    rows.push({
+      nmId: item?.nmId ?? item?.nmID,
+      vendorCode: item?.vendorCode || '',
+      barcode: item?.barcode || '',
+      techSize: item?.techSize || '',
+      quantity: Number.isFinite(quantity) ? quantity : 0,
+    })
+  }
+  return rows
+}
+
+async function loadWarehouseRemainsReport(token, { maxWaitMs = 55000, deadlineAt = 0 } = {}) {
+  const base = 'https://seller-analytics-api.wildberries.ru/api/v1/warehouse_remains'
+  const created = await wbFetch(`${base}?locale=ru`, token, {
+    label: 'Создание отчёта остатков WB',
+    timeoutMs: 30000,
+    maxAttempts: 2,
+    maxRetryDelayMs: 10000,
+    deadlineAt,
+  })
+  const taskId = created?.data?.taskId
+  if (!taskId) throw Object.assign(new Error('Отчёт остатков WB: не получен taskId'), { status: 502 })
+
+  const startedAt = Date.now()
+  let status = 'new'
+  while (Date.now() - startedAt < maxWaitMs && (!deadlineAt || Date.now() + 5200 < deadlineAt)) {
+    await sleep(5200)
+    const state = await wbFetch(`${base}/tasks/${encodeURIComponent(taskId)}/status`, token, {
+      label: 'Проверка отчёта остатков WB',
+      timeoutMs: 20000,
+      maxAttempts: 2,
+      maxRetryDelayMs: 10000,
+      deadlineAt,
+    })
+    status = String(state?.data?.status || '').toLowerCase()
+    if (status === 'done') break
+    if (status === 'canceled' || status === 'purged') {
+      throw Object.assign(new Error(`Отчёт остатков WB завершён со статусом ${status}`), { status: 502 })
+    }
+  }
+
+  if (status !== 'done') {
+    throw Object.assign(new Error('Отчёт остатков WB формируется дольше 55 секунд. Долгое ожидание остановлено; повторите синхронизацию позже.'), { status: 504 })
+  }
+
+  const report = await wbFetch(`${base}/tasks/${encodeURIComponent(taskId)}/download`, token, {
+    label: 'Загрузка отчёта остатков WB',
+    timeoutMs: 60000,
+    maxAttempts: 2,
+    maxRetryDelayMs: 10000,
+    deadlineAt,
+  })
+  return normalizeWarehouseRemains(report)
+}
+
+async function safeSyncStage(label, loader, fallback, warnings) {
+  try {
+    return await loader()
+  } catch (error) {
+    if ([402, 403, 429, 504].includes(Number(error?.status))) {
+      warnings.push(`${label}: ${error.message}${Array.isArray(fallback) && fallback.length ? ' Сохранены предыдущие данные.' : ''}`)
+      return Array.isArray(fallback) ? fallback : []
+    }
+    throw error
+  }
+}
+
+async function loadStatistics(token, tokenInfo, previousData = {}, warnings = [], deadlineAt = 0) {
+  const orders = await safeSyncStage(
+    'Заказы',
+    () => wbFetch(
+      `https://statistics-api.wildberries.ru/api/v1/supplier/orders?dateFrom=${encodeURIComponent(isoDaysAgo(30))}&flag=0`,
+      token,
+      { label: 'Заказы WB', timeoutMs: 45000, maxAttempts: 2, maxRetryDelayMs: 10000, deadlineAt },
+    ),
+    previousData.orders,
+    warnings,
   )
   await sleep(1200)
 
-  const sales = await wbFetch(
-    `https://statistics-api.wildberries.ru/api/v1/supplier/sales?dateFrom=${encodeURIComponent(isoDaysAgo(30))}&flag=0`,
-    token,
-    { label: 'Продажи WB', timeoutMs: 90000, maxAttempts: 5 },
+  const sales = await safeSyncStage(
+    'Продажи',
+    () => wbFetch(
+      `https://statistics-api.wildberries.ru/api/v1/supplier/sales?dateFrom=${encodeURIComponent(isoDaysAgo(30))}&flag=0`,
+      token,
+      { label: 'Продажи WB', timeoutMs: 45000, maxAttempts: 2, maxRetryDelayMs: 10000, deadlineAt },
+    ),
+    previousData.sales,
+    warnings,
   )
   await sleep(1200)
 
-  const stocks = await loadWbWarehouseStocks(token)
+  const useAsyncReport = tokenInfo?.typeId === 1 && !wbClientSecret
+  const stocks = await safeSyncStage(
+    'Остатки',
+    () => useAsyncReport ? loadWarehouseRemainsReport(token, { deadlineAt }) : loadWbWarehouseStocks(token, { deadlineAt }),
+    previousData.stocks,
+    warnings,
+  )
+
   return {
     orders: Array.isArray(orders) ? orders : [],
     sales: Array.isArray(sales) ? sales : [],
-    stocks,
+    stocks: Array.isArray(stocks) ? stocks : [],
   }
 }
 
@@ -377,7 +504,7 @@ function buildDashboard(data) { const sales = data.sales || []; const orders = d
 app.get('/health', async (_req, res) => {
   let database = 'not-configured'
   if (pool) { try { await pool.query('SELECT 1'); database = 'ok' } catch { database = 'error' } }
-  res.json({ ok: true, service: 'elisei-api', version: '2.5.4', database })
+  res.json({ ok: true, service: 'elisei-api', version: '2.5.5', database })
 })
 
 app.post('/api/auth/register', async (req, res) => {
@@ -453,22 +580,26 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
 
   activeSyncs.add(syncKey)
   const startedAt = Date.now()
+  const deadlineAt = startedAt + 95000
   try {
     const token = decryptToken(connection.token_encrypted)
-    inspectWbToken(token)
+    const tokenInfo = inspectWbToken(token)
+    const previousData = connection.data || {}
+    const warnings = []
 
-    // Запросы идут последовательно: так один кабинет не бьётся о глобальный лимитер WB.
-    const products = await loadProducts(token)
+    // Запросы идут последовательно. Долгие лимиты WB не удерживают HTTP-запрос часами:
+    // этап сохраняет предыдущие данные и возвращает понятное предупреждение.
+    const products = await safeSyncStage('Товары', () => loadProducts(token, { deadlineAt }), previousData.products, warnings)
     await sleep(1200)
-    const stats = await loadStatistics(token)
+    const stats = await loadStatistics(token, tokenInfo, previousData, warnings, deadlineAt)
 
     const enrichedProducts = enrichProducts(products, stats)
-    const data = { products: enrichedProducts, ...stats }
+    const data = { products: enrichedProducts, ...stats, syncWarnings: warnings }
     const counts = { products: enrichedProducts.length, orders: stats.orders.length, sales: stats.sales.length, stocks: stats.stocks.length }
-    const history = withSyncLog(connection.sync_history, { status: 'success', durationMs: Date.now() - startedAt, counts })
+    const history = withSyncLog(connection.sync_history, { status: 'success', durationMs: Date.now() - startedAt, counts, warnings })
     const updated = await pool.query(`UPDATE marketplace_connections SET data=$1::jsonb, sync_history=$2::jsonb, last_sync_at=NOW(), updated_at=NOW(), status='connected' WHERE id=$3 AND user_id=$4 RETURNING *`, [JSON.stringify(data), JSON.stringify(history), connection.id, req.auth.sub])
     const row = updated.rows[0]
-    res.json({ ok: true, lastSync: row.last_sync_at, counts, dashboard: buildDashboard(data), syncHistory: history })
+    res.json({ ok: true, partial: warnings.length > 0, warnings, lastSync: row.last_sync_at, counts, dashboard: buildDashboard(data), syncHistory: history })
   } catch (error) {
     const history = withSyncLog(connection.sync_history, { status: 'error', message: error.message, durationMs: Date.now() - startedAt })
     await pool.query(`UPDATE marketplace_connections SET sync_history=$1::jsonb, updated_at=NOW(), status='error' WHERE id=$2 AND user_id=$3`, [JSON.stringify(history), connection.id, req.auth.sub])

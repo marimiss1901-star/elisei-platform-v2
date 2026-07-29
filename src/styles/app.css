@@ -86,7 +86,7 @@
 .sync-summary{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:18px 20px;margin:24px 0;border:1px solid rgba(146,112,255,.2);border-radius:18px;background:rgba(100,72,185,.08)}
 .sync-summary div{display:flex;flex-direction:column;gap:5px}.sync-summary span{font-size:12px;color:var(--text-muted)}.sync-summary strong{font-size:16px}
 .sync-log{display:flex;flex-direction:column;gap:10px}.sync-log-row{display:grid;grid-template-columns:42px minmax(180px,1fr) minmax(260px,1.6fr);align-items:center;gap:14px;padding:15px 17px;border:1px solid rgba(255,255,255,.08);border-radius:15px;background:rgba(255,255,255,.025)}
-.sync-log-row.success{border-color:rgba(61,226,157,.16)}.sync-log-row.error{border-color:rgba(255,111,128,.2)}.sync-log-icon{width:36px;height:36px;border-radius:11px;display:grid;place-items:center;background:rgba(61,226,157,.1);color:#54e7a9}.sync-log-row.error .sync-log-icon{background:rgba(255,111,128,.1);color:#ff7d8e}
+.sync-log-row.success{border-color:rgba(61,226,157,.16)}.sync-log-row.error{border-color:rgba(255,111,128,.2)}.sync-log-row.warning{border-color:rgba(255,180,91,.26)}.sync-log-row.warning .sync-log-icon{background:rgba(255,180,91,.12);color:#ffbd72}.sync-log-icon{width:36px;height:36px;border-radius:11px;display:grid;place-items:center;background:rgba(61,226,157,.1);color:#54e7a9}.sync-log-row.error .sync-log-icon{background:rgba(255,111,128,.1);color:#ff7d8e}
 .sync-log-row>div:nth-child(2){display:flex;flex-direction:column;gap:4px}.sync-log-row>div:nth-child(2) span,.sync-log-details span{font-size:12px;color:var(--text-muted)}.sync-log-details{display:flex;justify-content:flex-end;gap:16px;flex-wrap:wrap}.sync-empty{padding:32px;text-align:center;color:var(--text-muted);border:1px dashed rgba(255,255,255,.12);border-radius:16px}
 @media(max-width:800px){.sync-summary{align-items:flex-start;flex-direction:column}.sync-log-row{grid-template-columns:42px 1fr}.sync-log-details{grid-column:2;justify-content:flex-start}}
 
@@ -133,3 +133,5 @@ body{background:radial-gradient(circle at 72% 7%,rgba(124,58,237,.18),transparen
 .brand-hero h1 em{text-transform:none}
 @media(max-width:1180px){.brand-mascot-stage>.el{height:330px;width:390px}}
 @media(max-width:760px){.brand-mascot-stage>.el{height:285px;width:330px;margin-bottom:0}}
+
+.sync-warning-text{flex-basis:100%;color:#ffbd72!important;line-height:1.4;text-align:right}
