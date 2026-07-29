@@ -18,6 +18,39 @@ const pool = databaseUrl ? new Pool({ connectionString: databaseUrl, ssl: proces
 const encryptionSecret = process.env.ENCRYPTION_KEY || jwtSecret
 const encryptionKey = encryptionSecret ? crypto.createHash('sha256').update(encryptionSecret).digest() : null
 
+
+const backgroundWorkerState = {
+  running: false,
+  promise: null,
+  lastStartedAt: null,
+  lastFinishedAt: null,
+  lastReason: null,
+  lastError: null,
+}
+
+function kickBackgroundWorkers(reason = 'timer') {
+  if (backgroundWorkerState.running && backgroundWorkerState.promise) return backgroundWorkerState.promise
+  backgroundWorkerState.running = true
+  backgroundWorkerState.lastStartedAt = new Date().toISOString()
+  backgroundWorkerState.lastReason = reason
+  backgroundWorkerState.lastError = null
+  const promise = (async () => {
+    // Выполняем последовательно, чтобы два тяжёлых запроса WB одного продавца
+    // не стартовали в одну секунду и не провоцировали глобальный лимитер.
+    await processPendingStockReports()
+    await processDueDeferredStages()
+  })().catch(error => {
+    backgroundWorkerState.lastError = error.message
+    console.warn('WB background worker kick failed:', error.message)
+  }).finally(() => {
+    backgroundWorkerState.running = false
+    backgroundWorkerState.promise = null
+    backgroundWorkerState.lastFinishedAt = new Date().toISOString()
+  })
+  backgroundWorkerState.promise = promise
+  return promise
+}
+
 app.use(helmet())
 app.use(cors({ origin(origin, cb) { if (!origin || !allowedOrigins.length || allowedOrigins.includes(origin)) return cb(null, true); cb(new Error('Origin is not allowed')) } }))
 app.use(express.json({ limit: '2mb' }))
@@ -1296,7 +1329,19 @@ function buildDashboard(data, settings = DEFAULT_BUSINESS_SETTINGS) { const summ
 app.get('/health', async (_req, res) => {
   let database = 'not-configured'
   if (pool) { try { await pool.query('SELECT 1'); database = 'ok' } catch { database = 'error' } }
-  res.json({ ok: true, service: 'elisei-api', version: '2.7.1', database })
+  res.json({
+    ok: true,
+    service: 'elisei-api',
+    version: '2.7.2',
+    database,
+    backgroundWorker: {
+      running: backgroundWorkerState.running,
+      lastStartedAt: backgroundWorkerState.lastStartedAt,
+      lastFinishedAt: backgroundWorkerState.lastFinishedAt,
+      lastReason: backgroundWorkerState.lastReason,
+      lastError: backgroundWorkerState.lastError,
+    },
+  })
 })
 
 app.post('/api/auth/register', async (req, res) => {
@@ -1331,8 +1376,13 @@ app.get('/api/auth/me', authRequired, async (req, res) => {
 })
 
 app.get('/api/wb/connection', authRequired, async (req, res) => {
-  const connection = await getConnection(req.auth.sub)
+  let connection = await getConnection(req.auth.sub)
   if (!connection) return res.json(publicConnection(null))
+  // Render может приостанавливать обычные таймеры между обращениями. Каждый
+  // просмотр кабинета дополнительно будит очередь просроченных этапов.
+  const kick = kickBackgroundWorkers(`connection:${connection.id}`)
+  await Promise.race([kick, sleep(650)])
+  connection = await getConnection(req.auth.sub, connection.id)
   const [tokens, states] = await Promise.all([getWbTokens(req.auth.sub, connection.id), getSyncStates(connection.id)])
   res.json(publicConnection(connection, tokens, states))
 })
@@ -1418,8 +1468,13 @@ app.post('/api/wb/tokens/:tokenId/primary', authRequired, async (req, res) => {
 })
 
 app.get('/api/wb/status/:id', authRequired, async (req, res) => {
-  const connection = await getConnection(req.auth.sub, req.params.id)
+  let connection = await getConnection(req.auth.sub, req.params.id)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
+  // Статус опрашивается открытым интерфейсом. Используем этот heartbeat как
+  // надёжный запуск фоновой очереди после окончания next_allowed_at.
+  const kick = kickBackgroundWorkers(`status:${connection.id}`)
+  await Promise.race([kick, sleep(650)])
+  connection = await getConnection(req.auth.sub, connection.id)
   const [tokens, states] = await Promise.all([getWbTokens(req.auth.sub, connection.id), getSyncStates(connection.id)])
   res.json(publicConnection(connection, tokens, states))
 })
@@ -1675,10 +1730,8 @@ async function processDueDeferredStages() {
 
 initDatabase().then(() => {
   app.listen(port, () => console.log(`ELISEI API listening on ${port}`))
-  const stockTimer = setInterval(() => processPendingStockReports().catch(error => console.warn('Stock worker failed:', error.message)), 30000)
-  stockTimer.unref?.()
-  const deferredTimer = setInterval(() => processDueDeferredStages().catch(error => console.warn('Deferred WB worker failed:', error.message)), 60000)
-  deferredTimer.unref?.()
-  setTimeout(() => processPendingStockReports().catch(error => console.warn('Initial stock worker failed:', error.message)), 5000)
-  setTimeout(() => processDueDeferredStages().catch(error => console.warn('Initial deferred WB worker failed:', error.message)), 10000)
+  // Один координированный worker вместо двух параллельных таймеров. Таймер
+  // оставляем referenced, а HTTP heartbeat дублирует запуск после сна Render.
+  setInterval(() => kickBackgroundWorkers('interval'), 30000)
+  setTimeout(() => kickBackgroundWorkers('startup'), 5000)
 }).catch(error => { console.error('Database initialization failed:', error); process.exit(1) })

@@ -128,7 +128,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         })
         if (shouldReload) await loadConnectionData(connection.connectionId)
       } catch { /* фоновая проверка не должна мешать работе интерфейса */ }
-    }, 30000)
+    }, 15000)
     return () => window.clearInterval(timer)
   }, [connection.connected, connection.connectionId])
 
@@ -492,14 +492,19 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       if (state.status === 'success') return { tone:'success', title:`Загружено: ${formatNumber(state.lastCount)}`, text:state.lastSuccessAt ? `Обновлено ${new Date(state.lastSuccessAt).toLocaleString('ru-RU')}` : 'Этап завершён.' }
       if (state.status === 'pending') return { tone:'pending', title:'Формируется в фоне', text:state.nextAllowedAt ? `Автопроверка после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : 'ELISEI проверит готовность автоматически.' }
       if (state.status === 'queued') return { tone:'pending', title:'В фоновой очереди', text:'Этап запустится автоматически после освобождения очереди.' }
-      if (state.status === 'rate_limited') return { tone:'warning', title:'Пауза Wildberries', text:state.nextAllowedAt ? `Автоповтор после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : state.lastError }
+      if (state.status === 'rate_limited') {
+        const due = state.nextAllowedAt && new Date(state.nextAllowedAt).getTime() <= Date.now()
+        return due
+          ? { tone:'pending', title:'Автоповтор запускается', text:'Срок паузы закончился. Интерфейс разбудил фоновую очередь; статус обновится автоматически.' }
+          : { tone:'warning', title:'Пауза Wildberries', text:state.nextAllowedAt ? `Автоповтор после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : state.lastError }
+      }
       if (state.status === 'missing_token') return { tone:'danger', title:'Нет подходящего токена', text:state.lastError || 'Добавьте нужную категорию доступа.' }
       if (state.status === 'running') return { tone:'pending', title:'Загрузка', text:'Запрос выполняется.' }
       return { tone:'danger', title:'Не загружено', text:state.lastError || 'Запустите этап повторно.' }
     }
     return <section className="app-page glass-panel"><div className="page-title"><span>Контроль данных</span><h1>Журнал синхронизаций</h1><p>Каждый поток работает независимо. Лимит одного метода больше не останавливает остальные разделы.</p></div>{!connection.connected ? <div className="empty-state"><RefreshCw size={38}/><h3>Wildberries не подключён</h3><button className="primary-btn" onClick={() => setActive('Подключения')}>Подключить</button></div> : <>
       <div className="sync-summary"><div><span>Последнее успешное обновление</span><strong>{connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : 'Ещё не выполнялось'}</strong></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Запускаем этапы':'Запустить доступные этапы'}</button></div>
-      <div className="sync-stage-grid">{stages.map(([stage,label]) => { const state=stateFor(stage); const copy=statusCopy(state); const blocked=syncing || state?.status === 'pending' || (state?.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now()); return <div className={`sync-stage-card ${copy.tone}`} key={stage}><div className="sync-stage-head"><span>{copy.tone==='success'?<CheckCircle2 size={19}/>:copy.tone==='pending'?<RefreshCw className="spin" size={19}/>:<AlertTriangle size={19}/>}</span><div><small>{label}</small><strong>{copy.title}</strong></div></div><p>{copy.text}</p><button disabled={blocked} onClick={() => syncConnection(connection.connectionId,[stage])}>{blocked ? (state?.status === 'pending' ? 'Ожидаем WB' : 'Повтор будет автоматически') : 'Обновить отдельно'}</button></div> })}</div>
+      <div className="sync-stage-grid">{stages.map(([stage,label]) => { const state=stateFor(stage); const copy=statusCopy(state); const blocked=syncing || state?.status === 'pending' || (state?.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now()); return <div className={`sync-stage-card ${copy.tone}`} key={stage}><div className="sync-stage-head"><span>{copy.tone==='success'?<CheckCircle2 size={19}/>:copy.tone==='pending'?<RefreshCw className="spin" size={19}/>:<AlertTriangle size={19}/>}</span><div><small>{label}</small><strong>{copy.title}</strong></div></div><p>{copy.text}</p><button disabled={blocked} onClick={() => syncConnection(connection.connectionId,[stage])}>{blocked ? (state?.status === 'pending' ? 'Ожидаем WB' : 'Повтор будет автоматически') : (state?.status === 'rate_limited' ? 'Повторить сейчас' : 'Обновить отдельно')}</button></div> })}</div>
       {coreData?.syncWarnings?.length > 0 && <div className="warning-stack">{coreData.syncWarnings.map((warning,index) => <div key={index}><AlertTriangle size={17}/>{warning}</div>)}</div>}
       <div className="sync-log">{syncHistory.length === 0 ? <div className="sync-empty">В журнале пока нет записей.</div> : syncHistory.map(item => { const warnings=Boolean(item.warnings?.length); const counts=item.counts || {}; return <div className={`sync-log-row ${warnings?'warning':item.status}`} key={item.id}><div className="sync-log-icon">{item.status==='success'&&!warnings?<CheckCircle2 size={18}/>:<AlertTriangle size={18}/>}</div><div><strong>{item.automatic?'Автоматический повтор':item.status==='success'?(warnings?'Завершено частично':'Завершено успешно'):'Не все этапы завершены'}</strong><span>{new Date(item.at).toLocaleString('ru-RU')}</span></div><div className="sync-log-details"><span>{counts.products ?? 0} товаров</span><span>{counts.orders ?? 0} заказов</span><span>{counts.sales ?? 0} продаж</span><span>{counts.stocks ?? 0} строк остатков</span><span>{counts.advertising ?? 0} кампаний</span>{warnings&&<span className="sync-warning-text">{item.warnings[0]}</span>}</div></div>})}</div>
     </>}</section>
