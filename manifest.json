@@ -1,18 +1,1 @@
-{
-  "project": "ELISEI",
-  "version": "5.3.13",
-  "name": "WB Per-Cabinet Token Architecture",
-  "dependsOn": ["5.3.12 WB Advertising Center"],
-  "features": [
-    "single WB token for all permitted categories",
-    "server-side cabinet token resolver",
-    "environment fallback for owner test cabinet",
-    "database or OAuth mode for customer cabinets",
-    "tenant-scoped advertising cache",
-    "cabinet ownership contract",
-    "promotion permission errors",
-    "global period and El recommendations"
-  ],
-  "writeOperations": false,
-  "maxFilesConstraint": 100
-}
+{"name":"ELISEI 5.3.14 PERIOD RUNTIME FIX","base":"5.3.13","files":13,"maxArchiveFiles":100}

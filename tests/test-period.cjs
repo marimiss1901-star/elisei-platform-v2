@@ -1,0 +1,15 @@
+'use strict';
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const lib = require(path.resolve(__dirname, '../payload/backend/src/lib/period.cjs'));
+const req = { query: { startDate: '2026-07-01', endDate: '2026-07-30', compare: '1', compare_from: '2026-06-01', compare_to: '2026-06-30' }, body: {}, headers: {} };
+const p = lib.parsePeriod(req);
+assert.equal(p.from, '2026-07-01');
+assert.equal(p.to, '2026-07-30');
+lib.applyAliases(req, p);
+assert.equal(req.query.date_from, '2026-07-01');
+assert.equal(req.query.from, '2026-07-01');
+const filtered = lib.filterPayloadByPeriod({ rows: [{ date: '2026-06-30', x: 1 }, { date: '2026-07-01', x: 2 }, { date: '2026-07-30', x: 3 }, { date: '2026-07-31', x: 4 }] }, p);
+assert.deepEqual(filtered.rows.map((x) => x.x), [2,3]);
+assert.equal(filtered.period.from, '2026-07-01');
+console.log('period backend tests: ok');
