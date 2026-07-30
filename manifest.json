@@ -1,1 +1,13 @@
-{"project":"ELISEI","version":"5.3.17","feature":"smart-period-toolbar","files":6}
+{
+  "project": "ELISEI",
+  "version": "5.3.18",
+  "name": "Period Navigation Fix",
+  "baseVersion": "5.3.17",
+  "files": 6,
+  "changes": [
+    "Remove location.reload on period change",
+    "Keep current section active",
+    "Soft refresh through events and URL state",
+    "Restore stored section after accidental reload"
+  ]
+}

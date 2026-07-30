@@ -1,7 +1,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '5.3.17';
+  var VERSION = '5.3.18';
   var KEY = 'elisei.globalPeriod.v3';
   var SECTION_KEY = 'elisei.currentSection';
   var DAY = 86400000;
@@ -204,7 +204,57 @@
     return { day: 'День', week: 'Неделя', month: 'Месяц', custom: 'Период' }[state.mode] || 'Период';
   }
 
-  function setState(patch, reload) {
+  function updateAddressBar() {
+    try {
+      var url = new URL(location.href);
+      url.searchParams.set('date_from', state.from);
+      url.searchParams.set('date_to', state.to);
+      url.searchParams.set('period_mode', state.mode);
+      url.searchParams.set('compare', state.compareEnabled ? '1' : '0');
+      url.searchParams.set('_period_revision', String(state.revision));
+      if (state.compareEnabled) {
+        url.searchParams.set('compare_from', state.compareFrom);
+        url.searchParams.set('compare_to', state.compareTo);
+      } else {
+        url.searchParams.delete('compare_from');
+        url.searchParams.delete('compare_to');
+      }
+      history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+    } catch (error) { /* no-op */ }
+  }
+
+  function findSectionControl(section) {
+    var controls = document.querySelectorAll('a,button,[role="button"]');
+    for (var i = 0; i < controls.length; i += 1) {
+      var control = controls[i];
+      if (control.closest && control.closest('#elisei-period-smart-host')) continue;
+      var text = String(control.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text === section || text.indexOf(section) === 0) return control;
+    }
+    return null;
+  }
+
+  function softRefreshCurrentSection() {
+    updateAddressBar();
+
+    try {
+      window.dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
+    } catch (error) {
+      window.dispatchEvent(new Event('popstate'));
+    }
+
+    var control = findSectionControl(currentSection);
+    if (control) {
+      control.dispatchEvent(new CustomEvent('elisei:period-refresh-section', {
+        bubbles: true,
+        detail: Object.assign({ section: currentSection }, state)
+      }));
+    }
+
+    document.documentElement.setAttribute('data-elisei-period-revision', String(state.revision));
+  }
+
+  function setState(patch) {
     var before = JSON.stringify(state);
     state = normalize(Object.assign({}, state, patch));
     var changed = before !== JSON.stringify(state);
@@ -213,9 +263,9 @@
     render();
     window.dispatchEvent(new CustomEvent('elisei:period-changed', { detail: Object.assign({}, state) }));
     window.dispatchEvent(new CustomEvent('elisei:data-refresh', { detail: Object.assign({}, state) }));
-    if (changed && reload !== false) {
-      showToast('Применяю период ' + rangeLabel());
-      setTimeout(function () { location.reload(); }, 240);
+    if (changed) {
+      showToast('Период применён: ' + rangeLabel());
+      softRefreshCurrentSection();
     }
   }
 
@@ -377,6 +427,24 @@
     };
   }
 
+  function restoreStoredSection() {
+    if (!currentSection || currentSection === 'Главная') return;
+    var attempts = 0;
+    var timer = setInterval(function () {
+      attempts += 1;
+      var control = findSectionControl(currentSection);
+      if (control) {
+        clearInterval(timer);
+        var active = control.getAttribute('aria-current') === 'page' ||
+          control.classList.contains('active') ||
+          control.classList.contains('selected');
+        if (!active) control.click();
+      } else if (attempts >= 20) {
+        clearInterval(timer);
+      }
+    }, 150);
+  }
+
   function mount() {
     var oldHosts = document.querySelectorAll('#elisei-period-hardfix-host,#elisei-period-visible-root,#elisei-period-runtime-root');
     oldHosts.forEach(function (node) { node.remove(); });
@@ -396,6 +464,7 @@
       updatePageLabels();
     });
     observer.observe(document.body, { subtree: true, childList: true });
+    restoreStoredSection();
   }
 
   installTransport();
