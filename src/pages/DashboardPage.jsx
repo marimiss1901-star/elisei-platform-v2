@@ -94,6 +94,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [dashboardData, setDashboardData] = useState(null)
   const [coreData, setCoreData] = useState(null)
   const [advertisingSnapshot, setAdvertisingSnapshot] = useState(null)
+  const [integrationDiagnostics, setIntegrationDiagnostics] = useState(null)
   const [liveProducts, setLiveProducts] = useState([])
   const [syncHistory, setSyncHistory] = useState([])
   const [settingsDraft, setSettingsDraft] = useState(defaultSettings)
@@ -111,14 +112,15 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   }
 
   const loadConnectionData = async connectionId => {
-    const [dashboard, productResult, historyResult, coreResult, advertisingResult] = await Promise.all([
-      wbApi.dashboard(connectionId), wbApi.products(connectionId), wbApi.syncHistory(connectionId), wbApi.core(connectionId), wbApi.advertising(connectionId)
+    const [dashboard, productResult, historyResult, coreResult, advertisingResult, diagnosticsResult] = await Promise.all([
+      wbApi.dashboard(connectionId), wbApi.products(connectionId), wbApi.syncHistory(connectionId), wbApi.core(connectionId), wbApi.advertising(connectionId), wbApi.diagnostics(connectionId)
     ])
     setDashboardData(dashboard.dashboard || null)
     setLiveProducts(productResult.products || [])
     setSyncHistory(historyResult.history || [])
     setCoreData(coreResult.core || null)
     setAdvertisingSnapshot(advertisingResult.advertising || coreResult.core?.advertising || null)
+    setIntegrationDiagnostics(diagnosticsResult || null)
     if (coreResult.core?.settings) setSettingsDraft(coreResult.core.settings)
   }
 
@@ -550,7 +552,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     const missingDetails = stockAvailable && Number(stockMeta?.totalQuantity || 0) > 0 && !stockDetailsAvailable && !mappingNeedsRefresh
     const partialMapping = stockDetailsAvailable && Number(stockMeta?.unmatchedRows || 0) > 0
     const quantityMismatch = stockDetailsAvailable && Number(stockMeta?.calculatedQuantity || 0) !== Number(stockMeta?.totalQuantity || 0)
-    const legacyIgnored = !stockAvailable && stockState?.lastCount > 0 && Number(stockState?.metadata?.schemaVersion || 0) < 2
+    const legacyIgnored = !stockAvailable && stockState?.lastCount > 0 && Number(stockState?.metadata?.schemaVersion || 0) < 5
     const reportHasNoIdentities = Number(stockMeta?.reportIdentityCounts?.nmIds || 0) === 0 && Number(stockMeta?.reportIdentityCounts?.barcodes || 0) === 0 && Number(stockMeta?.reportIdentityCounts?.vendorCodes || 0) === 0
     const repairStockMapping = () => reportHasNoIdentities ? repairStockSnapshot() : syncConnection(connection.connectionId, ['products'])
 
@@ -614,8 +616,8 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
           </div>)}
         </div>
       </> : campaigns.length > 0 ? <>
-        <div className="section-title-row"><div><span>WB Продвижение</span><h2>Список кампаний</h2></div><small>{advertising.truncated ? `Показаны первые 50 из ${advertising.totalCampaigns || campaigns.length}` : `${campaigns.length} кампаний`}</small></div>
-        <div className="data-table ad-table"><div className="data-row head ad-row"><span>Кампания</span><span>Статус</span><span>Артикулы WB</span><span>Статистика</span></div>{campaigns.map(item => <div className="data-row ad-row ad-list-row" key={item.advertId}><span><strong>{item.name}</strong><small>ID {item.advertId}</small></span><span><b className={`status-badge ${item.status===9?'success':item.status===11?'warning':'info'}`}>{statusName(item.status)}</b></span><span>{Array.isArray(item.nmIds)&&item.nmIds.length?item.nmIds.slice(0,4).join(', '):'Не получены'}</span><span>{Array.isArray(item.nmStats)&&item.nmStats.length?`${item.nmStats.length} товаров`:'Ожидается'}</span></div>)}</div>
+        <div className="section-title-row"><div><span>WB Продвижение</span><h2>Список кампаний</h2></div><small>{formatNumber(advertising.statsLoadedCampaigns || campaigns.filter(item=>item.statsStatus==='loaded').length)} со статистикой из {formatNumber(advertising.totalCampaigns || campaigns.length)}</small></div>
+        <div className="data-table ad-table"><div className="data-row head ad-row"><span>Кампания</span><span>Статус</span><span>Артикулы WB</span><span>Статистика</span></div>{campaigns.map(item => <div className="data-row ad-row ad-list-row" key={item.advertId}><span><strong>{item.name}</strong><small>ID {item.advertId}</small></span><span><b className={`status-badge ${item.status===9?'success':item.status===11?'warning':'info'}`}>{statusName(item.status)}</b></span><span>{Array.isArray(item.nmIds)&&item.nmIds.length?item.nmIds.slice(0,4).join(', '):'Не получены'}</span><span>{item.statsStatus==='loaded'?`${Array.isArray(item.nmStats)?item.nmStats.length:0} товаров · загружено`:item.statsStatus==='empty_response'?'WB вернул пустой ответ':'В очереди'}</span></div>)}</div>
       </> : null}
 
       {!apiAvailable && <div className="settings-card ad-input-card"><h3>Резервный ручной расход</h3><p>Используется в P&amp;L только пока WB API рекламы не загрузил фактические расходы.</p><div className="inline-setting"><input type="number" min="0" value={settingsDraft.advertisingMonthly ?? 0} onChange={e => updateSetting('advertisingMonthly',e.target.value)}/><button className="primary-btn" onClick={saveSettings}><Save size={17}/> Сохранить</button></div></div>}
@@ -691,7 +693,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       if (!state) return { tone:'idle', title:'Не запускалось', text:'Данные этого раздела ещё не запрашивались.' }
       if (state.status === 'success') {
         if (stage === 'stocks') {
-          const schemaValid = Number(state.metadata?.schemaVersion || 0) === 2
+          const schemaValid = Number(state.metadata?.schemaVersion || 0) === 5
           if (!schemaValid) return { tone:'warning', title:'Нужен новый отчёт', text:'Старые остатки скрыты как неподтверждённые. Запустите или дождитесь нового отчёта WB.' }
           return { tone:'success', title:`${formatNumber(state.lastCount)} строк · ${formatNumber(state.metadata?.totalQuantity || 0)} шт.`, text:state.lastSuccessAt ? `Обновлено ${new Date(state.lastSuccessAt).toLocaleString('ru-RU')}` : 'Этап завершён.' }
         }
@@ -709,7 +711,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       if (state.status === 'running') return { tone:'pending', title:'Загрузка', text:'Запрос выполняется.' }
       return { tone:'danger', title:'Не загружено', text:state.lastError || 'Запустите этап повторно.' }
     }
-    return <section className="app-page glass-panel"><div className="page-title"><span>Контроль данных</span><h1>Журнал синхронизаций</h1><p>Каждый поток работает независимо. Лимит одного метода больше не останавливает остальные разделы.</p></div>{!connection.connected ? <div className="empty-state"><RefreshCw size={38}/><h3>Wildberries не подключён</h3><button className="primary-btn" onClick={() => setActive('Подключения')}>Подключить</button></div> : <>
+    return <section className="app-page glass-panel"><div className="page-title"><span>Контроль данных</span><h1>Журнал синхронизаций</h1><p>Каждый поток работает независимо. Лимит одного метода больше не останавливает остальные разделы.</p></div>{integrationDiagnostics && <div className="data-integrity-strip"><div><strong>Единое ядро товаров</strong><span>{formatNumber(integrationDiagnostics.productMaster?.products)} карточек · {formatNumber(integrationDiagnostics.productMaster?.withBarcodes)} со ШК</span></div><div><strong>Остатки</strong><span>{integrationDiagnostics.stockAllocation?`${formatNumber(integrationDiagnostics.stockAllocation.matchedQuantity)} шт. сопоставлено`:'снимок ожидается'}</span></div><div><strong>Реклама</strong><span>{formatNumber(integrationDiagnostics.advertisingMeta?.campaigns)} кампаний · {formatNumber(integrationDiagnostics.advertisingMeta?.campaignsWithStats)} со статистикой</span></div></div>}{!connection.connected ? <div className="empty-state"><RefreshCw size={38}/><h3>Wildberries не подключён</h3><button className="primary-btn" onClick={() => setActive('Подключения')}>Подключить</button></div> : <>
       <div className="sync-summary"><div><span>Последнее успешное обновление</span><strong>{connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : 'Ещё не выполнялось'}</strong></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Запускаем этапы':'Запустить доступные этапы'}</button></div>
       <div className="sync-stage-grid">{stages.map(([stage,label]) => { const state=stateFor(stage); const copy=statusCopy(state,stage); const blocked=syncing || state?.status === 'pending' || (state?.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now()); return <div className={`sync-stage-card ${copy.tone}`} key={stage}><div className="sync-stage-head"><span>{copy.tone==='success'?<CheckCircle2 size={19}/>:copy.tone==='pending'?<RefreshCw className="spin" size={19}/>:<AlertTriangle size={19}/>}</span><div><small>{label}</small><strong>{copy.title}</strong></div></div><p>{copy.text}</p><button disabled={blocked} onClick={() => syncConnection(connection.connectionId,[stage])}>{blocked ? (state?.status === 'pending' ? 'Ожидаем WB' : 'Повтор будет автоматически') : (state?.status === 'rate_limited' ? 'Повторить сейчас' : 'Обновить отдельно')}</button></div> })}</div>
       {coreData?.syncWarnings?.length > 0 && <div className="warning-stack">{coreData.syncWarnings.map((warning,index) => <div key={index}><AlertTriangle size={17}/>{warning}</div>)}</div>}

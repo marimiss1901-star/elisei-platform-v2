@@ -6,6 +6,20 @@ import helmet from 'helmet'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import pg from 'pg'
+import { normalizeCatalogPage as normalizeCatalogPageStrict, validateCatalog as validateCatalogStrict } from './wb/adapters/catalog.js'
+import {
+  normalizeWarehouseRemains as normalizeWarehouseRemainsStrict,
+  buildWarehouseMeta as buildWarehouseMetaStrict,
+  validateWarehouseRemains as validateWarehouseRemainsStrict,
+  reconcileWarehouseRemains as reconcileWarehouseRemainsStrict,
+} from './wb/adapters/warehouse-remains.js'
+import {
+  normalizeCampaignList as normalizeCampaignListStrict,
+  normalizeFullStats as normalizeFullStatsStrict,
+  mergeAdvertisingSnapshot,
+} from './wb/adapters/promotion.js'
+import { buildProductMaster } from './wb/product-master.js'
+import { ensureSnapshotSchema, saveSnapshot, latestSnapshot } from './wb/snapshot-store.js'
 
 const { Pool } = pg
 const app = express()
@@ -124,6 +138,7 @@ async function initDatabase() {
       PRIMARY KEY(connection_id, stage)
     );
   `)
+  await ensureSnapshotSchema(pool)
   await migrateLegacyWbTokens()
   await ensurePrimaryTokens()
 }
@@ -184,8 +199,9 @@ const WB_SYNC_STAGES = Object.freeze({
   advertising: { label: 'Реклама', scope: 'promotion' },
 })
 const CORE_SYNC_SCOPES = [...new Set(Object.values(WB_SYNC_STAGES).map(item => item.scope))]
-const STOCK_DATA_SCHEMA_VERSION = 4
+const STOCK_DATA_SCHEMA_VERSION = 5
 const STOCK_DATA_SOURCE = 'wb_warehouse_remains'
+const STOCK_REPORT_PROFILE = 'article_barcode_size_v1'
 
 function decodeJwtPayload(value, invalidMessage) {
   try {
@@ -767,7 +783,7 @@ function productKey(row) {
 function isTrustedStockSnapshot(data = {}) {
   const meta = data?.stockMeta && typeof data.stockMeta === 'object' ? data.stockMeta : {}
   const schemaVersion = Number(meta.schemaVersion || 0)
-  return schemaVersion >= 2 && schemaVersion <= STOCK_DATA_SCHEMA_VERSION && meta.source === STOCK_DATA_SOURCE
+  return schemaVersion === STOCK_DATA_SCHEMA_VERSION && meta.source === STOCK_DATA_SOURCE
 }
 
 function buildStockMeta(rows = [], extra = {}) {
@@ -793,6 +809,32 @@ function buildStockMeta(rows = [], extra = {}) {
     receivedAt: new Date().toISOString(),
     ...extra,
   }
+}
+
+function rebuildUnifiedProductData(data = {}) {
+  const catalog = Array.isArray(data.products) ? data.products : []
+  let stockAllocation = null
+  if (isTrustedStockSnapshot(data) && Array.isArray(data.stocks)) {
+    stockAllocation = reconcileWarehouseRemainsStrict(catalog, data.stocks)
+    data.stockAllocation = stockAllocation
+    data.stockMeta = {
+      ...(data.stockMeta || buildWarehouseMetaStrict(data.stocks)),
+      reconciliation:stockAllocation.diagnostics,
+      mappedQuantity:stockAllocation.diagnostics.matchedQuantity,
+      unmatchedQuantity:stockAllocation.diagnostics.unmatchedQuantity,
+      mappedRows:stockAllocation.diagnostics.matchedRows,
+      unmatchedRows:stockAllocation.diagnostics.unmatchedRows,
+    }
+  } else {
+    data.stockAllocation = null
+  }
+  data.productMaster = buildProductMaster({
+    catalog,
+    stockAllocation,
+    advertising:data.advertising || null,
+  })
+  data.products = data.productMaster
+  return data
 }
 
 function buildCoreAnalytics(data = {}, rawSettings = {}) {
@@ -1060,7 +1102,9 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
   }
 
   const actualAdvertisingSpend = Math.max(0, finiteNumber(advertisingData?.totals?.spend, 0))
-  const advertisingStatsAvailable = actualAdvertisingSpend > 0 || campaignProductRows.some(row => row.views > 0 || row.clicks > 0 || row.spend > 0 || row.orders > 0 || row.revenue > 0)
+  // Нулевая статистика — валидный результат. Признак загрузки берём из ответа fullstats,
+  // а не из ненулевых расходов/показов.
+  const advertisingStatsAvailable = rawCampaigns.some(campaign => campaign?.statsStatus === 'loaded')
   const advertisingExpense = availability.advertising && advertisingStatsAvailable ? actualAdvertisingSpend : settings.advertisingMonthly
   const mappedAdvertisingScale = mappedAdvertisingSpend > 0 && advertisingExpense >= 0
     ? Math.min(1, advertisingExpense / mappedAdvertisingSpend)
@@ -1297,6 +1341,9 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
       truncated: Boolean(advertisingData.truncated),
       totalCampaigns: advertisingData.totalCampaigns || rawCampaigns.length,
       statsAvailable: advertisingStatsAvailable,
+      statsLoadedCampaigns: Number(advertisingData?.statsLoadedCampaigns || rawCampaigns.filter(item => item?.statsStatus === 'loaded').length),
+      statsPendingCampaigns: Number(advertisingData?.statsPendingCampaigns || rawCampaigns.filter(item => item?.statsStatus !== 'loaded').length),
+      meta: advertisingData?.meta || null,
       mappedProductRows: campaignProductRows.filter(row => row.mapped).length,
       source: availability.advertising ? 'wb_api' : 'manual',
     },
@@ -1314,45 +1361,25 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
 async function loadProducts(token, { limit = 100, maxPages = 300, deadlineAt = 0 } = {}) {
   const endpoint = 'https://content-api.wildberries.ru/content/v2/get/cards/list'
   const products = []
+  const rawPages = []
   let cursor = { limit }
 
   for (let page = 0; page < maxPages; page += 1) {
-    const result = await wbFetch(endpoint, token, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings: { cursor, filter: { withPhoto: -1 } } }),
-      label: 'Товары WB',
-      timeoutMs: 45000,
-      maxAttempts: 2,
-      maxRetryDelayMs: 10000,
-      deadlineAt,
+    const payload = await wbFetch(endpoint, token, {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body:JSON.stringify({ settings:{ cursor, filter:{ withPhoto:-1 } } }),
+      label:'Товары WB', timeoutMs:45000, maxAttempts:2, maxRetryDelayMs:10000, deadlineAt,
     })
-    const cards = Array.isArray(result?.cards) ? result.cards : []
-    products.push(...cards.map(card => {
-      const sizes = (Array.isArray(card?.sizes) ? card.sizes : []).map(size => ({
-        chrtID: size?.chrtID ?? size?.chrtId ?? size?.chrt_id ?? null,
-        techSize: size?.techSize || size?.wbSize || size?.sizeName || '',
-        wbSize: size?.wbSize || '',
-        skus: uniqueIdentities(Array.isArray(size?.skus) ? size.skus : [size?.sku, size?.barcode]),
-      }))
-      return {
-        nmID: card.nmID,
-        vendorCode: card.vendorCode,
-        title: card.title || card.subjectName || 'Товар',
-        brand: card.brand || '',
-        photo: card.photos?.[0]?.big || card.photos?.[0]?.square || '',
-        sizes,
-        chrtIds: uniqueIdentities(sizes.map(size => size.chrtID)),
-        barcodes: uniqueIdentities(sizes.flatMap(size => size.skus || [])),
-      }
-    }))
-
-    const next = result?.cursor || {}
-    if (cards.length < limit || !next.updatedAt || !next.nmID) break
-    cursor = { limit, updatedAt: next.updatedAt, nmID: next.nmID }
+    rawPages.push(payload)
+    const normalized = normalizeCatalogPageStrict(payload)
+    products.push(...normalized.products)
+    if (normalized.rawCount < limit || !normalized.cursor.updatedAt || !normalized.cursor.nmID) break
+    cursor = { limit, updatedAt:normalized.cursor.updatedAt, nmID:Number(normalized.cursor.nmID) }
     await sleep(700)
   }
-  return products
+  const validation = validateCatalogStrict(products)
+  return { value:products, rawPayload:rawPages, validation, endpoint }
 }
 
 function firstDefined(sources = [], keys = [], fallback = null) {
@@ -1542,17 +1569,24 @@ function validateWarehouseRemainsSnapshot(rows, meta, rawPayload) {
 
 async function downloadWarehouseRemainsReport(token, taskId, { deadlineAt = 0 } = {}) {
   const base = 'https://seller-analytics-api.wildberries.ru/api/v1/warehouse_remains'
-  const report = await wbFetch(`${base}/tasks/${encodeURIComponent(taskId)}/download`, token, {
-    label: 'Загрузка отчёта остатков WB', timeoutMs: 60000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
+  const endpoint = `${base}/tasks/${encodeURIComponent(taskId)}/download`
+  const rawPayload = await wbFetch(endpoint, token, {
+    label:'Загрузка отчёта остатков WB', timeoutMs:60000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
   })
-  const rows = normalizeWarehouseRemains(report)
-  const stockMeta = buildStockMeta(rows, {
+  const normalized = normalizeWarehouseRemainsStrict(rawPayload)
+  const stockMeta = {
+    ...normalized.meta,
     taskId,
-    payloadShape: describeWarehouseRemainsPayload(report),
-    parserVersion: 2,
-  })
-  const identityCounts = validateWarehouseRemainsSnapshot(rows, stockMeta, report)
-  return { rows, stockMeta: { ...stockMeta, identityCounts } }
+    parserVersion:5,
+  }
+  validateWarehouseRemainsStrict(normalized.rows, stockMeta)
+  return {
+    rows:normalized.rows,
+    stockMeta,
+    rawPayload,
+    endpoint,
+    validation:{ identityCounts:stockMeta.identityCounts, totalQuantity:stockMeta.totalQuantity, sourceRows:normalized.sourceRows },
+  }
 }
 
 function stageDataKey(stage) {
@@ -1606,15 +1640,20 @@ function incrementalDateFrom(previousRows) {
 }
 
 async function loadStatisticsRows(kind, token, { deadlineAt = 0, previousRows = [] } = {}) {
-  const endpoint = kind === 'orders' ? 'orders' : 'sales'
+  const endpointName = kind === 'orders' ? 'orders' : 'sales'
   const label = kind === 'orders' ? 'Заказы WB' : 'Продажи WB'
   const dateFrom = incrementalDateFrom(previousRows)
-  const payload = await wbFetch(
-    `https://statistics-api.wildberries.ru/api/v1/supplier/${endpoint}?dateFrom=${encodeURIComponent(dateFrom)}&flag=0`,
-    token,
-    { label, timeoutMs: 45000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt },
-  )
-  return mergeStatisticsRows(kind, previousRows, Array.isArray(payload) ? payload : [])
+  const endpoint = `https://statistics-api.wildberries.ru/api/v1/supplier/${endpointName}?dateFrom=${encodeURIComponent(dateFrom)}&flag=0`
+  const rawPayload = await wbFetch(endpoint, token, {
+    label, timeoutMs:45000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
+  })
+  const incoming = Array.isArray(rawPayload) ? rawPayload : []
+  return {
+    value:mergeStatisticsRows(kind, previousRows, incoming),
+    rawPayload,
+    validation:{ incomingRows:incoming.length, dateFrom },
+    endpoint,
+  }
 }
 
 function collectCampaignNmIds(node, output = []) {
@@ -1770,9 +1809,7 @@ function normalizeAdvertisingStats(payload, campaigns) {
 
 function buildAdvertisingMeta(value = {}) {
   const campaigns = Array.isArray(value?.campaigns) ? value.campaigns : []
-  const campaignsWithStats = campaigns.filter(item =>
-    Number(item?.views || 0) > 0 || Number(item?.clicks || 0) > 0 || Number(item?.spend || 0) > 0 || Number(item?.orders || 0) > 0
-  ).length
+  const campaignsWithStats = campaigns.filter(item => item?.statsStatus === 'loaded').length
   return {
     schemaVersion: 1,
     source: 'wb_promotion_api',
@@ -1784,54 +1821,100 @@ function buildAdvertisingMeta(value = {}) {
   }
 }
 
-async function loadAdvertising(token, { deadlineAt = 0 } = {}) {
-  const campaignPayload = await wbFetch('https://advert-api.wildberries.ru/api/advert/v2/adverts?statuses=4,7,8,9,11', token, {
-    label: 'Кампании WB', timeoutMs: 45000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
+async function loadAdvertising(token, { deadlineAt = 0, previous = {} } = {}) {
+  const campaignEndpoint = 'https://advert-api.wildberries.ru/api/advert/v2/adverts?statuses=4,7,8,9,11'
+  const campaignPayload = await wbFetch(campaignEndpoint, token, {
+    label:'Кампании WB', timeoutMs:45000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
   })
-  const allCampaigns = normalizeCampaignList(campaignPayload)
-  const statusPriority = status => ({ 9:0, 11:1, 7:2, 4:3, 8:4 }[Number(status)] ?? 9)
-  const campaigns = [...allCampaigns]
-    .sort((a, b) => statusPriority(a.status) - statusPriority(b.status) || Date.parse(b.changeTime || 0) - Date.parse(a.changeTime || 0))
-    .slice(0, 50)
+  const allCampaigns = normalizeCampaignListStrict(campaignPayload)
+  const statusPriority = status => ({ 9:0, 11:1, 4:2, 7:3, 8:4 }[Number(status)] ?? 9)
+  const campaigns = [...allCampaigns].sort((a,b) => statusPriority(a.status)-statusPriority(b.status) || Date.parse(b.changeTime || 0)-Date.parse(a.changeTime || 0))
+
   if (!campaigns.length) {
-    const empty = { campaigns: [], totals: { views:0, clicks:0, spend:0, orders:0, revenue:0, ctr:0, cpc:0, crr:null }, period: { days:30 }, truncated:false }
-    return { ...empty, meta: buildAdvertisingMeta(empty) }
+    const value = mergeAdvertisingSnapshot({ previous, campaigns:[], requestedIds:[], period:{ days:30 } })
+    value.meta = buildAdvertisingMeta(value)
+    return { value, rawPayload:{ campaigns:campaignPayload, stats:[] }, validation:{ campaigns:0, statsRows:0 }, endpoint:campaignEndpoint }
   }
-  const endDate = new Date().toISOString().slice(0, 10)
-  const beginDate = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10)
-  const ids = campaigns.map(item => item.advertId).join(',')
-  const statsPayload = await wbFetch(`https://advert-api.wildberries.ru/adv/v3/fullstats?ids=${encodeURIComponent(ids)}&beginDate=${beginDate}&endDate=${endDate}`, token, {
-    label: 'Статистика рекламы WB', timeoutMs: 60000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
+
+  const batchSize = 50
+  const previousOffset = Math.max(0, Number(previous?.meta?.nextStatsOffset || 0))
+  const offset = previousOffset >= campaigns.length ? 0 : previousOffset
+  const batch = campaigns.slice(offset, offset + batchSize)
+  const requestedIds = batch.map(item => String(item.advertId))
+  const endDate = new Date().toISOString().slice(0,10)
+  const beginDate = new Date(Date.now()-29*86400000).toISOString().slice(0,10)
+  const statsEndpoint = `https://advert-api.wildberries.ru/adv/v3/fullstats?ids=${encodeURIComponent(requestedIds.join(','))}&beginDate=${beginDate}&endDate=${endDate}`
+  const statsPayload = requestedIds.length ? await wbFetch(statsEndpoint, token, {
+    label:'Статистика рекламы WB', timeoutMs:60000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
+  }) : []
+  const statsByAdvertId = normalizeFullStatsStrict(statsPayload)
+  const value = mergeAdvertisingSnapshot({
+    previous,
+    campaigns,
+    statsByAdvertId,
+    requestedIds,
+    period:{ beginDate, endDate, days:30 },
   })
-  const normalized = normalizeAdvertisingStats(statsPayload, campaigns)
-  const value = { ...normalized, period: { beginDate, endDate, days:30 }, truncated: allCampaigns.length > campaigns.length, totalCampaigns: allCampaigns.length }
-  return { ...value, meta: buildAdvertisingMeta(value) }
+  const nextStatsOffset = offset + batch.length >= campaigns.length ? 0 : offset + batch.length
+  value.meta = {
+    ...buildAdvertisingMeta(value),
+    nextStatsOffset,
+    requestedCampaigns:requestedIds.length,
+    statsResponseCampaigns:statsByAdvertId.size,
+    allCampaigns:campaigns.length,
+  }
+  return {
+    value,
+    rawPayload:{ campaigns:campaignPayload, stats:statsPayload },
+    validation:{ campaigns:campaigns.length, requestedCampaigns:requestedIds.length, statsResponseCampaigns:statsByAdvertId.size, nextStatsOffset },
+    endpoint:`${campaignEndpoint} + ${statsEndpoint}`,
+  }
 }
 
 async function advanceWarehouseRemainsTask(token, state, { deadlineAt = 0 } = {}) {
   const base = 'https://seller-analytics-api.wildberries.ru/api/v1/warehouse_remains'
-  if (!state?.task_id) {
-    const created = await wbFetch(`${base}?locale=ru`, token, {
-      label: 'Создание отчёта остатков WB', timeoutMs: 30000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
+  // Отчёт создаём сразу в детализации, необходимой для единой карточки товара.
+  // Без этих groupBy WB вправе вернуть агрегат, который невозможно надёжно распределить по ШК/артикулу.
+  const reportUrl = `${base}?locale=ru&groupBySa=true&groupByNm=true&groupByBarcode=true&groupBySize=true`
+  const stateProfile = String(state?.metadata?.reportProfile || '')
+  const taskIdFromState = stateProfile === STOCK_REPORT_PROFILE ? state?.task_id : null
+  if (!taskIdFromState) {
+    const created = await wbFetch(reportUrl, token, {
+      label: 'Создание детального отчёта остатков WB', timeoutMs: 30000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
     })
     const taskId = created?.data?.taskId
     if (!taskId) throw Object.assign(new Error('Отчёт остатков WB: не получен taskId'), { status: 502 })
-    return { pending: true, taskId, taskStatus: 'new', nextAllowedAt: new Date(Date.now() + 30000).toISOString() }
+    return {
+      pending: true,
+      taskId,
+      taskStatus: 'new',
+      reportProfile: STOCK_REPORT_PROFILE,
+      nextAllowedAt: new Date(Date.now() + 30000).toISOString(),
+    }
   }
 
-  const taskId = state.task_id
+  const taskId = taskIdFromState
   const statusPayload = await wbFetch(`${base}/tasks/${encodeURIComponent(taskId)}/status`, token, {
     label: 'Проверка отчёта остатков WB', timeoutMs: 25000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
   })
   const taskStatus = String(statusPayload?.data?.status || '').toLowerCase()
   if (taskStatus === 'done') {
     const downloaded = await downloadWarehouseRemainsReport(token, taskId, { deadlineAt })
-    return { pending: false, rows: downloaded.rows, stockMeta: downloaded.stockMeta, taskId: null, taskStatus: 'done' }
+    return {
+      pending:false,
+      rows:downloaded.rows,
+      stockMeta:downloaded.stockMeta,
+      rawPayload:downloaded.rawPayload,
+      endpoint:downloaded.endpoint,
+      validation:downloaded.validation,
+      taskId:null,
+      taskStatus:'done',
+    }
   }
   if (taskStatus === 'canceled' || taskStatus === 'purged') {
     throw Object.assign(new Error(`Отчёт остатков WB завершён со статусом ${taskStatus}. Будет создан новый отчёт.`), { status: 502, resetTask: true })
   }
-  return { pending: true, taskId, taskStatus: taskStatus || 'processing', nextAllowedAt: new Date(Date.now() + 30000).toISOString() }
+  return { pending: true, taskId, taskStatus: taskStatus || 'processing', reportProfile:STOCK_REPORT_PROFILE, nextAllowedAt: new Date(Date.now() + 30000).toISOString() }
 }
 
 async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
@@ -1840,7 +1923,7 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
   let state = (await pool.query('SELECT * FROM wb_sync_states WHERE connection_id=$1 AND stage=$2', [connection.id, stage])).rows[0] || null
   const now = Date.now()
   if (state?.next_allowed_at && new Date(state.next_allowed_at).getTime() > now) {
-    return { stage, status: state.status || 'cooldown', value: fallback, warning: `${definition.label}: следующий запрос разрешён ${new Date(state.next_allowed_at).toLocaleString('ru-RU')}.`, state }
+    return { stage, status:state.status || 'cooldown', value:fallback, warning:`${definition.label}: следующий запрос разрешён ${new Date(state.next_allowed_at).toLocaleString('ru-RU')}.`, state }
   }
   const selected = chooseToken(tokens, definition.scope)
   if (!selected) {
@@ -1852,33 +1935,68 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
   try {
     let value
     let meta = null
-    if (stage === 'products') value = await loadProducts(selected.token, { deadlineAt })
-    else if (stage === 'orders' || stage === 'sales') value = await loadStatisticsRows(stage, selected.token, { deadlineAt, previousRows:fallback })
-    else if (stage === 'advertising') value = await loadAdvertising(selected.token, { deadlineAt })
-    else if (stage === 'stocks') {
+    let snapshot = null
+
+    if (stage === 'products') {
+      const loaded = await loadProducts(selected.token, { deadlineAt })
+      value = loaded.value
+      snapshot = loaded
+    } else if (stage === 'orders' || stage === 'sales') {
+      const loaded = await loadStatisticsRows(stage, selected.token, { deadlineAt, previousRows:fallback })
+      value = loaded.value
+      snapshot = loaded
+    } else if (stage === 'advertising') {
+      const loaded = await loadAdvertising(selected.token, { deadlineAt, previous:fallback })
+      value = loaded.value
+      meta = value.meta || null
+      snapshot = loaded
+    } else if (stage === 'stocks') {
       const result = await advanceWarehouseRemainsTask(selected.token, state, { deadlineAt })
       if (result.pending) {
         state = await updateSyncState(connection.id, stage, {
           status:'pending', lastAttemptAt:new Date().toISOString(), nextAllowedAt:result.nextAllowedAt,
-          lastError:null, taskId:result.taskId, metadata:{ taskStatus:result.taskStatus, tokenId:selected.row.id, tokenLabel:selected.row.label, primary:Boolean(selected.row.is_primary) },
+          lastError:null, taskId:result.taskId, metadata:{ taskStatus:result.taskStatus, reportProfile:result.reportProfile || STOCK_REPORT_PROFILE, tokenId:selected.row.id, tokenLabel:selected.row.label, primary:Boolean(selected.row.is_primary) },
         })
         return { stage, status:'pending', value:fallback, warning:'Остатки: отчёт WB формируется в фоне. ELISEI проверит его автоматически.', state }
       }
       value = result.rows
       meta = result.stockMeta
+      snapshot = result
     }
+
+    if (snapshot?.rawPayload !== undefined) {
+      await saveSnapshot(pool, {
+        connectionId:connection.id,
+        stream:stage,
+        endpoint:snapshot.endpoint || stage,
+        requestKey:stage === 'stocks' ? String(meta?.taskId || '') : '',
+        rawPayload:snapshot.rawPayload,
+        normalizedPayload:['products','stocks','advertising'].includes(stage) ? value : null,
+        validation:snapshot.validation || meta || {},
+        keep:['orders','sales'].includes(stage) ? 1 : 3,
+      })
+    }
+
     const count = stageCount(stage, value)
+    const stateMetadata = {
+      tokenId:selected.row.id,
+      tokenLabel:selected.row.label,
+      primary:Boolean(selected.row.is_primary),
+      ...(meta || {}),
+      ...(snapshot?.validation ? { validation:snapshot.validation } : {}),
+    }
     state = await updateSyncState(connection.id, stage, {
       status:'success', lastAttemptAt:new Date().toISOString(), lastSuccessAt:new Date().toISOString(), nextAllowedAt:null,
-      lastError:null, lastCount:count, taskId:null, metadata:{ tokenId:selected.row.id, tokenLabel:selected.row.label, primary:Boolean(selected.row.is_primary), ...(stage === 'stocks' && meta ? meta : {}) },
+      lastError:null, lastCount:count, taskId:null, metadata:stateMetadata,
     })
     return { stage, status:'success', value, meta, state }
   } catch (error) {
-    const nextAllowedAt = error?.nextAllowedAt || (error?.retryAfterSeconds ? new Date(Date.now() + Number(error.retryAfterSeconds) * 1000).toISOString() : null)
+    const nextAllowedAt = error?.nextAllowedAt || (error?.retryAfterSeconds ? new Date(Date.now()+Number(error.retryAfterSeconds)*1000).toISOString() : null)
     const status = Number(error?.status) === 429 ? 'rate_limited' : Number(error?.status) === 403 ? 'forbidden' : 'error'
     state = await updateSyncState(connection.id, stage, {
       status, lastAttemptAt:new Date().toISOString(), nextAllowedAt, lastError:error.message,
-      taskId:error?.resetTask ? null : state?.task_id, metadata:{ ...(state?.metadata || {}), requestId:error?.requestId || null },
+      taskId:error?.resetTask ? null : state?.task_id,
+      metadata:{ ...(state?.metadata || {}), requestId:error?.requestId || null, code:error?.code || null, details:error?.details || null },
     })
     return { stage, status, value:fallback, warning:`${definition.label}: ${error.message}${stageCount(stage, fallback) ? ' Сохранены предыдущие данные.' : ''}`, state }
   }
@@ -1943,7 +2061,7 @@ app.get('/health', async (_req, res) => {
   res.json({
     ok: true,
     service: 'elisei-api',
-    version: '2.7.9',
+    version: '2.8.0',
     database,
     backgroundWorker: {
       running: backgroundWorkerState.running,
@@ -2146,8 +2264,7 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
 
     data.stageStatus = stageStatus
     data.syncWarnings = warnings
-    const stats = { orders: Array.isArray(data.orders) ? data.orders : [], sales: Array.isArray(data.sales) ? data.sales : [], stocks: Array.isArray(data.stocks) ? data.stocks : [] }
-    data.products = enrichProducts(Array.isArray(data.products) ? data.products : [], stats)
+    rebuildUnifiedProductData(data)
     const counts = {
       products: data.products.length,
       orders: Array.isArray(data.orders) ? data.orders.length : 0,
@@ -2289,6 +2406,36 @@ app.put('/api/business/settings', authRequired, async (req, res) => {
   res.json({ settings, core: connection ? buildCoreAnalytics(connection.data || {}, settings) : null })
 })
 
+app.get('/api/wb/diagnostics/:id', authRequired, async (req, res) => {
+  const connection = await getConnection(req.auth.sub, req.params.id)
+  if (!connection) return res.status(404).json({ error:'Подключение не найдено' })
+  const streams = ['products','orders','sales','stocks','advertising']
+  const snapshots = {}
+  for (const stream of streams) {
+    const snapshot = await latestSnapshot(pool, connection.id, stream)
+    snapshots[stream] = snapshot ? {
+      id:snapshot.id,
+      endpoint:snapshot.endpoint,
+      requestKey:snapshot.request_key,
+      checksum:snapshot.checksum,
+      validation:snapshot.validation,
+      createdAt:snapshot.created_at,
+    } : null
+  }
+  res.json({
+    snapshots,
+    stockMeta:connection.data?.stockMeta || null,
+    stockAllocation:connection.data?.stockAllocation?.diagnostics || null,
+    advertisingMeta:connection.data?.advertising?.meta || null,
+    productMaster:{
+      products:Array.isArray(connection.data?.productMaster) ? connection.data.productMaster.length : 0,
+      withBarcodes:(connection.data?.productMaster || []).filter(item => Array.isArray(item?.barcodes) && item.barcodes.length).length,
+      withMappedStock:(connection.data?.productMaster || []).filter(item => item?.stockMapped).length,
+      withAdvertising:(connection.data?.productMaster || []).filter(item => item?.advertising).length,
+    },
+  })
+})
+
 app.get('/api/wb/sync-history/:id', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, req.params.id)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
@@ -2329,12 +2476,7 @@ async function persistStockSnapshot(connectionId, rows, stockMeta) {
       },
     }
     data.syncWarnings = (Array.isArray(data.syncWarnings) ? data.syncWarnings : []).filter(text => !String(text).startsWith('Остатки:'))
-    const stats = {
-      orders:Array.isArray(data.orders) ? data.orders : [],
-      sales:Array.isArray(data.sales) ? data.sales : [],
-      stocks:normalizedRows,
-    }
-    data.products = enrichProducts(Array.isArray(data.products) ? data.products : [], stats)
+    rebuildUnifiedProductData(data)
     const updated = await client.query(`
       UPDATE marketplace_connections
       SET data=$1::jsonb,last_sync_at=NOW(),updated_at=NOW(),status='connected'
@@ -2392,7 +2534,19 @@ async function processPendingStockReports() {
         await updateSyncState(row.connection_id, 'stocks', { status:'pending', nextAllowedAt:result.nextAllowedAt, taskId:result.taskId, metadata:{ taskStatus:result.taskStatus }, lastError:null })
         continue
       }
-      const stockMeta = result.stockMeta || buildStockMeta(result.rows)
+      const stockMeta = result.stockMeta || buildWarehouseMetaStrict(result.rows)
+      if (result.rawPayload !== undefined) {
+        await saveSnapshot(pool, {
+          connectionId:row.connection_id,
+          stream:'stocks',
+          endpoint:result.endpoint || 'warehouse_remains/download',
+          requestKey:String(stockMeta?.taskId || row.task_id || ''),
+          rawPayload:result.rawPayload,
+          normalizedPayload:result.rows,
+          validation:result.validation || stockMeta,
+          keep:3,
+        })
+      }
       const persisted = await persistStockSnapshot(row.connection_id, result.rows, stockMeta)
       await updateSyncState(row.connection_id, 'stocks', {
         status:'success', lastSuccessAt:new Date().toISOString(), nextAllowedAt:null, lastError:null,
@@ -2454,12 +2608,7 @@ async function processDueDeferredStages() {
       const prefix = `${WB_SYNC_STAGES[row.stage]?.label || row.stage}:`
       const previousWarnings = (Array.isArray(data.syncWarnings) ? data.syncWarnings : []).filter(text => !String(text).startsWith(prefix))
       data.syncWarnings = result.warning ? [...previousWarnings, result.warning] : previousWarnings
-      const stats = {
-        orders:Array.isArray(data.orders) ? data.orders : [],
-        sales:Array.isArray(data.sales) ? data.sales : [],
-        stocks:Array.isArray(data.stocks) ? data.stocks : [],
-      }
-      data.products = enrichProducts(Array.isArray(data.products) ? data.products : [], stats)
+      rebuildUnifiedProductData(data)
       const history = withSyncLog(connection.sync_history, {
         status:result.status === 'success' ? 'success' : 'partial',
         durationMs:0,

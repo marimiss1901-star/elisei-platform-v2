@@ -220,3 +220,10 @@ body{background:radial-gradient(circle at 72% 7%,rgba(124,58,237,.18),transparen
   .product-identifiers{grid-template-columns:1fr}
   .data-row.ad-product-row{min-width:1260px}
 }
+
+/* ELISEI 5.4.0 — WB integration integrity diagnostics */
+.data-integrity-strip{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:0 0 16px}
+.data-integrity-strip>div{display:flex;flex-direction:column;gap:5px;padding:14px 16px;border:1px solid rgba(112,224,188,.16);border-radius:15px;background:linear-gradient(135deg,rgba(45,190,145,.065),rgba(105,78,210,.045))}
+.data-integrity-strip strong{font-size:11px;color:#f0efff}
+.data-integrity-strip span{font-size:10px;line-height:1.45;color:#8fd9bd}
+@media(max-width:900px){.data-integrity-strip{grid-template-columns:1fr}}

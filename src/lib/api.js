@@ -24,7 +24,7 @@ async function request(path, options = {}) {
     if (error?.name === 'AbortError' || error?.name === 'TimeoutError') {
       throw new Error('Синхронизация превысила безопасное время ожидания. Повторите позже — повторно нажимать кнопку несколько раз не нужно.')
     }
-    throw error
+    throw new Error(`Не удалось связаться с backend ELISEI (${API_BASE}). Проверьте, что сервис Render запущен и VITE_API_BASE_URL указан верно.`)
   }
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) {
@@ -50,6 +50,7 @@ export const wbApi = {
   products: (connectionId) => request(`/api/wb/products/${encodeURIComponent(connectionId)}`),
   core: (connectionId) => request(`/api/wb/core/${encodeURIComponent(connectionId)}`),
   advertising: (connectionId) => request(`/api/wb/advertising/${encodeURIComponent(connectionId)}`),
+  diagnostics: (connectionId) => request(`/api/wb/diagnostics/${encodeURIComponent(connectionId)}`),
   repairStocks: (connectionId, taskId = '') => request(`/api/wb/stocks/${encodeURIComponent(connectionId)}/repair`, { method: 'POST', body: JSON.stringify({ ...(taskId ? { taskId } : {}) }), signal: AbortSignal.timeout(75000) }),
   syncHistory: (connectionId) => request(`/api/wb/sync-history/${encodeURIComponent(connectionId)}`),
   removeToken: (tokenId) => request(`/api/wb/tokens/${encodeURIComponent(tokenId)}`, { method: 'DELETE' }),
