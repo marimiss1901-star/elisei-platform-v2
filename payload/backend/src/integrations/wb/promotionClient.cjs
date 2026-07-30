@@ -7,10 +7,11 @@ const MAX_IDS_PER_REQUEST = 100;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function requireToken(explicitToken) {
-  const token = explicitToken || process.env.WB_PROMOTION_TOKEN || process.env.WB_API_TOKEN;
+  const token = String(explicitToken || '').trim();
   if (!token) {
-    const error = new Error('Не задан токен WB категории «Продвижение». Укажите WB_PROMOTION_TOKEN.');
-    error.code = 'WB_PROMOTION_TOKEN_MISSING';
+    const error = new Error('Токен выбранного кабинета WB не передан в рекламный модуль.');
+    error.code = 'WB_CABINET_TOKEN_MISSING';
+    error.status = 503;
     throw error;
   }
   return token;
@@ -60,6 +61,25 @@ function retryDelay(response, attempt) {
   return Math.min(1000 * (2 ** attempt), 30_000);
 }
 
+function apiError(response, payload, text) {
+  const message = payload?.message || payload?.detail || text || 'ошибка запроса';
+  const error = new Error(`WB Promotion API ${response.status}: ${message}`);
+  error.status = response.status;
+  error.payload = payload;
+  if (response.status === 401) {
+    error.code = 'WB_TOKEN_INVALID';
+    error.message = 'WB отклонил токен выбранного кабинета. Проверьте токен и подключение кабинета.';
+  } else if (response.status === 403) {
+    error.code = 'WB_PROMOTION_ACCESS_DENIED';
+    error.message = 'У токена выбранного кабинета нет доступа к категории «Продвижение».';
+  } else if (response.status === 429) {
+    error.code = 'WB_RATE_LIMIT';
+  } else {
+    error.code = 'WB_PROMOTION_API_ERROR';
+  }
+  return error;
+}
+
 async function fetchJson(pathname, options = {}) {
   const token = requireToken(options.token);
   const baseUrl = options.baseUrl || process.env.WB_PROMOTION_API_URL || DEFAULT_BASE_URL;
@@ -77,7 +97,7 @@ async function fetchJson(pathname, options = {}) {
         headers: {
           Authorization: token,
           'Content-Type': 'application/json',
-          'User-Agent': 'ELISEI-WB-Ads/5.3.12',
+          'User-Agent': 'ELISEI-WB-Ads/5.3.13',
           ...(options.headers || {}),
         },
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
@@ -85,16 +105,14 @@ async function fetchJson(pathname, options = {}) {
       });
 
       if (response.status === 204) return null;
-      const text = await response.text();
+      const responseText = await response.text();
       let payload = null;
-      if (text) {
-        try { payload = JSON.parse(text); } catch (_) { payload = { raw: text }; }
+      if (responseText) {
+        try { payload = JSON.parse(responseText); } catch (_) { payload = { raw: responseText }; }
       }
 
       if (response.ok) return payload;
-      const error = new Error(`WB Promotion API ${response.status}: ${payload?.message || payload?.detail || text || 'ошибка запроса'}`);
-      error.status = response.status;
-      error.payload = payload;
+      const error = apiError(response, payload, responseText);
       if ((response.status === 429 || response.status >= 500) && attempt < attempts - 1) {
         await sleep(retryDelay(response, attempt));
         lastError = error;
@@ -103,7 +121,7 @@ async function fetchJson(pathname, options = {}) {
       throw error;
     } catch (error) {
       lastError = error;
-      if (error.name === 'AbortError' || attempt >= attempts - 1) throw error;
+      if (error.name === 'AbortError' || error.status || attempt >= attempts - 1) throw error;
       await sleep(Math.min(1000 * (2 ** attempt), 10_000));
     }
   }
@@ -148,7 +166,7 @@ async function getConfig(options = {}) {
   try {
     return await fetchJson('/api/advert/v1/config', options);
   } catch (error) {
-    if (error.status === 404 || error.status === 403) return null;
+    if (error.status === 404) return null;
     throw error;
   }
 }
@@ -188,4 +206,5 @@ module.exports = {
   getConfig,
   getFullStats,
   splitDateRange,
+  requireToken,
 };

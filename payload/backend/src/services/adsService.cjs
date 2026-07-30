@@ -12,15 +12,29 @@ function isFresh(value) {
   return Date.now() - new Date(value.syncedAt).getTime() < CACHE_TTL_MS;
 }
 
+function requireScope(options) {
+  if (!options?.scopeKey) {
+    const error = new Error('Не определён кабинет для рекламной аналитики.');
+    error.code = 'WB_CABINET_REQUIRED';
+    error.status = 400;
+    throw error;
+  }
+  return options.scopeKey;
+}
+
 async function syncRange(from, to, options = {}) {
-  const key = store.rangeKey(from, to);
-  if (!options.force && running.has(key)) return running.get(key);
+  const scopeKey = requireScope(options);
+  const jobKey = `${scopeKey}:${store.rangeKey(from, to)}`;
+  if (!options.force && running.has(jobKey)) return running.get(jobKey);
   const job = (async () => {
     const campaigns = await promotion.listCampaigns(options);
     const ids = campaigns.map((item) => item.advertId);
     const [rawStats, config] = await Promise.all([
       promotion.getFullStats({ ids, from, to, ...options }),
-      promotion.getConfig(options).catch(() => null),
+      promotion.getConfig(options).catch((error) => {
+        if (error.code === 'WB_PROMOTION_ACCESS_DENIED' || error.code === 'WB_TOKEN_INVALID') throw error;
+        return null;
+      }),
     ]);
     const analyzed = analytics.aggregate(rawStats, campaigns, options);
     const result = {
@@ -28,20 +42,24 @@ async function syncRange(from, to, options = {}) {
       to,
       syncedAt: new Date().toISOString(),
       source: 'WB Promotion API',
+      cabinetId: options.cabinetId,
       currency: config?.currency || config?.currencyCode || 'RUB',
       config,
       ...analyzed,
       meta: { campaignIds: ids.length, rawCampaignRows: rawStats.length },
     };
-    store.setRange(from, to, result);
+    store.setRange(scopeKey, from, to, result, {
+      cabinetId: options.cabinetId,
+    });
     return result;
-  })().finally(() => running.delete(key));
-  running.set(key, job);
+  })().finally(() => running.delete(jobKey));
+  running.set(jobKey, job);
   return job;
 }
 
 async function getRange(from, to, options = {}) {
-  const cached = store.getRange(from, to);
+  const scopeKey = requireScope(options);
+  const cached = store.getRange(scopeKey, from, to);
   if (cached && !options.force && (isFresh(cached) || options.autoSync === false)) return { ...cached, cache: true };
   if (options.autoSync === false) return cached ? { ...cached, cache: true, stale: true } : null;
   try {
@@ -52,4 +70,4 @@ async function getRange(from, to, options = {}) {
   }
 }
 
-module.exports = { syncRange, getRange, isFresh };
+module.exports = { syncRange, getRange, isFresh, requireScope };

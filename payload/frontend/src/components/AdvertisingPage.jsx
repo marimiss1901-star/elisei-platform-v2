@@ -32,6 +32,37 @@ function useEliseiPeriod() {
   return period;
 }
 
+
+function currentCabinetId() {
+  const globalCabinet = window.__ELISEI_ACTIVE_CABINET__;
+  return String(
+    globalCabinet?.id
+    || globalCabinet?.cabinetId
+    || window.__ELISEI_CABINET_ID__
+    || localStorage.getItem('elisei.activeCabinetId')
+    || localStorage.getItem('elisei:active-cabinet-id')
+    || '',
+  ).trim();
+}
+
+function useEliseiCabinet() {
+  const [cabinetId, setCabinetId] = useState(() => currentCabinetId());
+  useEffect(() => {
+    const handler = (event) => setCabinetId(String(event.detail?.id || event.detail?.cabinetId || currentCabinetId()).trim());
+    window.addEventListener('elisei:cabinet-changed', handler);
+    return () => window.removeEventListener('elisei:cabinet-changed', handler);
+  }, []);
+  return cabinetId;
+}
+
+function cabinetRequest(cabinetId, method = 'GET') {
+  return {
+    method,
+    credentials: 'same-origin',
+    headers: cabinetId ? { 'X-ELISEI-CABINET-ID': cabinetId } : {},
+  };
+}
+
 function Delta({ metric, inverse = false }) {
   if (!metric || metric.deltaPercent === null || !Number.isFinite(Number(metric.deltaPercent))) return <span className="ads-delta neutral">нет базы</span>;
   const value = Number(metric.deltaPercent);
@@ -67,6 +98,7 @@ function Recommendation({ value }) {
 
 export default function AdvertisingPage() {
   const period = useEliseiPeriod();
+  const cabinetId = useEliseiCabinet();
   const [payload, setPayload] = useState(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -79,10 +111,10 @@ export default function AdvertisingPage() {
     force ? setSyncing(true) : setLoading(true);
     try {
       const query = queryFor(period);
-      const response = await fetch(`/api/ads/${force ? 'sync' : 'overview'}?${query}`, { method: force ? 'POST' : 'GET' });
+      const response = await fetch(`/api/ads/${force ? 'sync' : 'overview'}?${query}`, cabinetRequest(cabinetId, force ? 'POST' : 'GET'));
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.message || 'Не удалось загрузить рекламу');
-      setPayload(force ? { ok: true, period, data: data.data, comparison: null } : data);
+      setPayload(force ? { ok: true, cabinet: data.cabinet, period, data: data.data, comparison: null } : data);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -90,7 +122,7 @@ export default function AdvertisingPage() {
     }
   };
 
-  useEffect(() => { load(false); }, [period.from, period.to, period.compareFrom, period.compareTo, period.compareEnabled]);
+  useEffect(() => { load(false); }, [cabinetId, period.from, period.to, period.compareFrom, period.compareTo, period.compareEnabled]);
 
   const data = payload?.data || {};
   const overall = data.overall || {};
@@ -104,10 +136,10 @@ export default function AdvertisingPage() {
   }, [rows, search]);
 
   return <section className="elisei-ads">
-    <header className="ads-header"><div><div className="ads-eyebrow">ELISEI · WB ПРОДВИЖЕНИЕ</div><h1>Рекламный центр</h1><p>{period.from} — {period.to}. Статистика связывается с товарами по nmID и входит в прибыль.</p></div>
+    <header className="ads-header"><div><div className="ads-eyebrow">ELISEI · WB ПРОДВИЖЕНИЕ</div><h1>Рекламный центр</h1><p>{period.from} — {period.to}. Кабинет: {payload?.cabinet?.name || cabinetId || 'основной'}. Статистика связывается с товарами по nmID и входит в прибыль.</p></div>
       <button className="ads-sync" onClick={() => load(true)} disabled={syncing}>{syncing ? 'Синхронизация…' : 'Обновить из WB'}</button></header>
 
-    {error && <div className="ads-alert"><b>Реклама пока не загрузилась.</b><span>{error}</span><small>Для WB нужен отдельный токен категории «Продвижение» в WB_PROMOTION_TOKEN.</small></div>}
+    {error && <div className="ads-alert"><b>Реклама пока не загрузилась.</b><span>{error}</span><small>Используется единый токен выбранного кабинета. Проверьте, что у него открыт доступ к категории «Продвижение».</small></div>}
     {loading && !payload ? <div className="ads-loading">Загружаю рекламную аналитику…</div> : <>
       <div className="ads-kpi-grid">
         <Kpi label="Расход" value={money(overall.spend, currency)} delta={comparison.spend} inverse hint="к прошлому периоду"/>

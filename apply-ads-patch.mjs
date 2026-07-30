@@ -72,6 +72,7 @@ function integrateBackend(server) {
     'src/integrations/wb/promotionClient.cjs',
     'src/store/adsStore.cjs',
     'src/services/adsAnalytics.cjs',
+    'src/services/cabinetTokenResolver.cjs',
     'src/services/adsService.cjs',
     'src/routes/adsCore.cjs',
     'src/routes/ads.js',
@@ -85,9 +86,10 @@ function integrateBackend(server) {
     source = esm
       ? addImport(source, "import adsRouter from './routes/ads.js';")
       : `const adsRouter = require('./routes/ads.cjs');\n${source}`;
+    const authMiddleware = [...source.matchAll(/app\.use\([^;\n]*(?:auth|authenticate|session|passport)[^;\n]*\)\s*;?/gim)].at(-1);
     const jsonMiddleware = /app\.use\(express\.json\([^)]*\)\)\s*;?/m.exec(source);
     const appCreation = /const\s+app\s*=\s*express\(\)\s*;?/m.exec(source);
-    const anchor = jsonMiddleware || appCreation;
+    const anchor = authMiddleware || jsonMiddleware || appCreation;
     if (!anchor) throw new Error('Не найден Express app в backend server/app.');
     const pos = anchor.index + anchor[0].length;
     source = `${source.slice(0, pos)}\napp.use('/api/ads', adsRouter);${source.slice(pos)}`;
@@ -108,16 +110,20 @@ integrateBackend(server);
 
 fs.mkdirSync(path.join(projectRoot, 'docs'), { recursive: true });
 copy(path.join(patchRoot, 'docs/ADS_CONTRACT.md'), path.join(projectRoot, 'docs/ADS_CONTRACT.md'));
-fs.writeFileSync(path.join(projectRoot, 'ELISEI_BUILD_5_3_12_WB_ADVERTISING.txt'), [
-  'ELISEI 5.3.12',
+copy(path.join(patchRoot, 'docs/CABINET_TOKEN_RESOLVER_EXAMPLE.cjs'), path.join(projectRoot, 'docs/CABINET_TOKEN_RESOLVER_EXAMPLE.cjs'));
+fs.writeFileSync(path.join(projectRoot, 'ELISEI_BUILD_5_3_13_WB_CABINET_TOKENS.txt'), [
+  'ELISEI 5.3.13',
   'WB ADVERTISING CENTER: enabled',
+  'PER-CABINET TOKEN RESOLUTION: enabled',
+  'TENANT-SCOPED CACHE: enabled',
   'GLOBAL PERIOD + COMPARISON: enabled',
   'EL RECOMMENDATIONS: enabled',
   'WRITE OPERATIONS: disabled',
   `Applied: ${new Date().toISOString()}`,
 ].join('\n'));
 
-console.log('ELISEI 5.3.12: рекламный центр WB подключён.');
+console.log('ELISEI 5.3.13: рекламный центр переведён на токен выбранного кабинета.');
 console.log(`Frontend: ${path.relative(projectRoot, dashboard)}`);
 console.log(`Backend: ${path.relative(projectRoot, server)}`);
-console.log('Нужно задать WB_PROMOTION_TOKEN и перезапустить Render.');
+console.log('Отдельный WB_PROMOTION_TOKEN не нужен.');
+console.log('Для текущего кабинета используется WB_API_TOKEN; для клиентов подключите app.locals.resolveWbCabinetToken.');
