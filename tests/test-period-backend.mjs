@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import { filterPayloadByPeriod, parsePeriod, sqlPeriod } from '../payload/backend/src/lib/period.js';
+const req = { query: { date_from: '2026-07-01', date_to: '2026-07-07', compare: '1', compare_from: '2026-06-24', compare_to: '2026-06-30' }, body: {}, headers: {} };
+const period = parsePeriod(req);
+assert.equal(period.from, '2026-07-01');
+assert.equal(period.compareEnabled, true);
+const filtered = filterPayloadByPeriod({ rows: [{ date: '2026-06-30', value: 1 }, { date: '2026-07-03', value: 2 }] }, period);
+assert.equal(filtered.rows.length, 1);
+assert.equal(filtered.rows[0].value, 2);
+const sql = sqlPeriod('sale_date', period, 3);
+assert.match(sql.clause, /\$3/);
+assert.deepEqual(sql.values, ['2026-07-01', '2026-07-07']);
+console.log('backend period tests: ok');
