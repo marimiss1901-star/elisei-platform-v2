@@ -1,0 +1,26 @@
+#elisei-period-hardfix-host{position:fixed;top:74px;left:272px;right:18px;z-index:2147483640;display:block;pointer-events:none;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+#elisei-period-hardfix-host *{box-sizing:border-box}
+.elisei-phf-bar{pointer-events:auto;position:relative;display:flex;align-items:center;gap:10px;min-height:56px;padding:9px 12px;border:1px solid rgba(139,92,246,.34);border-radius:16px;background:linear-gradient(135deg,rgba(22,18,42,.98),rgba(40,27,70,.97));box-shadow:0 16px 46px rgba(0,0,0,.32),0 0 0 1px rgba(255,255,255,.03) inset;color:#fff;backdrop-filter:blur(18px)}
+.elisei-phf-brand{display:flex;align-items:center;gap:8px;min-width:max-content;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#d9d0ff}
+.elisei-phf-dot{width:9px;height:9px;border-radius:50%;background:linear-gradient(135deg,#7c5cff,#bd7cff);box-shadow:0 0 0 5px rgba(124,92,255,.16),0 0 18px rgba(164,112,255,.65)}
+.elisei-phf-version{padding:3px 6px;border-radius:8px;background:rgba(124,92,255,.16);font-size:10px;color:#bba9ff}
+.elisei-phf-modes{display:flex;gap:4px;padding:4px;border-radius:12px;background:rgba(255,255,255,.065)}
+.elisei-phf-btn,.elisei-phf-arrow,.elisei-phf-apply{border:0;border-radius:9px;background:transparent;color:inherit;font:inherit;cursor:pointer}
+.elisei-phf-btn{padding:7px 10px;font-size:13px;font-weight:700;color:#d6cfee}
+.elisei-phf-btn.active{color:#fff;background:linear-gradient(135deg,#6d4aff,#9558ff);box-shadow:0 8px 20px rgba(109,74,255,.35)}
+.elisei-phf-nav{display:flex;align-items:center;gap:6px;min-width:255px}
+.elisei-phf-arrow{width:34px;height:34px;background:rgba(255,255,255,.07);font-size:24px;line-height:1}
+.elisei-phf-label{flex:1;min-width:145px;padding:8px 10px;border:1px solid rgba(255,255,255,.1);border-radius:10px;background:rgba(255,255,255,.055);font-size:13px;font-weight:700;text-align:center;white-space:nowrap}
+.elisei-phf-compare{display:flex;align-items:center;gap:7px;min-width:max-content;font-size:13px;font-weight:700;color:#ddd6f3;cursor:pointer}
+.elisei-phf-compare input{accent-color:#8b5cf6}
+.elisei-phf-summary{margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;min-width:max-content;font-size:12px;color:#c9c0df}
+.elisei-phf-summary strong{font-size:13px;color:#fff}
+.elisei-phf-custom{position:absolute;top:calc(100% + 8px);right:0;display:none;grid-template-columns:1fr 1fr auto;align-items:end;gap:10px;width:min(520px,calc(100vw - 36px));padding:14px;border:1px solid rgba(139,92,246,.35);border-radius:14px;background:#201735;box-shadow:0 20px 60px rgba(0,0,0,.45)}
+.elisei-phf-custom.open{display:grid}
+.elisei-phf-custom label{display:grid;gap:5px;font-size:11px;font-weight:700;color:#c7bddc}
+.elisei-phf-custom input{height:38px;padding:0 9px;border:1px solid rgba(255,255,255,.13);border-radius:9px;background:#171125;color:#fff;font:inherit;color-scheme:dark}
+.elisei-phf-apply{height:38px;padding:0 14px;background:linear-gradient(135deg,#6d4aff,#9558ff);font-size:13px;font-weight:800}
+.elisei-phf-flash{animation:eliseiPhfFlash 1.2s ease}
+@keyframes eliseiPhfFlash{0%,100%{box-shadow:0 16px 46px rgba(0,0,0,.32)}50%{box-shadow:0 0 0 3px rgba(149,88,255,.45),0 20px 60px rgba(109,74,255,.5)}}
+@media(max-width:1180px){#elisei-period-hardfix-host{left:18px}.elisei-phf-brand,.elisei-phf-summary{display:none}.elisei-phf-nav{min-width:220px}}
+@media(max-width:760px){#elisei-period-hardfix-host{top:8px;left:6px;right:6px}.elisei-phf-bar{flex-wrap:wrap;gap:7px;padding:8px}.elisei-phf-modes{order:1;width:100%;overflow-x:auto}.elisei-phf-nav{order:2;flex:1;min-width:0}.elisei-phf-compare{order:3}.elisei-phf-custom{left:0;right:auto;grid-template-columns:1fr}.elisei-phf-label{min-width:0}}
