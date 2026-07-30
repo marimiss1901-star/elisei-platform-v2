@@ -1,66 +1,56 @@
+#elisei-global-period-host {
+  position: sticky;
+  top: 10px;
+  z-index: 2147483000;
+  display: block;
+  grid-column: 1 / -1;
+  width: 100%;
+  max-width: 100%;
+  margin: 0 0 16px;
+  padding: 0 12px;
+  pointer-events: none;
+  box-sizing: border-box;
+}
 .elisei-period-bar {
   position: relative;
-  z-index: 20;
   display: grid;
-  grid-template-columns: auto minmax(220px, auto) auto 1fr;
+  grid-template-columns: auto auto minmax(220px, auto) auto 1fr;
   align-items: center;
   gap: 12px;
   width: 100%;
-  margin: 0 0 18px;
+  max-width: 1380px;
+  margin: 0 auto;
   padding: 12px 14px;
-  border: 1px solid rgba(139, 92, 246, .24);
+  border: 1px solid rgba(139, 92, 246, .28);
   border-radius: 18px;
-  background: linear-gradient(135deg, rgba(255,255,255,.96), rgba(247,245,255,.92));
-  box-shadow: 0 14px 40px rgba(48, 34, 86, .08);
+  background: linear-gradient(135deg, rgba(255,255,255,.98), rgba(247,245,255,.96));
+  box-shadow: 0 16px 44px rgba(48, 34, 86, .14);
   color: #211a38;
   backdrop-filter: blur(18px);
+  pointer-events: auto;
+  box-sizing: border-box;
 }
+.elisei-period-title { display:flex; align-items:center; gap:8px; font-size:12px; font-weight:800; white-space:nowrap; color:#5a4b7a; text-transform:uppercase; letter-spacing:.04em; }
+.elisei-period-dot { width:9px; height:9px; border-radius:50%; background:linear-gradient(135deg,#6d4aff,#9c67ff); box-shadow:0 0 0 5px rgba(109,74,255,.12); }
 .elisei-period-modes { display: flex; gap: 4px; padding: 4px; border-radius: 13px; background: rgba(77, 54, 130, .07); }
-.elisei-period-modes button,
-.elisei-period-controls button,
-.elisei-period-actions button {
-  border: 0;
-  border-radius: 10px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-}
-.elisei-period-modes button { padding: 8px 12px; font-size: 13px; font-weight: 650; }
-.elisei-period-modes button.is-active { color: #fff; background: linear-gradient(135deg, #6d4aff, #8c52ff); box-shadow: 0 8px 20px rgba(109, 74, 255, .25); }
-.elisei-period-controls { display: flex; align-items: center; gap: 7px; min-width: 220px; }
-.period-arrow { width: 34px; height: 34px; font-size: 25px !important; line-height: 1; background: rgba(77, 54, 130, .07) !important; }
-.period-value,
-.period-native-input { min-width: 145px; height: 36px; padding: 0 10px; border: 1px solid rgba(77, 54, 130, .14); border-radius: 11px; background: rgba(255,255,255,.8); color: #211a38; font: inherit; font-size: 13px; font-weight: 650; }
-.period-value { cursor: pointer; }
-.elisei-period-compare { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 650; cursor: pointer; white-space: nowrap; }
-.elisei-period-compare input { accent-color: #7953ff; }
-.elisei-period-summary { display: flex; justify-content: flex-end; align-items: flex-end; gap: 7px; min-width: 0; text-align: right; }
-.elisei-period-summary strong { font-size: 13px; white-space: nowrap; }
-.elisei-period-summary small { color: #776d90; font-size: 11px; white-space: nowrap; }
-.elisei-period-popover { position: absolute; top: calc(100% + 8px); left: 150px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; width: min(430px, calc(100vw - 48px)); padding: 16px; border: 1px solid rgba(139,92,246,.22); border-radius: 16px; background: #fff; box-shadow: 0 24px 60px rgba(34, 23, 63, .2); }
-.elisei-period-popover label { display: grid; gap: 6px; color: #635a78; font-size: 12px; font-weight: 650; }
-.elisei-period-popover input { height: 40px; padding: 0 10px; border: 1px solid #ddd7eb; border-radius: 10px; font: inherit; }
-.elisei-period-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 8px; }
-.elisei-period-actions button { padding: 9px 14px; background: #f2eff8; font-weight: 700; }
-.elisei-period-actions button.primary { color: #fff; background: linear-gradient(135deg, #6d4aff, #8c52ff); }
-.elisei-period-bar.is-compact { grid-template-columns: auto auto auto; }
-.elisei-period-bar.is-compact .elisei-period-summary { display: none; }
-@media (max-width: 1050px) {
-  .elisei-period-bar { grid-template-columns: 1fr auto; }
-  .elisei-period-summary { justify-content: flex-start; text-align: left; }
-}
-@media (max-width: 720px) {
-  .elisei-period-bar { grid-template-columns: 1fr; align-items: stretch; }
-  .elisei-period-modes { overflow-x: auto; }
-  .elisei-period-controls { justify-content: space-between; }
-  .period-native-input, .period-value { flex: 1; }
-  .elisei-period-summary { justify-content: space-between; }
-  .elisei-period-popover { left: 0; grid-template-columns: 1fr; }
-}
-@media (prefers-color-scheme: dark) {
-  .elisei-period-bar { color: #f7f4ff; border-color: rgba(155,120,255,.3); background: linear-gradient(135deg, rgba(29,24,49,.96), rgba(37,28,64,.93)); box-shadow: 0 18px 50px rgba(0,0,0,.25); }
-  .period-value, .period-native-input, .elisei-period-popover { color: #f7f4ff; border-color: rgba(255,255,255,.12); background: #211a36; }
-  .elisei-period-popover input { color: #f7f4ff; border-color: rgba(255,255,255,.13); background: #171225; }
-  .elisei-period-summary small { color: #b9afd0; }
-}
+.elisei-period-modes button,.elisei-period-controls button,.elisei-period-actions button { border:0; border-radius:10px; background:transparent; color:inherit; font:inherit; cursor:pointer; }
+.elisei-period-modes button { padding:8px 12px; font-size:13px; font-weight:650; }
+.elisei-period-modes button.is-active { color:#fff; background:linear-gradient(135deg,#6d4aff,#8c52ff); box-shadow:0 8px 20px rgba(109,74,255,.25); }
+.elisei-period-controls { display:flex; align-items:center; gap:7px; min-width:220px; }
+.period-arrow { width:34px; height:34px; font-size:25px !important; line-height:1; background:rgba(77,54,130,.07) !important; }
+.period-value,.period-native-input { min-width:145px; height:36px; padding:0 10px; border:1px solid rgba(77,54,130,.14); border-radius:11px; background:rgba(255,255,255,.86); color:#211a38; font:inherit; font-size:13px; font-weight:650; }
+.period-value { cursor:pointer; }
+.elisei-period-compare { display:inline-flex; align-items:center; gap:7px; font-size:13px; font-weight:650; cursor:pointer; white-space:nowrap; }
+.elisei-period-compare input { accent-color:#7953ff; }
+.elisei-period-summary { display:flex; justify-content:flex-end; align-items:flex-end; gap:7px; min-width:0; text-align:right; }
+.elisei-period-summary strong { font-size:13px; white-space:nowrap; }
+.elisei-period-summary small { color:#776d90; font-size:11px; white-space:nowrap; }
+.elisei-period-popover { position:absolute; top:calc(100% + 8px); left:210px; display:grid; grid-template-columns:1fr 1fr; gap:12px; width:min(430px,calc(100vw - 48px)); padding:16px; border:1px solid rgba(139,92,246,.22); border-radius:16px; background:#fff; box-shadow:0 24px 60px rgba(34,23,63,.2); }
+.elisei-period-popover label { display:grid; gap:6px; color:#635a78; font-size:12px; font-weight:650; }
+.elisei-period-popover input { height:40px; padding:0 10px; border:1px solid #ddd7eb; border-radius:10px; font:inherit; }
+.elisei-period-actions { grid-column:1/-1; display:flex; justify-content:flex-end; gap:8px; }
+.elisei-period-actions button { padding:9px 14px; background:#f2eff8; font-weight:700; }
+.elisei-period-actions button.primary { color:#fff; background:linear-gradient(135deg,#6d4aff,#8c52ff); }
+@media (max-width: 1180px) { .elisei-period-bar { grid-template-columns:auto 1fr auto; } .elisei-period-title,.elisei-period-summary { display:none; } }
+@media (max-width: 760px) { #elisei-global-period-host { top:6px; padding:0 6px; } .elisei-period-bar { grid-template-columns:1fr; gap:9px; border-radius:15px; padding:10px; } .elisei-period-modes { overflow-x:auto; } .elisei-period-controls { justify-content:space-between; min-width:0; } .period-native-input,.period-value { flex:1; min-width:0; } .elisei-period-popover { left:0; grid-template-columns:1fr; } }
+@media (prefers-color-scheme: dark) { .elisei-period-bar { color:#f7f4ff; border-color:rgba(155,120,255,.35); background:linear-gradient(135deg,rgba(29,24,49,.98),rgba(37,28,64,.96)); box-shadow:0 18px 50px rgba(0,0,0,.32); } .elisei-period-title { color:#c9bdf0; } .period-value,.period-native-input,.elisei-period-popover { color:#f7f4ff; border-color:rgba(255,255,255,.12); background:#211a36; } .elisei-period-popover input { color:#f7f4ff; border-color:rgba(255,255,255,.13); background:#171225; } .elisei-period-summary small { color:#b9afd0; } }

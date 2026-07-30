@@ -2,11 +2,17 @@ import { useMemo, useState } from 'react';
 import { PERIOD_MODES, getPeriodLabel, setPeriod, shiftPeriod, useGlobalPeriod } from '../lib/periodStore.js';
 import '../styles/elisei-period.css';
 
-const modeOptions = [[PERIOD_MODES.DAY, 'День'], [PERIOD_MODES.WEEK, 'Неделя'], [PERIOD_MODES.MONTH, 'Месяц'], [PERIOD_MODES.CUSTOM, 'Период']];
+const modeOptions = [
+  [PERIOD_MODES.DAY, 'День'],
+  [PERIOD_MODES.WEEK, 'Неделя'],
+  [PERIOD_MODES.MONTH, 'Месяц'],
+  [PERIOD_MODES.CUSTOM, 'Период'],
+];
+
 const nativePickerType = (mode) => mode === PERIOD_MODES.MONTH ? 'month' : 'date';
 const anchorValue = (period) => period.mode === PERIOD_MODES.MONTH ? period.anchor.slice(0, 7) : period.anchor;
 
-export default function GlobalPeriodBar({ compact = false }) {
+export default function GlobalPeriodBar() {
   const period = useGlobalPeriod();
   const [open, setOpen] = useState(false);
   const [draftFrom, setDraftFrom] = useState(period.from);
@@ -36,23 +42,42 @@ export default function GlobalPeriodBar({ compact = false }) {
     setOpen(false);
   };
 
-  return <section className={`elisei-period-bar ${compact ? 'is-compact' : ''}`} aria-label="Выбор периода аналитики">
-    <div className="elisei-period-modes" role="tablist" aria-label="Тип периода">
-      {modeOptions.map(([mode, text]) => <button key={mode} type="button" className={period.mode === mode ? 'is-active' : ''} onClick={() => selectMode(mode)}>{text}</button>)}
-    </div>
-    <div className="elisei-period-controls">
-      <button type="button" className="period-arrow" onClick={() => shiftPeriod(-1)} aria-label="Предыдущий период">‹</button>
-      {period.mode === PERIOD_MODES.CUSTOM
-        ? <button type="button" className="period-value" onClick={() => setOpen((value) => !value)}>{label}</button>
-        : <input className="period-native-input" type={nativePickerType(period.mode)} value={anchorValue(period)} onChange={(event) => changeAnchor(event.target.value)} aria-label="Дата периода" />}
-      <button type="button" className="period-arrow" onClick={() => shiftPeriod(1)} aria-label="Следующий период">›</button>
-    </div>
-    <label className="elisei-period-compare"><input type="checkbox" checked={period.compareEnabled} onChange={(event) => setPeriod({ compareEnabled: event.target.checked })}/><span>Сравнить</span></label>
-    <div className="elisei-period-summary"><strong>{period.from} — {period.to}</strong>{period.compareEnabled && <small>с {period.compareFrom} — {period.compareTo}</small>}</div>
-    {open && period.mode === PERIOD_MODES.CUSTOM && <div className="elisei-period-popover">
-      <label>С даты<input type="date" value={draftFrom} onChange={(event) => setDraftFrom(event.target.value)} /></label>
-      <label>По дату<input type="date" value={draftTo} onChange={(event) => setDraftTo(event.target.value)} /></label>
-      <div className="elisei-period-actions"><button type="button" onClick={() => setOpen(false)}>Отмена</button><button type="button" className="primary" onClick={applyCustom}>Применить</button></div>
-    </div>}
-  </section>;
+  return (
+    <section className="elisei-period-bar" aria-label="Выбор периода аналитики" data-elisei-period-bar="true">
+      <div className="elisei-period-title">
+        <span className="elisei-period-dot" />
+        <span>Период аналитики</span>
+      </div>
+      <div className="elisei-period-modes" role="tablist" aria-label="Тип периода">
+        {modeOptions.map(([mode, text]) => (
+          <button key={mode} type="button" className={period.mode === mode ? 'is-active' : ''} onClick={() => selectMode(mode)}>{text}</button>
+        ))}
+      </div>
+      <div className="elisei-period-controls">
+        <button type="button" className="period-arrow" onClick={() => shiftPeriod(-1)} aria-label="Предыдущий период">‹</button>
+        {period.mode === PERIOD_MODES.CUSTOM
+          ? <button type="button" className="period-value" onClick={() => setOpen((value) => !value)}>{label}</button>
+          : <input className="period-native-input" type={nativePickerType(period.mode)} value={anchorValue(period)} onChange={(event) => changeAnchor(event.target.value)} aria-label="Дата периода" />}
+        <button type="button" className="period-arrow" onClick={() => shiftPeriod(1)} aria-label="Следующий период">›</button>
+      </div>
+      <label className="elisei-period-compare">
+        <input type="checkbox" checked={period.compareEnabled} onChange={(event) => setPeriod({ compareEnabled: event.target.checked })} />
+        <span>Сравнить</span>
+      </label>
+      <div className="elisei-period-summary">
+        <strong>{period.from} — {period.to}</strong>
+        {period.compareEnabled && <small>с {period.compareFrom} — {period.compareTo}</small>}
+      </div>
+      {open && period.mode === PERIOD_MODES.CUSTOM && (
+        <div className="elisei-period-popover">
+          <label>С даты<input type="date" value={draftFrom} onChange={(event) => setDraftFrom(event.target.value)} /></label>
+          <label>По дату<input type="date" value={draftTo} onChange={(event) => setDraftTo(event.target.value)} /></label>
+          <div className="elisei-period-actions">
+            <button type="button" onClick={() => setOpen(false)}>Отмена</button>
+            <button type="button" className="primary" onClick={applyCustom}>Применить</button>
+          </div>
+        </div>
+      )}
+    </section>
+  );
 }
