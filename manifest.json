@@ -1,0 +1,17 @@
+{
+  "project": "ELISEI",
+  "version": "5.3.12",
+  "name": "WB Advertising Center",
+  "dependsOn": ["5.3.11 Global Period + El Context"],
+  "features": [
+    "WB Promotion API read-only sync",
+    "campaign and nmID analytics",
+    "CTR CPC CPO CVR DRR ROAS ROMI",
+    "profit after advertising",
+    "global period and comparison",
+    "El recommendations",
+    "seller article, photo and stock bridge"
+  ],
+  "writeOperations": false,
+  "maxFilesConstraint": 100
+}
