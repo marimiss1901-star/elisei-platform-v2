@@ -194,3 +194,29 @@ body{background:radial-gradient(circle at 72% 7%,rgba(124,58,237,.18),transparen
 .mini-el .el.compact{width:58px;height:58px}
 .final-cta>.el.compact{width:96px;height:96px;flex:0 0 96px}
 @media(max-width:560px){.auth-el{display:none}}
+
+/* ELISEI 5.3.11 — единая товарная карточка */
+.product-master-table{overflow-x:auto}
+.data-row.product-master-row{grid-template-columns:260px 120px 150px 155px 90px 90px 90px 120px 120px 120px;min-width:1515px}
+.product-master-main{display:flex!important;align-items:center;gap:12px;min-width:0}
+.product-master-main .product-name{min-width:0}
+.product-master-main .product-name strong{white-space:normal}
+.mono-cell{font-variant-numeric:tabular-nums;word-break:break-all}
+.mono-cell strong{font-size:12px}
+.product-identifiers{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0}
+.product-identifiers span{padding:12px;border-radius:13px;background:rgba(255,255,255,.035);color:#8f95b3;font-size:11px}
+.product-identifiers strong{display:block;color:#fff;font-size:14px;margin-top:5px;word-break:break-all}
+.expense-breakdown{margin:18px 0;padding:18px;border-radius:17px;background:rgba(255,255,255,.035);border:1px solid var(--line)}
+.expense-breakdown h3{margin:0 0 10px}
+.expense-breakdown>div{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid rgba(255,255,255,.06)}
+.expense-breakdown>div:last-child{border-bottom:0}
+.expense-breakdown span{color:#9298b6}
+.expense-breakdown .expense-total{padding-top:13px;font-size:16px}
+.ad-product-table{overflow-x:auto}
+.data-row.ad-product-row{grid-template-columns:190px 115px 150px 210px 95px 85px 75px 75px 100px 70px;min-width:1260px}
+.data-row.ad-list-row{grid-template-columns:2fr .8fr 1.4fr 1fr;min-width:800px}
+@media(max-width:760px){
+  .data-row.product-master-row{min-width:1515px}
+  .product-identifiers{grid-template-columns:1fr}
+  .data-row.ad-product-row{min-width:1260px}
+}

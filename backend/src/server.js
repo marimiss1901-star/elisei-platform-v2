@@ -278,7 +278,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.7.8 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.7.9 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -709,7 +709,7 @@ function uniqueIdentities(values = [], cleaner = cleanIdentity) {
 }
 
 function productNmIds(row = {}) {
-  return uniqueIdentities([row?.nmId, row?.nmID, row?.nm_id, ...(Array.isArray(row?.nmIds) ? row.nmIds : [])], cleanNumericIdentity)
+  return uniqueIdentities([row?.nmId, row?.nmID, row?.nm_id, row?.nm, ...(Array.isArray(row?.nmIds) ? row.nmIds : [])], cleanNumericIdentity)
 }
 
 function productVendorCodes(row = {}) {
@@ -831,6 +831,22 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     return { item: null, method: null, alias: null }
   }
   const resolveProduct = (row = {}) => resolveProductDetailed(row).item
+  const resolveStockProductDetailed = (row = {}) => {
+    // Для остатков первичный ключ — ШК размера. Это позволяет корректно
+    // суммировать размеры на карточку даже при неполном nmID в отчёте.
+    const aliases = [
+      ...productBarcodes(row).map(value => `barcode:${value}`),
+      ...productNmIds(row).map(value => `nm:${value}`),
+      ...productVendorCodes(row).map(value => `vendor:${cleanVendorIdentity(value)}`),
+      ...productVendorCodes(row).map(value => `vendor-loose:${cleanVendorLooseIdentity(value)}`).filter(value => !value.endsWith(':')),
+      ...productChrtIds(row).map(value => `chrt:${value}`),
+    ]
+    for (const alias of aliases) {
+      const existing = productAliases.get(alias)
+      if (existing) return { item: existing, method: aliasType(alias), alias }
+    }
+    return { item: null, method: null, alias: null }
+  }
   const ensure = (row = {}) => {
     const existing = resolveProduct(row)
     if (existing) {
@@ -862,6 +878,12 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
         returnsCount: 0,
         revenue: 0,
         dailySales: {},
+        adSpend: 0,
+        adViews: 0,
+        adClicks: 0,
+        adOrders: 0,
+        adRevenue: 0,
+        adCampaignIds: [],
       })
     }
     const item = productMap.get(key)
@@ -914,7 +936,7 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     rawStockQuantity += quantity
     const name = String(row.warehouseName || row.warehouse || row.officeName || 'Все склады').trim() || 'Все склады'
     warehouses.set(name, (warehouses.get(name) || 0) + quantity)
-    const matched = resolveProductDetailed(row)
+    const matched = resolveStockProductDetailed(row)
     const item = matched.item
     if (!item) {
       unmatchedStockRows += 1
@@ -976,9 +998,75 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     }
   }
 
+  // Реклама связывается с товаром по nmID. Кампания может содержать
+  // несколько артикулов WB, поэтому метрики агрегируются на карточку товара.
+  const campaignProductRows = []
+  let mappedAdvertisingSpend = 0
+  const rawCampaigns = Array.isArray(advertisingData?.campaigns) ? advertisingData.campaigns : []
+  for (const campaign of rawCampaigns) {
+    const nmStats = Array.isArray(campaign?.nmStats) ? campaign.nmStats : []
+    const campaignNmIds = uniqueIdentities(campaign?.nmIds || [], cleanNumericIdentity)
+    for (const stat of nmStats) {
+      const item = resolveProduct(stat)
+      const nmID = productNmIds(stat)[0] || null
+      const spend = Math.max(0, finiteNumber(stat?.spend, 0))
+      const views = Math.max(0, finiteNumber(stat?.views, 0))
+      const clicks = Math.max(0, finiteNumber(stat?.clicks, 0))
+      const adOrders = Math.max(0, finiteNumber(stat?.orders, 0))
+      const adRevenue = Math.max(0, finiteNumber(stat?.revenue, 0))
+      if (item) {
+        item.adSpend += spend
+        item.adViews += views
+        item.adClicks += clicks
+        item.adOrders += adOrders
+        item.adRevenue += adRevenue
+        item.adCampaignIds = mergeUnique(item.adCampaignIds, [String(campaign.advertId || '')])
+        mappedAdvertisingSpend += spend
+      }
+      campaignProductRows.push({
+        key: `${campaign.advertId || 'campaign'}:${nmID || campaignProductRows.length}`,
+        advertId: campaign.advertId || null,
+        campaignName: campaign.name || `Кампания ${campaign.advertId || ''}`,
+        status: campaign.status,
+        nmID: item?.nmID || nmID,
+        vendorCode: item?.vendorCode || productVendorCodes(stat)[0] || '',
+        barcode: item?.barcode || productBarcodes(stat)[0] || '',
+        title: item?.title || stat?.name || 'Товар',
+        photo: item?.photo || '',
+        spend, views, clicks, orders: adOrders, revenue: adRevenue,
+        ctr: views > 0 ? clicks / views * 100 : null,
+        crr: adRevenue > 0 ? spend / adRevenue * 100 : null,
+        mapped: Boolean(item),
+      })
+    }
+    if (!nmStats.length && campaignNmIds.length) {
+      for (const nmID of campaignNmIds) {
+        const item = resolveProduct({ nmId:nmID })
+        campaignProductRows.push({
+          key: `${campaign.advertId || 'campaign'}:${nmID}`,
+          advertId: campaign.advertId || null,
+          campaignName: campaign.name || `Кампания ${campaign.advertId || ''}`,
+          status: campaign.status,
+          nmID: item?.nmID || nmID,
+          vendorCode: item?.vendorCode || '',
+          barcode: item?.barcode || '',
+          title: item?.title || 'Товар',
+          photo: item?.photo || '',
+          spend:null, views:null, clicks:null, orders:null, revenue:null, ctr:null, crr:null,
+          mapped:Boolean(item), statsAvailable:false,
+        })
+      }
+    }
+  }
+
   const actualAdvertisingSpend = Math.max(0, finiteNumber(advertisingData?.totals?.spend, 0))
-  const advertisingExpense = availability.advertising ? actualAdvertisingSpend : settings.advertisingMonthly
-  const sharedExpenses = advertisingExpense + settings.storageMonthly + settings.fixedMonthly
+  const advertisingStatsAvailable = actualAdvertisingSpend > 0 || campaignProductRows.some(row => row.views > 0 || row.clicks > 0 || row.spend > 0 || row.orders > 0 || row.revenue > 0)
+  const advertisingExpense = availability.advertising && advertisingStatsAvailable ? actualAdvertisingSpend : settings.advertisingMonthly
+  const mappedAdvertisingScale = mappedAdvertisingSpend > 0 && advertisingExpense >= 0
+    ? Math.min(1, advertisingExpense / mappedAdvertisingSpend)
+    : 1
+  const resolvedMappedAdvertisingSpend = mappedAdvertisingSpend * mappedAdvertisingScale
+  const sharedNonAdvertisingExpenses = settings.storageMonthly + settings.fixedMonthly
   let totalRevenue = 0
   let totalSales = 0
   let totalReturns = 0
@@ -1014,8 +1102,11 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     const tax = Math.max(0, item.revenue) * settings.taxPercent / 100
     const logistics = item.salesCount * settings.logisticsPerSale
     const revenueShare = positiveRevenue > 0 ? Math.max(0, item.revenue) / positiveRevenue : 0
-    const allocatedShared = sharedExpenses * revenueShare
-    const profit = hasCost ? item.revenue - cogs - commission - tax - logistics - allocatedShared : null
+    const unallocatedAdvertising = Math.max(0, advertisingExpense - resolvedMappedAdvertisingSpend)
+    const allocatedAdvertising = Math.max(0, item.adSpend) * mappedAdvertisingScale + unallocatedAdvertising * revenueShare
+    const allocatedShared = sharedNonAdvertisingExpenses * revenueShare
+    const expenses = cogs + commission + tax + logistics + allocatedAdvertising + allocatedShared
+    const profit = hasCost ? item.revenue - expenses : null
     const margin = profit != null && item.revenue > 0 ? profit / item.revenue * 100 : null
     const dailyAverage = item.salesCount / periodDays
     const stockCoverDays = availability.stockDetails && dailyAverage > 0 ? item.stock / dailyAverage : null
@@ -1055,6 +1146,15 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
       cogs: Math.round(cogs),
       commission: Math.round(commission),
       logistics: Math.round(logistics),
+      tax: Math.round(tax),
+      advertising: Math.round(allocatedAdvertising),
+      sharedExpenses: Math.round(allocatedShared),
+      expenses: Math.round(expenses),
+      adViews: Math.round(item.adViews || 0),
+      adClicks: Math.round(item.adClicks || 0),
+      adOrders: Math.round(item.adOrders || 0),
+      adRevenue: Math.round(item.adRevenue || 0),
+      adCampaignIds: Array.isArray(item.adCampaignIds) ? item.adCampaignIds : [],
       profit: profit == null ? null : Math.round(profit),
       margin: margin == null ? null : Math.round(margin * 10) / 10,
       stockCoverDays: stockCoverDays == null ? null : Math.round(stockCoverDays),
@@ -1148,7 +1248,7 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
       commission: Math.round(totals.commission),
       logistics: Math.round(totals.logistics),
       advertising: Math.round(advertisingExpense),
-      advertisingSource: availability.advertising ? 'wb_api' : 'manual',
+      advertisingSource: availability.advertising && advertisingStatsAvailable ? 'wb_api' : 'manual',
       storage: Math.round(settings.storageMonthly),
       fixed: Math.round(settings.fixedMonthly),
       tax: Math.round(tax),
@@ -1190,10 +1290,14 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
         : metaStockQuantity === 0,
     } : null,
     advertising: {
-      campaigns: Array.isArray(advertisingData.campaigns) ? advertisingData.campaigns : [],
+      campaigns: rawCampaigns,
+      productRows: campaignProductRows,
       totals: advertisingData.totals || {},
       period: advertisingData.period || null,
       truncated: Boolean(advertisingData.truncated),
+      totalCampaigns: advertisingData.totalCampaigns || rawCampaigns.length,
+      statsAvailable: advertisingStatsAvailable,
+      mappedProductRows: campaignProductRows.filter(row => row.mapped).length,
       source: availability.advertising ? 'wb_api' : 'manual',
     },
     products,
@@ -1513,6 +1617,18 @@ async function loadStatisticsRows(kind, token, { deadlineAt = 0, previousRows = 
   return mergeStatisticsRows(kind, previousRows, Array.isArray(payload) ? payload : [])
 }
 
+function collectCampaignNmIds(node, output = []) {
+  if (!node) return output
+  if (Array.isArray(node)) { node.forEach(item => collectCampaignNmIds(item, output)); return output }
+  if (typeof node !== 'object') return output
+  for (const [key, value] of Object.entries(node)) {
+    if (['nms','nmIds','nm_ids'].includes(key) && Array.isArray(value)) output.push(...value)
+    if (['nmId','nmID','nm_id','nm'].includes(key) && (typeof value === 'number' || typeof value === 'string')) output.push(value)
+    if (value && typeof value === 'object') collectCampaignNmIds(value, output)
+  }
+  return uniqueIdentities(output, cleanNumericIdentity)
+}
+
 function normalizeCampaignList(payload) {
   const result = []
   const seen = new Set()
@@ -1520,6 +1636,7 @@ function normalizeCampaignList(payload) {
     const advertId = Number(row?.advertId ?? row?.advert_id ?? row?.id)
     if (!Number.isFinite(advertId) || seen.has(advertId)) return
     seen.add(advertId)
+    const nmIds = collectCampaignNmIds(row, [])
     result.push({
       advertId,
       name: row?.name || row?.advertName || row?.campaignName || `Кампания ${advertId}`,
@@ -1527,6 +1644,7 @@ function normalizeCampaignList(payload) {
       type: Number(row?.type ?? inherited.type ?? 0),
       paymentType: row?.payment_type || row?.paymentType || inherited.paymentType || '',
       changeTime: row?.changeTime || row?.change_time || null,
+      nmIds,
     })
   }
   const walk = (node, inherited = {}) => {
@@ -1547,41 +1665,78 @@ function normalizeCampaignList(payload) {
   return result
 }
 
-const AD_METRIC_KEYS = ['views','clicks','sum','atbs','orders','shks','sum_price','orders_price']
+const AD_METRIC_ALIASES = {
+  views: ['views','view','impressions','shows'],
+  clicks: ['clicks','click'],
+  sum: ['sum','spend','expense','expenses','cost'],
+  atbs: ['atbs','addToBasket','add_to_basket'],
+  orders: ['orders','ordersCount','order_count'],
+  shks: ['shks','sales','salesCount','sale_count'],
+  sum_price: ['sum_price','sumPrice','revenue','salesRevenue'],
+  orders_price: ['orders_price','ordersPrice','orderRevenue','order_revenue'],
+}
+const AD_METRIC_KEYS = Object.keys(AD_METRIC_ALIASES)
+
+function directNumericAlias(row, aliases = []) {
+  for (const key of aliases) {
+    const value = Number(row?.[key])
+    if (Number.isFinite(value)) return value
+  }
+  return null
+}
+
+function deepMetricValue(node, aliases = []) {
+  if (!node || typeof node !== 'object') return 0
+  const direct = directNumericAlias(node, aliases)
+  if (direct != null) return direct
+  let total = 0
+  for (const value of Object.values(node)) {
+    if (Array.isArray(value)) total += value.reduce((sum, child) => sum + deepMetricValue(child, aliases), 0)
+    else if (value && typeof value === 'object') total += deepMetricValue(value, aliases)
+  }
+  return total
+}
+
 function numericMetric(row, key) {
-  const value = Number(row?.[key])
-  return Number.isFinite(value) ? value : 0
+  return deepMetricValue(row, AD_METRIC_ALIASES[key] || [key])
 }
 
 function collectNmAdStats(node, output = []) {
   if (!node) return output
   if (Array.isArray(node)) { node.forEach(item => collectNmAdStats(item, output)); return output }
   if (typeof node !== 'object') return output
-  if (node.nmId != null || node.nmID != null || node.nm_id != null) output.push(node)
+  if (node.nmId != null || node.nmID != null || node.nm_id != null || (node.nm != null && typeof node.nm !== 'object')) output.push(node)
   for (const value of Object.values(node)) if (value && typeof value === 'object') collectNmAdStats(value, output)
   return output
 }
 
 function normalizeAdvertisingStats(payload, campaigns) {
-  const rows = Array.isArray(payload) ? payload : Array.isArray(payload?.adverts) ? payload.adverts : Array.isArray(payload?.data) ? payload.data : []
+  const rows = Array.isArray(payload) ? payload : Array.isArray(payload?.adverts) ? payload.adverts : Array.isArray(payload?.data) ? payload.data : Array.isArray(payload?.result) ? payload.result : []
   const statsById = new Map()
   for (const row of rows) {
     const advertId = Number(row?.advertId ?? row?.advert_id ?? row?.id)
     if (!Number.isFinite(advertId)) continue
     const productRows = collectNmAdStats(row, [])
-    const directHasMetrics = AD_METRIC_KEYS.some(key => Number.isFinite(Number(row?.[key])))
+    const directHasMetrics = AD_METRIC_KEYS.some(key => directNumericAlias(row, AD_METRIC_ALIASES[key]) != null)
     const source = productRows.length ? productRows : directHasMetrics ? [row] : []
     const metrics = source.reduce((acc, item) => {
       for (const key of AD_METRIC_KEYS) acc[key] += numericMetric(item, key)
       return acc
     }, Object.fromEntries(AD_METRIC_KEYS.map(key => [key, 0])))
-    const nmStats = productRows.map(item => ({
-      nmId: Number(item.nmId ?? item.nmID ?? item.nm_id) || null,
-      name: item.name || item.title || '',
-      views: numericMetric(item, 'views'), clicks: numericMetric(item, 'clicks'), spend: numericMetric(item, 'sum'),
-      orders: numericMetric(item, 'orders'), revenue: numericMetric(item, 'orders_price') || numericMetric(item, 'sum_price'),
-    }))
-    statsById.set(advertId, { ...metrics, nmStats })
+
+    const nmMap = new Map()
+    for (const item of productRows) {
+      const nmId = Number(item.nmId ?? item.nmID ?? item.nm_id ?? item.nm) || null
+      if (!nmId) continue
+      const current = nmMap.get(nmId) || { nmId, name:item.name || item.title || '', views:0, clicks:0, spend:0, orders:0, revenue:0 }
+      current.views += numericMetric(item, 'views')
+      current.clicks += numericMetric(item, 'clicks')
+      current.spend += numericMetric(item, 'sum')
+      current.orders += numericMetric(item, 'orders')
+      current.revenue += numericMetric(item, 'orders_price') || numericMetric(item, 'sum_price')
+      nmMap.set(nmId, current)
+    }
+    statsById.set(advertId, { ...metrics, nmStats:[...nmMap.values()] })
   }
 
   const normalized = campaigns.map(campaign => {
@@ -1591,11 +1746,13 @@ function normalizeAdvertisingStats(payload, campaigns) {
     const clicks = Number(stats.clicks || 0)
     const orders = Number(stats.orders || 0)
     const revenue = Number(stats.orders_price || stats.sum_price || 0)
+    const statNmIds = Array.isArray(stats.nmStats) ? stats.nmStats.map(item => item.nmId).filter(Boolean) : []
     return {
       ...campaign,
+      nmIds: uniqueIdentities([...(campaign.nmIds || []), ...statNmIds], cleanNumericIdentity),
       views, clicks, spend, orders, revenue,
-      ctr: views > 0 ? clicks / views * 100 : 0,
-      cpc: clicks > 0 ? spend / clicks : 0,
+      ctr: views > 0 ? clicks / views * 100 : null,
+      cpc: clicks > 0 ? spend / clicks : null,
       crr: revenue > 0 ? spend / revenue * 100 : null,
       nmStats: stats.nmStats || [],
     }
@@ -1604,8 +1761,8 @@ function normalizeAdvertisingStats(payload, campaigns) {
     acc.views += item.views; acc.clicks += item.clicks; acc.spend += item.spend; acc.orders += item.orders; acc.revenue += item.revenue
     return acc
   }, { views: 0, clicks: 0, spend: 0, orders: 0, revenue: 0 })
-  totals.ctr = totals.views > 0 ? totals.clicks / totals.views * 100 : 0
-  totals.cpc = totals.clicks > 0 ? totals.spend / totals.clicks : 0
+  totals.ctr = totals.views > 0 ? totals.clicks / totals.views * 100 : null
+  totals.cpc = totals.clicks > 0 ? totals.spend / totals.clicks : null
   totals.crr = totals.revenue > 0 ? totals.spend / totals.revenue * 100 : null
   return { campaigns: normalized, totals }
 }
@@ -1632,7 +1789,10 @@ async function loadAdvertising(token, { deadlineAt = 0 } = {}) {
     label: 'Кампании WB', timeoutMs: 45000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
   })
   const allCampaigns = normalizeCampaignList(campaignPayload)
-  const campaigns = allCampaigns.slice(0, 50)
+  const statusPriority = status => ({ 9:0, 11:1, 7:2, 4:3, 8:4 }[Number(status)] ?? 9)
+  const campaigns = [...allCampaigns]
+    .sort((a, b) => statusPriority(a.status) - statusPriority(b.status) || Date.parse(b.changeTime || 0) - Date.parse(a.changeTime || 0))
+    .slice(0, 50)
   if (!campaigns.length) {
     const empty = { campaigns: [], totals: { views:0, clicks:0, spend:0, orders:0, revenue:0, ctr:0, cpc:0, crr:null }, period: { days:30 }, truncated:false }
     return { ...empty, meta: buildAdvertisingMeta(empty) }
@@ -1783,7 +1943,7 @@ app.get('/health', async (_req, res) => {
   res.json({
     ok: true,
     service: 'elisei-api',
-    version: '2.7.8',
+    version: '2.7.9',
     database,
     backgroundWorker: {
       running: backgroundWorkerState.running,
