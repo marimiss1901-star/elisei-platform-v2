@@ -9,12 +9,45 @@ import {
 import ElMascot from '../components/ElMascot'
 import MetricCard from '../components/MetricCard'
 import TrendChart from '../components/TrendChart'
-import { businessApi, wbApi } from '../lib/api'
+import { businessApi, elApi, wbApi } from '../lib/api'
 
 const formatMoney = value => value == null ? 'Не загружено' : `${new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))} ₽`
 const formatNumber = value => value == null ? 'Не загружено' : new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))
 const formatPercent = value => value == null ? '—' : `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits:1 }).format(Number(value || 0))}%`
 const csvCell = value => `"${String(value ?? '').replaceAll('"','""')}"`
+
+
+const EL_CHAT_MESSAGES_KEY = 'elisei.el.embedded.messages.v2'
+const EL_CHAT_CONVERSATION_KEY = 'elisei.el.embedded.conversation.v2'
+const EL_CHAT_SETTINGS_KEY = 'elisei.el.embedded.settings.v2'
+const EL_PERIOD_KEYS = ['elisei.globalPeriod.v3','elisei.globalPeriod','elisei.period.v4']
+
+function readStoredJson(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? JSON.parse(raw) : fallback
+  } catch { return fallback }
+}
+
+function createElConversationId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
+  return `el_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,10)}`
+}
+
+function readElPeriod() {
+  if (window.__ELISEI_PERIOD__) return window.__ELISEI_PERIOD__
+  for (const key of EL_PERIOD_KEYS) {
+    const value = readStoredJson(key, null)
+    if (value) return value
+  }
+  return null
+}
+
+const elModuleNames = {
+  overview:'Обзор', sales:'Продажи', advertising:'Реклама', stocks:'Остатки', finance:'Финансы',
+  products:'Товары', returns:'Возвраты', reviews:'Отзывы', pricing:'Цены', seasonality:'Сезонность',
+  procurement:'Закупки', sync:'Качество данных',
+}
 
 const defaultSettings = {
   commissionPercent:20, logisticsPerSale:0, storageMonthly:0, advertisingMonthly:0,
@@ -83,7 +116,16 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [query, setQuery] = useState('')
   const [toast, setToast] = useState('')
   const [chat, setChat] = useState('')
-  const [messages, setMessages] = useState([{ role:'el', text:`${greeting}${displayName ? `, ${displayName}` : ''}. Я готов разобрать продажи, остатки и прибыль.` }])
+  const [chatBusy, setChatBusy] = useState(false)
+  const [elConversationId, setElConversationId] = useState(() => localStorage.getItem(EL_CHAT_CONVERSATION_KEY) || createElConversationId())
+  const [elSettings, setElSettings] = useState(() => ({ allowWeb:true, humor:true, ...readStoredJson(EL_CHAT_SETTINGS_KEY, {}) }))
+  const [messages, setMessages] = useState(() => {
+    const stored = readStoredJson(EL_CHAT_MESSAGES_KEY, [])
+    return Array.isArray(stored) && stored.length ? stored.slice(-50) : [{
+      role:'el',
+      text:`${greeting}${displayName ? `, ${displayName}` : ''}. Я готов думать вместе: вижу продажи, рекламу, остатки, финансы, товары, возвраты и могу искать свежие данные в интернете.`
+    }]
+  })
   const [connection, setConnection] = useState(emptyConnection)
   const [tokenDraft, setTokenDraft] = useState('')
   const [tokenLabel, setTokenLabel] = useState('')
@@ -104,6 +146,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [importResult, setImportResult] = useState(null)
   const connectionRef = useRef(emptyConnection)
   const syncRevisionRef = useRef('')
+  const lastBusinessSectionRef = useRef('Главная')
 
   const notify = (text, duration = 4200) => {
     setToast(text)
@@ -127,6 +170,23 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   useEffect(() => {
     connectionRef.current = connection
   }, [connection])
+
+
+  useEffect(() => {
+    localStorage.setItem(EL_CHAT_MESSAGES_KEY, JSON.stringify(messages.slice(-50)))
+  }, [messages])
+
+  useEffect(() => {
+    localStorage.setItem(EL_CHAT_CONVERSATION_KEY, elConversationId)
+  }, [elConversationId])
+
+  useEffect(() => {
+    localStorage.setItem(EL_CHAT_SETTINGS_KEY, JSON.stringify(elSettings))
+  }, [elSettings])
+
+  useEffect(() => {
+    if (active !== 'Спросить ЭЛа') lastBusinessSectionRef.current = active
+  }, [active])
 
   useEffect(() => {
     if (!wbApi.configured) return
@@ -396,28 +456,81 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     { title:'Рекомендации ЭЛа', text:'Готовый список действий по цене, запасам и качеству.', action:() => downloadCsv('elisei_recommendations', ['Приоритет','Тип','Действие','Причина','Эффект'], recommendations.map((r,index) => [index+1,r.type,r.title,r.text,r.effect])) },
   ]
 
-  const answerFromCore = question => {
-    const q = question.toLowerCase()
-    if (!connection.connected) return 'Сначала подключите Wildberries. После синхронизации я смогу отвечать по реальным данным кабинета.'
-    if (q.includes('прибыл') || q.includes('марж')) return summary.operatingProfit == null
-      ? 'Для расчёта прибыли добавьте себестоимость в разделе «Финансы». Комиссию, логистику, рекламу и постоянные расходы тоже можно настроить там.'
-      : `Операционная прибыль за 30 дней: ${formatMoney(summary.operatingProfit)}, маржа ${formatPercent(summary.margin)}. Основные расходы: комиссия ${formatMoney(summary.commission)}, себестоимость ${formatMoney(summary.cogs)}.`
-    if (q.includes('остат') || q.includes('постав')) return `На складах ${formatNumber(summary.stockUnits)} единиц. Без остатка: ${summary.zeroStock || 0} товаров, заканчиваются: ${summary.lowStock || 0}, избыток/без движения: ${summary.slowStock || 0}.`
-    if (q.includes('возврат') || q.includes('качеств')) return `За 30 дней отмечено ${formatNumber(summary.returns)} возвратов, доля — ${formatPercent(summary.returnRate)}. В разделе «Отзывы» я выделил товары с повышенным риском качества.`
-    if (q.includes('цен')) {
-      const item = productRows.find(p => p.targetPrice != null)
-      return item ? `Для «${item.title}» расчётная цена в ноль — ${formatMoney(item.breakevenPrice)}, целевая цена — ${formatMoney(item.targetPrice)}.` : 'Добавьте себестоимость, чтобы я рассчитал цену в ноль, целевую цену и сценарии скидок.'
-    }
-    const top = recommendations[0]
-    return top ? `Главное действие сейчас: ${top.title}. ${top.text}` : `За 30 дней выручка составила ${formatMoney(summary.revenue)}, продаж — ${formatNumber(summary.sales)}, остаток — ${formatNumber(summary.stockUnits)} единиц.`
+
+  const startNewElConversation = async () => {
+    const previous = elConversationId
+    const next = createElConversationId()
+    setElConversationId(next)
+    setMessages([{ role:'el', text:`Новый диалог начат. Я на связи${displayName ? `, ${displayName}` : ''} — о чём думаем?` }])
+    setChat('')
+    if (previous) elApi.clearConversation(previous).catch(() => {})
   }
 
-  const sendChat = event => {
-    event.preventDefault()
-    if (!chat.trim()) return
-    const question = chat.trim()
-    setMessages(current => [...current, { role:'user', text:question }, { role:'el', text:answerFromCore(question) }])
+  const sendChat = async (event, forcedText = '') => {
+    event?.preventDefault?.()
+    const question = String(forcedText || chat).trim()
+    if (!question || chatBusy) return
+
+    const userMessage = { role:'user', text:question, createdAt:new Date().toISOString() }
+    const previousMessages = messages
+    setMessages(current => [...current, userMessage])
     setChat('')
+    setChatBusy(true)
+
+    try {
+      const period = readElPeriod()
+      const result = await elApi.chat({
+        message:question,
+        conversationId:elConversationId,
+        history:previousMessages.slice(-18).map(item => ({
+          role:item.role === 'el' ? 'assistant' : 'user',
+          content:item.text,
+        })),
+        allowWeb:elSettings.allowWeb,
+        tone:elSettings.humor ? 'adaptive_playful' : 'professional',
+        cabinetId:connection.connectionId || 'main',
+        cabinetName:user?.company || 'Основной кабинет WB',
+        period,
+        page:{
+          section:lastBusinessSectionRef.current,
+          chatSection:active,
+          path:window.location.pathname,
+          title:document.title,
+        },
+        selectedProduct:selectedProduct ? {
+          nmID:selectedProduct.nmID,
+          vendorCode:selectedProduct.vendorCode,
+          title:selectedProduct.title,
+        } : null,
+        screenContext:{
+          section:lastBusinessSectionRef.current,
+          period,
+          summary,
+          advertising:advertisingSnapshot?.totals || advertisingSnapshot || null,
+          lastSync:connection.lastSync || null,
+        },
+      })
+
+      if (result.conversationId && result.conversationId !== elConversationId) setElConversationId(result.conversationId)
+      setMessages(current => [...current, {
+        role:'el',
+        text:result.answer || 'Я проверил данные, но ответ не сформировался. Давай повторим вопрос.',
+        sources:Array.isArray(result.sources) ? result.sources : [],
+        modules:Array.isArray(result.modulesUsed) ? result.modulesUsed : [],
+        usedWeb:Boolean(result.usedWeb),
+        model:result.model || null,
+        createdAt:new Date().toISOString(),
+      }])
+    } catch (error) {
+      setMessages(current => [...current, {
+        role:'el',
+        text:error.message || 'Не удалось связаться с интеллектом Эла. Проверьте backend и OPENAI_API_KEY.',
+        error:true,
+        createdAt:new Date().toISOString(),
+      }])
+    } finally {
+      setChatBusy(false)
+    }
   }
 
   const requireConnection = children => connection.connected ? children : <div className="empty-state compact-empty"><PlugZap size={34}/><h3>Подключите Wildberries</h3><p>Раздел использует реальные данные кабинета, а не демонстрационные цифры.</p><button className="primary-btn" onClick={() => setActive('Подключения')}>Открыть подключения</button></div>
@@ -721,7 +834,53 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
   const renderSettings = () => <section className="app-page glass-panel"><div className="page-title"><span>Настройки</span><h1>Параметры бизнеса</h1><p>Финансовые допущения сохраняются отдельно для вашего аккаунта.</p></div><div className="settings-card standalone"><h3><Settings size={20}/> Основные параметры</h3><div className="settings-grid"><label>Комиссия WB, %<input type="number" value={settingsDraft.commissionPercent ?? 0} onChange={e => updateSetting('commissionPercent',e.target.value)}/></label><label>Логистика за продажу, ₽<input type="number" value={settingsDraft.logisticsPerSale ?? 0} onChange={e => updateSetting('logisticsPerSale',e.target.value)}/></label><label>Налог, %<input type="number" value={settingsDraft.taxPercent ?? 0} onChange={e => updateSetting('taxPercent',e.target.value)}/></label><label>Целевая маржа, %<input type="number" value={settingsDraft.targetMarginPercent ?? 20} onChange={e => updateSetting('targetMarginPercent',e.target.value)}/></label></div><button className="primary-btn" onClick={saveSettings} disabled={savingSettings}><Save size={17}/> Сохранить</button></div><div className="security-note"><ShieldCheck size={22}/><div><strong>MAXADORRE и ELISEI не связаны данными</strong><p>В ELISEI перенесена проверенная бизнес-логика, но репозитории, базы, API-ключи и клиентские данные полностью раздельны.</p></div></div></section>
 
-  const renderChat = () => <section className="app-page glass-panel chat-page"><div className="page-title"><span>AI-помощник</span><h1>Спросить ЭЛа</h1><p>Спросите о прибыли, остатках, возвратах, цене или следующем действии.</p></div><div className="chat-suggestions">{['Что сделать сегодня?','Какие товары заканчиваются?','Почему нет прибыли?','Где высокий возврат?'].map(text => <button key={text} onClick={() => { setChat(text) }}>{text}</button>)}</div><div className="chat-stream">{messages.map((message,index) => <div key={index} className={`chat-message ${message.role}`}>{message.role==='el'&&<b>ЭЛ</b>}<p>{message.text}</p></div>)}</div><form className="chat-form" onSubmit={sendChat}><input value={chat} onChange={e => setChat(e.target.value)} placeholder="Например: какие товары нужно пополнить?"/><button className="primary-btn" aria-label="Отправить"><Send size={18}/></button></form></section>
+  const renderChat = () => (
+    <section className="app-page glass-panel chat-page el-embedded-chat">
+      <div className="page-title el-chat-title">
+        <div>
+          <span>AI-партнёр</span>
+          <h1>Спросить ЭЛа</h1>
+          <p>Живой AI-чат: анализирует весь кабинет, связывает разделы, помнит контекст и при необходимости ищет свежую информацию в интернете.</p>
+        </div>
+        <div className="el-chat-actions">
+          <label className="el-chat-toggle"><input type="checkbox" checked={elSettings.allowWeb} onChange={event => setElSettings(current => ({ ...current, allowWeb:event.target.checked }))}/> Интернет</label>
+          <label className="el-chat-toggle"><input type="checkbox" checked={elSettings.humor} onChange={event => setElSettings(current => ({ ...current, humor:event.target.checked }))}/> Можно с юмором</label>
+          <button type="button" className="secondary-btn" onClick={startNewElConversation} disabled={chatBusy}>Новый диалог</button>
+        </div>
+      </div>
+
+      <div className="chat-suggestions">
+        {[
+          'Какие рекламные кампании съедают прибыль?',
+          'Что сейчас важнее всего по кабинету?',
+          'Какие товары скоро закончатся и стоит ли их дозаказывать?',
+          'Свяжи возвраты с отзывами и карточками',
+          'Найди свежие изменения правил Wildberries',
+        ].map(text => <button key={text} disabled={chatBusy} onClick={() => sendChat(null, text)}>{text}</button>)}
+      </div>
+
+      <div className="chat-stream" aria-live="polite">
+        {messages.map((message,index) => (
+          <div key={`${message.createdAt || index}-${index}`} className={`chat-message ${message.role} ${message.error ? 'error' : ''}`}>
+            {message.role === 'el' && <b>ЭЛ</b>}
+            <p>{message.text}</p>
+            {message.modules?.length > 0 && <div className="el-chat-badges">{message.modules.map(module => <span key={module}>{elModuleNames[module] || module}</span>)}</div>}
+            {message.usedWeb && <div className="el-web-note">Проверил актуальные источники в интернете</div>}
+            {message.sources?.length > 0 && <div className="el-chat-sources">
+              {message.sources.map((source,sourceIndex) => <a key={`${source.url}-${sourceIndex}`} href={source.url} target="_blank" rel="noreferrer">{source.title || source.url}</a>)}
+            </div>}
+          </div>
+        ))}
+        {chatBusy && <div className="chat-message el el-thinking-message"><b>ЭЛ</b><p><RefreshCw size={16} className="spin"/> Думаю, проверяю данные и несу ответственность за каждую цифру…</p></div>}
+      </div>
+
+      <form className="chat-form" onSubmit={sendChat}>
+        <input value={chat} disabled={chatBusy} onChange={event => setChat(event.target.value)} placeholder="Например: почему реклама даёт заказы, но не даёт прибыль?"/>
+        <button className="primary-btn" aria-label="Отправить" disabled={chatBusy || !chat.trim()}>{chatBusy ? <RefreshCw size={18} className="spin"/> : <Send size={18}/>}</button>
+      </form>
+      <small className="el-chat-safety">Эл анализирует и предлагает действия. Изменение цен, ставок, бюджетов и данных — только после отдельного подтверждения.</small>
+    </section>
+  )
 
   const renderers = {
     'Главная':renderHome, 'Аналитика':renderAnalytics, 'Товары':renderProducts, 'Остатки':renderStocks,

@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const { requestResponses } = require('./openaiResponsesClient.cjs');
 const { uniqueSources, outputText } = require('./elSources.cjs');
 const { buildInstructions } = require('./elPrompt.cjs');
-const { moduleNames } = require('./elModuleRegistry.cjs');
+const { moduleNames, detectModules } = require('./elModuleRegistry.cjs');
 
 const MAX_TOOL_ROUNDS = 6;
 
@@ -99,12 +99,17 @@ async function executeTool(call, deps) {
 async function runElAgent(options) {
   const model = options.model || process.env.ELISEI_AI_MODEL || 'gpt-5.6';
   const reasoningEffort = options.reasoningEffort || process.env.ELISEI_REASONING_EFFORT || 'medium';
+  const detectedModules = detectModules(options.message, 4);
   const tools = [...functionTools()];
   if (options.allowWeb !== false && process.env.ELISEI_WEB_SEARCH !== 'false') {
     tools.unshift({ type: 'web_search', search_context_size: process.env.ELISEI_WEB_SEARCH_CONTEXT || 'medium' });
   }
 
-  let input = [...normalizeHistory(options.history), { role: 'user', content: String(options.message || '').slice(0, 12000) }];
+  let input = [
+    ...normalizeHistory(options.history),
+    { role: 'user', content: String(options.message || '').slice(0, 12000) },
+    ...(detectedModules.length ? [{ role:'developer', content:`Системная подсказка ELISEI: вопрос относится к модулям ${detectedModules.join(', ')}. Используй подтверждённые данные этих модулей; не отвечай статическим шаблоном.` }] : []),
+  ];
   const instructions = buildInstructions(options);
   let response;
   let toolRounds = 0;
@@ -140,7 +145,7 @@ async function runElAgent(options) {
     id: response?.id || crypto.randomUUID(), text, sources,
     usedWeb: sources.length > 0 || (response?.output || []).some((item) => item?.type === 'web_search_call'),
     toolTrace, model, usage: response?.usage || null,
-    modulesUsed: [...new Set(toolTrace.map((item) => item.module).filter(Boolean))],
+    modulesUsed: [...new Set([...detectedModules, ...toolTrace.map((item) => item.module).filter(Boolean)])],
   };
 }
 

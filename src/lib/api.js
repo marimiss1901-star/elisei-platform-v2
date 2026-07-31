@@ -64,3 +64,17 @@ export const businessApi = {
   settings: () => request('/api/business/settings'),
   saveSettings: (settings) => request('/api/business/settings', { method: 'PUT', body: JSON.stringify(settings) }),
 }
+
+
+export const elApi = {
+  status: () => request('/api/el/status'),
+  capabilities: () => request('/api/el/capabilities'),
+  chat: (payload) => request('/api/el/chat', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(125000),
+  }),
+  memories: () => request('/api/el/memory'),
+  forgetMemory: (memoryId) => request(`/api/el/memory/${encodeURIComponent(memoryId)}`, { method:'DELETE' }),
+  clearConversation: (conversationId) => request(`/api/el/conversation/${encodeURIComponent(conversationId)}`, { method:'DELETE' }),
+}

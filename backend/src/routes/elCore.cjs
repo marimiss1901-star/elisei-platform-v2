@@ -21,7 +21,7 @@ function createRouter(express) {
   router.get('/status', asyncRoute(async (req, res) => {
     const identity = identityFromRequest(req);
     res.json({
-      ok: true, version: '5.4.1', name: 'El Whole Business Brain', configured: Boolean(process.env.OPENAI_API_KEY),
+      ok: true, version: '5.4.2', name: 'El Whole Business Brain', configured: Boolean(process.env.OPENAI_API_KEY),
       model: process.env.ELISEI_AI_MODEL || 'gpt-5.6', webSearch: process.env.ELISEI_WEB_SEARCH !== 'false',
       memory: req.app?.locals?.elMemoryStore ? 'custom' : 'file-fallback',
       identity: { cabinetId: identity.cabinetId, cabinetName: identity.cabinetName }, writeActions: false,
@@ -29,7 +29,7 @@ function createRouter(express) {
     });
   }));
 
-  router.get('/capabilities', (req, res) => res.json({ ok: true, version: '5.4.1', modules: publicCapabilities(), writeActions: false }));
+  router.get('/capabilities', (req, res) => res.json({ ok: true, version: '5.4.2', modules: publicCapabilities(), writeActions: false }));
 
   router.post('/chat', asyncRoute(async (req, res) => {
     const body = req.body || {};

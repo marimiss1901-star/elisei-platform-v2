@@ -227,3 +227,27 @@ body{background:radial-gradient(circle at 72% 7%,rgba(124,58,237,.18),transparen
 .data-integrity-strip strong{font-size:11px;color:#f0efff}
 .data-integrity-strip span{font-size:10px;line-height:1.45;color:#8fd9bd}
 @media(max-width:900px){.data-integrity-strip{grid-template-columns:1fr}}
+
+
+/* ELISEI 5.4.2 — настоящий встроенный AI-чат Эла */
+.el-embedded-chat{min-height:calc(100vh - 112px)}
+.el-chat-title{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}
+.el-chat-title>div:first-child{min-width:0}
+.el-chat-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}
+.el-chat-toggle{display:flex;align-items:center;gap:7px;padding:8px 11px;border:1px solid var(--line);border-radius:999px;color:#c9c5dc;background:rgba(139,92,246,.06);font-size:12px;cursor:pointer;white-space:nowrap}
+.el-chat-toggle input{accent-color:#8b5cf6}
+.el-chat-actions .secondary-btn{border:1px solid var(--line);background:rgba(255,255,255,.035);color:#ded9ef;border-radius:12px;padding:9px 12px;cursor:pointer}
+.el-chat-actions button:disabled,.chat-suggestions button:disabled{opacity:.5;cursor:not-allowed}
+.el-embedded-chat .chat-stream{overflow:auto;max-height:calc(100vh - 390px);min-height:370px;padding-right:8px;scrollbar-width:thin}
+.el-embedded-chat .chat-message{box-shadow:0 10px 32px rgba(0,0,0,.08)}
+.el-embedded-chat .chat-message p{white-space:pre-wrap;overflow-wrap:anywhere}
+.el-embedded-chat .chat-message.error{border-color:rgba(255,102,125,.38);background:rgba(255,79,107,.08)}
+.el-thinking-message p{display:flex;align-items:center;gap:8px;color:#b9b2d2}
+.el-chat-badges{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.el-chat-badges span{padding:4px 8px;border-radius:999px;background:rgba(139,92,246,.14);border:1px solid rgba(168,85,247,.2);color:#d7caff;font-size:11px}
+.el-web-note{margin-top:9px;color:#9fa8c9;font-size:11px}
+.el-chat-sources{display:grid;gap:6px;margin-top:10px}
+.el-chat-sources a{display:block;max-width:100%;padding:8px 10px;border-radius:10px;background:rgba(79,70,229,.12);border:1px solid rgba(99,102,241,.22);color:#dcd9ff;text-decoration:none;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.el-chat-sources a:hover{background:rgba(99,102,241,.2)}
+.el-chat-safety{display:block;margin-top:10px;color:#858aa8;text-align:center;line-height:1.4}
+@media(max-width:900px){.el-chat-title{display:block}.el-chat-actions{justify-content:flex-start;margin-top:15px}.el-embedded-chat .chat-stream{max-height:none}}

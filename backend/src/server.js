@@ -138,6 +138,26 @@ async function initDatabase() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY(connection_id, stage)
     );
+    CREATE TABLE IF NOT EXISTS el_conversations (
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      cabinet_id TEXT NOT NULL,
+      conversation_id TEXT NOT NULL,
+      messages JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY(user_id, cabinet_id, conversation_id)
+    );
+    CREATE INDEX IF NOT EXISTS el_conversations_updated_idx ON el_conversations(user_id, cabinet_id, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS el_memories (
+      id UUID PRIMARY KEY,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      cabinet_id TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'preference',
+      text TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS el_memories_user_idx ON el_memories(user_id, cabinet_id, updated_at DESC);
   `)
   await ensureSnapshotSchema(pool)
   await migrateLegacyWbTokens()
@@ -2458,7 +2478,7 @@ app.post('/api/wb/disconnect', authRequired, async (req, res) => {
 
 
 
-// ELISEI 5.4.1 — прямой read-only мост данных для Эла.
+// ELISEI 5.4.2 — прямой read-only мост данных и постоянная память Эла.
 // Эл получает данные того же пользователя и кабинета, что и основной интерфейс.
 function elPeriodRange(period = {}) {
   const fromRaw = period?.from || period?.dateFrom || period?.date_from || period?.start || period?.startDate
@@ -2708,6 +2728,115 @@ async function buildElModuleData({ req, identity, period, module, focus }) {
   }
   return { ...base, summary: core.summary }
 }
+
+
+function elMemoryIdentity(identity = {}) {
+  return {
+    userId:String(identity.userId || ''),
+    cabinetId:String(identity.cabinetId || 'main').slice(0,120),
+  }
+}
+
+function elMemoryRow(row = {}) {
+  return {
+    id:row.id,
+    text:row.text,
+    category:row.category,
+    createdAt:row.created_at,
+    updatedAt:row.updated_at,
+  }
+}
+
+const elPostgresMemoryStore = pool ? {
+  async loadConversation(identity, conversationId) {
+    const key = elMemoryIdentity(identity)
+    const result = await pool.query(
+      `SELECT messages FROM el_conversations WHERE user_id=$1::uuid AND cabinet_id=$2 AND conversation_id=$3`,
+      [key.userId, key.cabinetId, String(conversationId).slice(0,100)],
+    )
+    return Array.isArray(result.rows[0]?.messages) ? result.rows[0].messages : []
+  },
+  async appendMessages(identity, conversationId, messages) {
+    const key = elMemoryIdentity(identity)
+    const id = String(conversationId).slice(0,100)
+    const current = await this.loadConversation(identity, id)
+    const merged = [...current, ...(Array.isArray(messages) ? messages : [])]
+      .filter(item => item && ['user','assistant'].includes(item.role) && item.content)
+      .slice(-80)
+    await pool.query(
+      `INSERT INTO el_conversations(user_id,cabinet_id,conversation_id,messages)
+       VALUES($1::uuid,$2,$3,$4::jsonb)
+       ON CONFLICT(user_id,cabinet_id,conversation_id)
+       DO UPDATE SET messages=EXCLUDED.messages, updated_at=NOW()`,
+      [key.userId, key.cabinetId, id, JSON.stringify(merged)],
+    )
+    return { id, messages:merged }
+  },
+  async deleteConversation(identity, conversationId) {
+    const key = elMemoryIdentity(identity)
+    await pool.query(
+      `DELETE FROM el_conversations WHERE user_id=$1::uuid AND cabinet_id=$2 AND conversation_id=$3`,
+      [key.userId, key.cabinetId, String(conversationId).slice(0,100)],
+    )
+  },
+  async listMemories(identity) {
+    const key = elMemoryIdentity(identity)
+    const result = await pool.query(
+      `SELECT id,text,category,created_at,updated_at FROM el_memories
+       WHERE user_id=$1::uuid AND cabinet_id=$2 ORDER BY updated_at DESC LIMIT 100`,
+      [key.userId, key.cabinetId],
+    )
+    return result.rows.map(elMemoryRow)
+  },
+  async addMemory(identity, input = {}) {
+    const key = elMemoryIdentity(identity)
+    const text = String(input.text || '').replace(/\s+/g,' ').trim().slice(0,800)
+    const category = String(input.category || 'preference').replace(/\s+/g,' ').trim().slice(0,50) || 'preference'
+    if (!text) throw new Error('Пустую память сохранить нельзя.')
+    const existing = await pool.query(
+      `SELECT id,text,category,created_at,updated_at FROM el_memories
+       WHERE user_id=$1::uuid AND cabinet_id=$2 AND LOWER(text)=LOWER($3) LIMIT 1`,
+      [key.userId, key.cabinetId, text],
+    )
+    if (existing.rowCount) {
+      const updated = await pool.query(
+        `UPDATE el_memories SET category=$4, updated_at=NOW()
+         WHERE user_id=$1::uuid AND cabinet_id=$2 AND id=$3::uuid
+         RETURNING id,text,category,created_at,updated_at`,
+        [key.userId, key.cabinetId, existing.rows[0].id, category],
+      )
+      return elMemoryRow(updated.rows[0])
+    }
+    const created = await pool.query(
+      `INSERT INTO el_memories(id,user_id,cabinet_id,category,text)
+       VALUES($1::uuid,$2::uuid,$3,$4,$5)
+       RETURNING id,text,category,created_at,updated_at`,
+      [crypto.randomUUID(), key.userId, key.cabinetId, category, text],
+    )
+    return elMemoryRow(created.rows[0])
+  },
+  async removeMemory(identity, memoryId) {
+    const key = elMemoryIdentity(identity)
+    const result = await pool.query(
+      `DELETE FROM el_memories WHERE user_id=$1::uuid AND cabinet_id=$2 AND id=$3::uuid`,
+      [key.userId, key.cabinetId, memoryId],
+    )
+    return result.rowCount > 0
+  },
+  async forgetByText(identity, query) {
+    const key = elMemoryIdentity(identity)
+    const needle = String(query || '').replace(/\s+/g,' ').trim().slice(0,300)
+    if (!needle) return []
+    const result = await pool.query(
+      `DELETE FROM el_memories WHERE user_id=$1::uuid AND cabinet_id=$2 AND text ILIKE '%' || $3 || '%'
+       RETURNING id,text,category,created_at,updated_at`,
+      [key.userId, key.cabinetId, needle],
+    )
+    return result.rows.map(elMemoryRow)
+  },
+} : null
+
+if (elPostgresMemoryStore) app.locals.elMemoryStore = elPostgresMemoryStore
 
 app.locals.getElModuleData = buildElModuleData
 app.locals.getElBusinessContext = async options => {
