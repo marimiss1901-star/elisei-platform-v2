@@ -1,13 +1,19 @@
 {
   "project": "ELISEI",
-  "version": "5.3.18",
-  "name": "Period Navigation Fix",
-  "baseVersion": "5.3.17",
-  "files": 6,
-  "changes": [
-    "Remove location.reload on period change",
-    "Keep current section active",
-    "Soft refresh through events and URL state",
-    "Restore stored section after accidental reload"
-  ]
+  "version": "5.3.19",
+  "name": "El Intelligence Core",
+  "dependsOn": ["5.3.18 Period Navigation Fix"],
+  "features": [
+    "living AI chat drawer",
+    "OpenAI Responses API",
+    "agentic web search with sources",
+    "screen and global period context",
+    "per-user and per-cabinet conversation isolation",
+    "adaptive humor and communication style",
+    "explicit memory and forgetting tools",
+    "optional deep business data provider",
+    "no autonomous write actions"
+  ],
+  "writeOperations": false,
+  "maxFilesConstraint": 100
 }

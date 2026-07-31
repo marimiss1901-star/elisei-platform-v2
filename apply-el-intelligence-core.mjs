@@ -1,0 +1,13 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+const patchRoot=path.dirname(fileURLToPath(import.meta.url));
+const run=(script)=>{const r=spawnSync(process.execPath,[path.join(patchRoot,script)],{cwd:process.cwd(),stdio:'inherit'});return r.status===0;};
+const hasFront=['frontend/index.html','frontend_v2/index.html','client/index.html','web/index.html','app/index.html','index.html'].some((x)=>fs.existsSync(path.join(process.cwd(),x)));
+const hasBack=['backend/src/server.js','backend/src/app.js','src/server.js','src/app.js','server.js','app.js'].some((x)=>fs.existsSync(path.join(process.cwd(),x)));
+if(!hasFront&&!hasBack)throw new Error('Не найден ни frontend, ни backend Елисея.');
+let ok=true;if(hasFront)ok=run('apply-el-frontend.mjs')&&ok;else console.log('Frontend не найден — пропущен.');
+if(hasBack)ok=run('apply-el-backend.mjs')&&ok;else console.log('Backend не найден — пропущен.');
+if(!ok)process.exit(1);
+console.log('ELISEI 5.3.19 установлен. Сделай deploy найденных сервисов.');

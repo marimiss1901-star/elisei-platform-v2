@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-node "$ROOT/tests/test-client.cjs"
-node "$ROOT/tests/test-resolver.cjs"
-node "$ROOT/tests/test-store.cjs"
-node "$ROOT/tests/test-analytics.cjs"
-"$ROOT/tests/test-installer.sh"
-node --check "$ROOT/apply-ads-patch.mjs"
-node --check "$ROOT/payload/backend/src/integrations/wb/promotionClient.cjs"
-node --check "$ROOT/payload/backend/src/services/adsAnalytics.cjs"
-node --check "$ROOT/payload/backend/src/services/cabinetTokenResolver.cjs"
-node --check "$ROOT/payload/backend/src/store/adsStore.cjs"
-node --check "$ROOT/payload/backend/src/routes/adsCore.cjs"
-echo "all tests: ok"
+node --check "$ROOT/payload/frontend/public/elisei-el.js"
+for f in "$ROOT"/payload/backend/src/**/*.cjs; do node --check "$f"; done
+node "$ROOT/tests/test-sources.cjs"
+node "$ROOT/tests/test-agent.cjs"
+bash "$ROOT/tests/test-installer.sh"
+echo 'ALL TESTS PASSED'
