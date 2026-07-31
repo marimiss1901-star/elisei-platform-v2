@@ -1,27 +1,18 @@
-# ELISEI 5.3.20A — исправление путей установщиков
+# ELISEI 5.3.20B — Backend Root Fix
 
-Архив нужно распаковать и загрузить **содержимое архива в корень репозитория Елисея** без дополнительной внешней папки.
+Исправляет ошибку `ERR_MODULE_NOT_FOUND: backend/src/routes/el.js`.
 
-## Frontend Render с Root Directory пустым / корень репозитория
+Причина: предыдущий установщик при `Root Directory = backend` создавал файлы в `backend/backend/src/...`.
 
-```bash
-npm install && node apply-el-all-modules-frontend.mjs && npm run build
-```
+## Для текущей конфигурации Render
 
-## Frontend Render с Root Directory `frontend`
-
-```bash
-npm install && node apply-el-all-modules-frontend.mjs && npm run build
-```
-
-## Backend Render с Root Directory `backend`
+- Root Directory: `backend`
+- Build Command:
 
 ```bash
 npm install && node apply-el-all-modules.mjs
 ```
 
-## Backend Render с Root Directory пустым / корень репозитория
+Загрузите содержимое архива в корень репозитория с объединением папки `backend`, затем выполните **Clear build cache & deploy**.
 
-```bash
-npm install && node apply-el-all-modules-backend.mjs
-```
+Frontend повторно устанавливать не требуется.

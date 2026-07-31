@@ -1,6 +1,6 @@
 {
-  "name": "ELISEI 5.3.20A El All Modules Path Fix",
-  "version": "5.3.20A",
-  "purpose": "Place frontend installer at repository root and support both monorepo-root and service-root Render builds",
-  "max_files_per_archive": 100
+  "name": "ELISEI 5.3.20B EL Backend Root Fix",
+  "version": "5.3.20B",
+  "target": "backend",
+  "fixes": ["backend root detection", "missing src/routes/el.js", "runtime path verification"]
 }
