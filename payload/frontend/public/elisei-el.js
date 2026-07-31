@@ -3,7 +3,7 @@
   if (window.__ELISEI_EL_5319__) return;
   window.__ELISEI_EL_5319__ = true;
 
-  var VERSION = '5.3.19';
+  var VERSION = '5.3.20';
   var HISTORY_KEY = 'elisei.el.history.v1';
   var CONVERSATION_KEY = 'elisei.el.conversation.v1';
   var SETTINGS_KEY = 'elisei.el.settings.v1';
@@ -60,7 +60,7 @@
   function build(){
     var launcher=document.createElement('button'); launcher.id='elisei-el-launcher'; launcher.type='button'; launcher.innerHTML='<span class="el-avatar">◉</span><span>Спросить Эла</span>';
     var root=document.createElement('div'); root.id='elisei-el-root';
-    root.innerHTML='<div class="el-backdrop" data-close></div><aside class="el-drawer" aria-label="Чат с Элом"><header class="el-head"><div class="el-head-avatar">◉</div><div class="el-head-copy"><strong>Эл</strong><small>Думаю, ищу, анализирую · v'+VERSION+'</small></div><button class="el-icon-btn" data-new title="Новый диалог">＋</button><button class="el-icon-btn" data-close title="Закрыть">×</button></header><div class="el-messages"></div><div class="el-quick"><button class="el-chip">Что важно сегодня?</button><button class="el-chip">Разбери рекламу за выбранный период</button><button class="el-chip">Поищи свежие тренды в интернете</button></div><div class="el-controls"><label class="el-toggle"><input type="checkbox" data-web> Интернет</label><label class="el-toggle"><input type="checkbox" data-humor> Можно с юмором</label><span style="margin-left:auto">Действия — только с подтверждением</span></div><div class="el-composer"><textarea rows="1" placeholder="Напиши Элу..."></textarea><button class="el-send" title="Отправить">➤</button></div></aside>';
+    root.innerHTML='<div class="el-backdrop" data-close></div><aside class="el-drawer" aria-label="Чат с Элом"><header class="el-head"><div class="el-head-avatar">◉</div><div class="el-head-copy"><strong>Эл</strong><small>Вижу весь бизнес, думаю и анализирую · v'+VERSION+'</small></div><button class="el-icon-btn" data-new title="Новый диалог">＋</button><button class="el-icon-btn" data-close title="Закрыть">×</button></header><div class="el-messages"></div><div class="el-quick"><button class="el-chip">Что сейчас съедает прибыль?</button><button class="el-chip">Разбери рекламу и прибыль вместе</button><button class="el-chip">Какие товары скоро закончатся?</button><button class="el-chip">Что с возвратами и отзывами?</button><button class="el-chip">Проверь цены и акции</button><button class="el-chip">Что важно по всему кабинету?</button></div><div class="el-controls"><label class="el-toggle"><input type="checkbox" data-web> Интернет</label><label class="el-toggle"><input type="checkbox" data-humor> Можно с юмором</label><span style="margin-left:auto">Действия — только с подтверждением</span></div><div class="el-composer"><textarea rows="1" placeholder="Напиши Элу..."></textarea><button class="el-send" title="Отправить">➤</button></div></aside>';
     document.body.appendChild(launcher); document.body.appendChild(root);
     launcher.onclick=open; root.querySelectorAll('[data-close]').forEach(function(x){x.onclick=close;});
     root.querySelector('[data-new]').onclick=newConversation;
@@ -88,7 +88,7 @@
   function render(){
     var box=document.querySelector('#elisei-el-root .el-messages'); if(!box)return;
     var items=state.messages.slice();
-    if(!items.length) items=[{role:'assistant',content:'Привет! Я Эл. Могу посмотреть текущий экран и выбранный период, разобраться с цифрами, поискать свежую информацию в интернете или просто обсудить, что происходит.'}];
+    if(!items.length) items=[{role:'assistant',content:'Привет! Я Эл. Теперь я вижу не только продажи: могу связать рекламу с прибылью, остатки с сезонностью, возвраты с отзывами и карточками, а цены — с маржой. Спроси меня про любой раздел кабинета.'}];
     box.innerHTML=items.map(function(m){
       var sources=(m.sources||[]).map(function(s){return '<a class="el-source" target="_blank" rel="noopener noreferrer" href="'+escapeHtml(s.url)+'">'+escapeHtml(s.title||s.url)+'</a>';}).join('');
       var setup=m.setupRequired?'<div class="el-setup">На backend Render добавь секрет <b>OPENAI_API_KEY</b>, затем перезапусти сервис.</div>':'';

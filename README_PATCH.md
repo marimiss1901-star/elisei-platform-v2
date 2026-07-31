@@ -1,32 +1,27 @@
-# ELISEI 5.3.20 — Эл видит весь бизнес
+# ELISEI 5.3.20A — исправление путей установщиков
 
-Самостоятельный патч: предыдущий установщик Эла запускать не требуется.
+Архив нужно распаковать и загрузить **содержимое архива в корень репозитория Елисея** без дополнительной внешней папки.
 
-## Что добавлено
-
-Эл получает отдельные read-only инструменты для продаж, рекламы, остатков, финансов, товаров, возвратов, отзывов, цен, сезонности, закупок и качества данных. Он умеет сопоставлять несколько модулей, а не отвечать только про продажи.
-
-## Backend Build Command
-
-```bash
-npm install && node apply-el-all-modules.mjs
-```
-
-Файл должен лежать в папке backend рядом с `package.json`.
-
-## Frontend Build Command
+## Frontend Render с Root Directory пустым / корень репозитория
 
 ```bash
 npm install && node apply-el-all-modules-frontend.mjs && npm run build
 ```
 
-Файл должен лежать в папке frontend рядом с `package.json`.
+## Frontend Render с Root Directory `frontend`
 
-## Проверка
+```bash
+npm install && node apply-el-all-modules-frontend.mjs && npm run build
+```
 
-- `/api/el/status` — версия должна быть `5.3.20`;
-- `/api/el/capabilities` — должно быть 12 модулей;
-- `/api/el/module/advertising?from=2026-07-01&to=2026-07-31`;
-- `/api/el/module/stocks?from=2026-07-01&to=2026-07-31`.
+## Backend Render с Root Directory `backend`
 
-Если конкретный модуль вернёт «данные не найдены», это означает, что его реальный маршрут в текущем backend называется иначе. В ответе будет список проверенных маршрутов — по нему добавляется точное сопоставление без переделки Эла.
+```bash
+npm install && node apply-el-all-modules.mjs
+```
+
+## Backend Render с Root Directory пустым / корень репозитория
+
+```bash
+npm install && node apply-el-all-modules-backend.mjs
+```
