@@ -20,6 +20,7 @@ import {
 } from './wb/adapters/promotion.js'
 import { buildProductMaster } from './wb/product-master.js'
 import { ensureSnapshotSchema, saveSnapshot, latestSnapshot } from './wb/snapshot-store.js'
+import elRouter from './routes/el.js'
 
 const { Pool } = pg
 const app = express()
@@ -857,7 +858,7 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     stockDetails: trustedStocks && stocks.length > 0,
     advertising: stageStatus.advertising?.available ?? (Array.isArray(advertisingData.campaigns) && advertisingData.campaigns.length > 0),
   }
-  const periodDays = 30
+  const periodDays = Math.max(1, Math.min(366, Number(data?.__periodDays || 30)))
   const productMap = new Map()
   const productAliases = new Map()
   const mergeUnique = (left = [], right = []) => uniqueIdentities([...(Array.isArray(left) ? left : []), ...(Array.isArray(right) ? right : [])])
@@ -2454,6 +2455,272 @@ app.post('/api/wb/disconnect', authRequired, async (req, res) => {
   else await pool.query(`DELETE FROM marketplace_connections WHERE user_id=$1 AND marketplace='wildberries'`, [req.auth.sub])
   res.json({ ok: true })
 })
+
+
+
+// ELISEI 5.4.1 — прямой read-only мост данных для Эла.
+// Эл получает данные того же пользователя и кабинета, что и основной интерфейс.
+function elPeriodRange(period = {}) {
+  const fromRaw = period?.from || period?.dateFrom || period?.date_from || period?.start || period?.startDate
+  const toRaw = period?.to || period?.dateTo || period?.date_to || period?.end || period?.endDate
+  const from = dateKey(fromRaw)
+  const to = dateKey(toRaw)
+  if (!from || !to) return null
+  const fromDate = new Date(`${from}T00:00:00.000Z`)
+  const toDate = new Date(`${to}T23:59:59.999Z`)
+  if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime()) || fromDate > toDate) return null
+  return { from, to, fromDate, toDate, days: Math.max(1, Math.round((toDate - fromDate) / 86400000) + 1) }
+}
+
+function elRowDate(row = {}) {
+  return dateKey(row.sale_dt || row.date || row.lastChangeDate || row.createdAt || row.updatedAt || row.orderDate)
+}
+
+function elFilterDataByPeriod(rawData = {}, period = {}) {
+  const range = elPeriodRange(period)
+  if (!range) return { data: { ...rawData }, range: null }
+  const inside = row => {
+    const key = elRowDate(row)
+    return key && key >= range.from && key <= range.to
+  }
+  return {
+    range,
+    data: {
+      ...rawData,
+      orders: Array.isArray(rawData.orders) ? rawData.orders.filter(inside) : [],
+      sales: Array.isArray(rawData.sales) ? rawData.sales.filter(inside) : [],
+      __periodDays: range.days,
+    },
+  }
+}
+
+function elCompactProduct(item = {}) {
+  return {
+    key: item.key || null,
+    nmID: item.nmID || null,
+    vendorCode: item.vendorCode || '',
+    title: item.title || 'Товар',
+    brand: item.brand || '',
+    stock: item.stock ?? null,
+    stockStatus: item.stockStatus || null,
+    stockCoverDays: item.stockCoverDays ?? null,
+    orders: item.ordersCount ?? 0,
+    sales: item.salesCount ?? 0,
+    returns: item.returnsCount ?? 0,
+    returnRate: item.returnRate ?? null,
+    revenue: item.revenue ?? null,
+    profit: item.profit ?? null,
+    margin: item.margin ?? null,
+    averagePrice: item.averagePrice ?? null,
+    unitCost: item.unitCost ?? null,
+    expenses: item.expenses ?? null,
+    commission: item.commission ?? null,
+    logistics: item.logistics ?? null,
+    advertising: item.advertising ?? item.adSpend ?? null,
+    adRevenue: item.adRevenue ?? null,
+    adOrders: item.adOrders ?? null,
+    breakevenPrice: item.breakevenPrice ?? null,
+    targetPrice: item.targetPrice ?? null,
+    recommendation: item.recommendation || null,
+  }
+}
+
+function elTopProducts(products = [], score, limit = 35) {
+  return [...products]
+    .sort((a, b) => Number(score(b) || 0) - Number(score(a) || 0))
+    .slice(0, limit)
+    .map(elCompactProduct)
+}
+
+function elDataCoverage(connection, core, range) {
+  return {
+    requestedPeriod: range ? { from: range.from, to: range.to, days: range.days } : null,
+    salesAndOrdersFilteredByRequestedPeriod: Boolean(range),
+    advertisingPeriod: core?.advertising?.period || null,
+    note: core?.advertising?.period && range
+      ? 'Реклама хранится в периоде последнего снимка WB; не приравнивай её автоматически к выбранному диапазону, если даты не совпадают.'
+      : null,
+    lastSync: connection?.last_sync_at || null,
+  }
+}
+
+async function resolveElConnection(userId, cabinetId) {
+  if (!userId) return null
+  const candidate = String(cabinetId || '').trim()
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(candidate)) {
+    const exact = await getConnection(userId, candidate)
+    if (exact) return exact
+  }
+  return getConnection(userId)
+}
+
+async function buildElModuleData({ req, identity, period, module, focus }) {
+  const userId = req?.auth?.sub || identity?.userId
+  const connection = await resolveElConnection(userId, identity?.cabinetId)
+  if (!connection) {
+    return { available: false, module, warning: 'Кабинет Wildberries не подключён.', focus }
+  }
+
+  const settings = await getBusinessSettings(userId)
+  const filtered = elFilterDataByPeriod(connection.data || {}, period || {})
+  const core = buildCoreAnalytics(filtered.data, settings)
+  const products = Array.isArray(core.products) ? core.products : []
+  const syncStates = (await getSyncStates(connection.id)).map(publicSyncState)
+  const base = {
+    available: true,
+    module,
+    focus,
+    cabinet: { id: connection.id, sellerId: connection.seller_id || null },
+    period: filtered.range ? { from: filtered.range.from, to: filtered.range.to, days: filtered.range.days } : { days: core.periodDays },
+    coverage: elDataCoverage(connection, core, filtered.range),
+    availability: core.availability,
+    lastSync: connection.last_sync_at || null,
+  }
+
+  if (module === 'overview') {
+    return {
+      ...base,
+      summary: core.summary,
+      topRecommendations: (core.recommendations || []).slice(0, 15),
+      criticalProducts: products
+        .filter(item => item.profit < 0 || item.stockStatus === 'Заканчивается' || item.returnRate >= 20)
+        .slice(0, 30)
+        .map(elCompactProduct),
+      syncWarnings: core.syncWarnings || [],
+    }
+  }
+  if (module === 'sales') {
+    return {
+      ...base,
+      summary: {
+        revenue: core.summary.revenue, orders: core.summary.orders, sales: core.summary.sales,
+        returns: core.summary.returns, returnRate: core.summary.returnRate,
+      },
+      dailyTrend: core.dailyTrend || [],
+      topByRevenue: elTopProducts(products, item => item.revenue),
+      topBySales: elTopProducts(products, item => item.salesCount),
+    }
+  }
+  if (module === 'advertising') {
+    return {
+      ...base,
+      summary: {
+        spend: core.summary.advertising,
+        source: core.summary.advertisingSource,
+        operatingProfit: core.summary.operatingProfit,
+        margin: core.summary.margin,
+      },
+      advertising: {
+        totals: core.advertising?.totals || {},
+        period: core.advertising?.period || null,
+        statsAvailable: Boolean(core.advertising?.statsAvailable),
+        campaigns: (core.advertising?.campaigns || []).slice(0, 80),
+        productRows: (core.advertising?.productRows || []).slice(0, 100),
+      },
+      productsWithAds: products.filter(item => Number(item.advertising || item.adSpend || 0) > 0).slice(0, 80).map(elCompactProduct),
+    }
+  }
+  if (module === 'stocks') {
+    return {
+      ...base,
+      summary: {
+        stockUnits: core.summary.stockUnits, zeroStock: core.summary.zeroStock, lowStock: core.summary.lowStock,
+        slowStock: core.summary.slowStock, stockCoverDays: core.summary.stockCoverDays,
+      },
+      stockMeta: core.stockMeta || null,
+      warehouses: core.warehouses || [],
+      lowStockProducts: products.filter(item => ['Нет остатка', 'Заканчивается'].includes(item.stockStatus)).slice(0, 80).map(elCompactProduct),
+      slowStockProducts: products.filter(item => ['Избыток', 'Без движения'].includes(item.stockStatus)).slice(0, 80).map(elCompactProduct),
+    }
+  }
+  if (module === 'finance') {
+    return {
+      ...base,
+      summary: core.summary,
+      settings: core.settings,
+      lossMakingProducts: products.filter(item => item.profit != null && item.profit < 0).sort((a,b) => a.profit-b.profit).slice(0, 80).map(elCompactProduct),
+      topProfitProducts: elTopProducts(products.filter(item => item.profit != null), item => item.profit),
+      missingCostProducts: products.filter(item => !Number(item.unitCost || 0)).slice(0, 80).map(elCompactProduct),
+    }
+  }
+  if (module === 'products') {
+    return {
+      ...base,
+      summary: { activeProducts: core.summary.activeProducts, stockUnits: core.summary.stockUnits },
+      products: products.slice(0, 150).map(elCompactProduct),
+      recommendations: (core.recommendations || []).slice(0, 30),
+    }
+  }
+  if (module === 'returns') {
+    return {
+      ...base,
+      summary: { returns: core.summary.returns, returnRate: core.summary.returnRate, sales: core.summary.sales },
+      highestReturnRate: products.filter(item => Number(item.returnsCount || 0) > 0)
+        .sort((a,b) => Number(b.returnRate || 0)-Number(a.returnRate || 0)).slice(0, 80).map(elCompactProduct),
+    }
+  }
+  if (module === 'reviews') {
+    const reviews = Array.isArray(connection.data?.reviews) ? connection.data.reviews
+      : Array.isArray(connection.data?.feedbacks) ? connection.data.feedbacks : []
+    return {
+      ...base,
+      available: reviews.length > 0,
+      reviews: reviews.slice(0, 120),
+      warning: reviews.length ? null : 'Отзывы и вопросы покупателей пока не синхронизированы с WB. Эл не будет выдумывать причины отзывов.',
+      relatedReturns: products.filter(item => Number(item.returnsCount || 0) > 0).slice(0, 60).map(elCompactProduct),
+    }
+  }
+  if (module === 'pricing') {
+    return {
+      ...base,
+      settings: core.settings,
+      lossMakingProducts: products.filter(item => item.profit != null && item.profit < 0).slice(0, 80).map(elCompactProduct),
+      pricingProducts: products.filter(item => item.averagePrice || item.breakevenPrice || item.targetPrice).slice(0, 120).map(elCompactProduct),
+    }
+  }
+  if (module === 'seasonality') {
+    return {
+      ...base,
+      dailyTrend: core.dailyTrend || [],
+      categories: core.categories || [],
+      products: elTopProducts(products, item => item.salesCount, 80),
+      warning: 'Сейчас сезонность строится по доступной истории кабинета и внешним данным из интернет-поиска. Для годовой сезонности потребуется накопленная история не менее 12 месяцев.',
+    }
+  }
+  if (module === 'procurement') {
+    return {
+      ...base,
+      candidates: products.filter(item => item.stockStatus === 'Заканчивается' && Number(item.salesCount || 0) > 0)
+        .sort((a,b) => Number(a.stockCoverDays ?? 9999)-Number(b.stockCoverDays ?? 9999)).slice(0, 100).map(elCompactProduct),
+      exclusions: products.filter(item => ['Избыток','Без движения'].includes(item.stockStatus) || (item.profit != null && item.profit < 0)).slice(0, 100).map(elCompactProduct),
+      recommendations: (core.recommendations || []).filter(item => item.type === 'stock').slice(0, 40),
+    }
+  }
+  if (module === 'sync') {
+    return {
+      ...base,
+      syncStates,
+      syncWarnings: core.syncWarnings || [],
+      stockMeta: core.stockMeta || null,
+      stages: core.stageStatus || {},
+      history: (connection.sync_history || []).slice(0, 20),
+    }
+  }
+  return { ...base, summary: core.summary }
+}
+
+app.locals.getElModuleData = buildElModuleData
+app.locals.getElBusinessContext = async options => {
+  const overview = await buildElModuleData({ ...options, module: 'overview', focus: options?.question || 'Общий контекст' })
+  return {
+    overview,
+    page: options?.page || null,
+    requestedPeriod: options?.period || null,
+    rule: 'Используй только подтверждённые данные. Для другого раздела вызови инструмент соответствующего модуля.',
+  }
+}
+
+app.use('/api/el', authRequired, elRouter)
 
 app.use((error, _req, res, _next) => res.status(error.status || 500).json({ error: error.message || 'Внутренняя ошибка' }))
 
