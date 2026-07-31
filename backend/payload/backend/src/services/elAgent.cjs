@@ -4,16 +4,47 @@ const crypto = require('node:crypto');
 const { requestResponses } = require('./openaiResponsesClient.cjs');
 const { uniqueSources, outputText } = require('./elSources.cjs');
 const { buildInstructions } = require('./elPrompt.cjs');
+const { moduleNames } = require('./elModuleRegistry.cjs');
 
-const MAX_TOOL_ROUNDS = 4;
+const MAX_TOOL_ROUNDS = 6;
 
 function functionTools() {
   return [
     {
       type: 'function',
+      name: 'get_elisei_module_data',
+      description: 'Получить актуальные read-only данные одного модуля ELISEI за выбранный период. Используй, когда вопрос касается рекламы, остатков, финансов, товаров, возвратов, отзывов, цен, сезонности, закупок, синхронизаций или продаж.',
+      parameters: {
+        type: 'object',
+        properties: {
+          module: { type: 'string', enum: moduleNames() },
+          focus: { type: 'string', description: 'Какой конкретный вопрос нужно проверить в этом модуле.' },
+        },
+        required: ['module', 'focus'],
+        additionalProperties: false,
+      },
+      strict: true,
+    },
+    {
+      type: 'function',
+      name: 'compare_elisei_modules',
+      description: 'Сопоставить данные нескольких модулей ELISEI, чтобы найти настоящую причину проблемы: например реклама + прибыль + остатки или возвраты + отзывы + карточка товара.',
+      parameters: {
+        type: 'object',
+        properties: {
+          modules: { type: 'array', items: { type: 'string', enum: moduleNames() }, minItems: 2, maxItems: 4 },
+          focus: { type: 'string' },
+        },
+        required: ['modules', 'focus'],
+        additionalProperties: false,
+      },
+      strict: true,
+    },
+    {
+      type: 'function',
       name: 'get_business_snapshot',
-      description: 'Получить доступный контекст выбранного кабинета, текущей страницы и периода ELISEI.',
-      parameters: { type: 'object', properties: { focus: { type: 'string', description: 'Что именно нужно проверить в данных.' } }, required: ['focus'], additionalProperties: false },
+      description: 'Получить общий доступный контекст выбранного кабинета, страницы и периода ELISEI.',
+      parameters: { type: 'object', properties: { focus: { type: 'string' } }, required: ['focus'], additionalProperties: false },
       strict: true,
     },
     {
@@ -27,7 +58,7 @@ function functionTools() {
       type: 'function',
       name: 'forget_user_memory',
       description: 'Удалить сохранённую память по просьбе пользователя.',
-      parameters: { type: 'object', properties: { query: { type: 'string', description: 'Текст или тема, которую нужно забыть.' } }, required: ['query'], additionalProperties: false },
+      parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false },
       strict: true,
     },
   ];
@@ -43,6 +74,14 @@ function normalizeHistory(history) {
 async function executeTool(call, deps) {
   let args = {};
   try { args = JSON.parse(call.arguments || '{}'); } catch { args = {}; }
+  if (call.name === 'get_elisei_module_data') {
+    if (!deps.dataBridge) return { ok: false, error: 'Мост данных ELISEI не подключён.' };
+    return deps.dataBridge.getModule(args.module, args.focus);
+  }
+  if (call.name === 'compare_elisei_modules') {
+    if (!deps.dataBridge) return { ok: false, error: 'Мост данных ELISEI не подключён.' };
+    return { focus: args.focus, modules: await deps.dataBridge.getMany(args.modules, args.focus), note: 'Сопоставь причины между модулями; корреляцию не называй причинностью без подтверждения.' };
+  }
   if (call.name === 'get_business_snapshot') {
     return { focus: args.focus, context: deps.context, note: 'Это снимок доступных данных; отсутствующие поля нельзя выдумывать.' };
   }
@@ -65,10 +104,7 @@ async function runElAgent(options) {
     tools.unshift({ type: 'web_search', search_context_size: process.env.ELISEI_WEB_SEARCH_CONTEXT || 'medium' });
   }
 
-  let input = [
-    ...normalizeHistory(options.history),
-    { role: 'user', content: String(options.message || '').slice(0, 12000) },
-  ];
+  let input = [...normalizeHistory(options.history), { role: 'user', content: String(options.message || '').slice(0, 12000) }];
   const instructions = buildInstructions(options);
   let response;
   let toolRounds = 0;
@@ -83,7 +119,7 @@ async function runElAgent(options) {
       tool_choice: 'auto',
       reasoning: { effort: reasoningEffort },
       store: false,
-      max_output_tokens: Number(process.env.ELISEI_AI_MAX_OUTPUT_TOKENS || 2200),
+      max_output_tokens: Number(process.env.ELISEI_AI_MAX_OUTPUT_TOKENS || 2600),
     });
 
     const calls = (response.output || []).filter((item) => item?.type === 'function_call');
@@ -91,7 +127,7 @@ async function runElAgent(options) {
     const outputs = [];
     for (const call of calls) {
       const result = await executeTool(call, options);
-      toolTrace.push({ name: call.name, ok: !result?.error });
+      toolTrace.push({ name: call.name, module: (() => { try { return JSON.parse(call.arguments || '{}').module; } catch { return null; } })(), ok: !result?.error });
       outputs.push({ type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(result) });
     }
     input = [...input, ...(response.output || []), ...outputs];
@@ -101,14 +137,11 @@ async function runElAgent(options) {
   const text = outputText(response) || 'Я всё проверил, но не смог сформировать ответ. Попробуй переформулировать вопрос.';
   const sources = uniqueSources(response);
   return {
-    id: response?.id || crypto.randomUUID(),
-    text,
-    sources,
+    id: response?.id || crypto.randomUUID(), text, sources,
     usedWeb: sources.length > 0 || (response?.output || []).some((item) => item?.type === 'web_search_call'),
-    toolTrace,
-    model,
-    usage: response?.usage || null,
+    toolTrace, model, usage: response?.usage || null,
+    modulesUsed: [...new Set(toolTrace.map((item) => item.module).filter(Boolean))],
   };
 }
 
-module.exports = { runElAgent, functionTools, normalizeHistory };
+module.exports = { runElAgent, functionTools, normalizeHistory, executeTool };

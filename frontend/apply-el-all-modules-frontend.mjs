@@ -1,0 +1,25 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const patchRoot = path.dirname(fileURLToPath(import.meta.url));
+const root = process.cwd();
+const candidates = ['frontend/index.html','frontend_v2/index.html','client/index.html','web/index.html','app/index.html','index.html'];
+const indexRel = candidates.find((item) => fs.existsSync(path.join(root, item)));
+if (!indexRel) throw new Error('Не найден index.html frontend Елисея. Запусти установщик из папки frontend или корня монорепозитория.');
+const indexFile = path.join(root, indexRel);
+const frontRoot = path.dirname(indexFile);
+const publicDir = path.join(frontRoot, 'public');
+fs.mkdirSync(publicDir, { recursive: true });
+for (const name of ['elisei-el.js','elisei-el.css']) {
+  fs.copyFileSync(path.join(patchRoot, 'payload/frontend/public', name), path.join(publicDir, name));
+}
+const backup = `${indexFile}.el-5.3.20-backup`;
+if (!fs.existsSync(backup)) fs.copyFileSync(indexFile, backup);
+let html = fs.readFileSync(indexFile, 'utf8');
+html = html.replace(/\s*<link[^>]+elisei-el\.css[^>]*>\s*/gi, '\n').replace(/\s*<script[^>]+elisei-el\.js[^>]*><\/script>\s*/gi, '\n');
+const injection = '\n  <!-- ELISEI 5.3.20 EL WHOLE BUSINESS BRAIN -->\n  <link rel="stylesheet" href="/elisei-el.css?v=5.3.20">\n  <script src="/elisei-el.js?v=5.3.20" defer></script>\n';
+html = /<\/head>/i.test(html) ? html.replace(/<\/head>/i, `${injection}</head>`) : `${injection}${html}`;
+fs.writeFileSync(indexFile, html);
+fs.writeFileSync(path.join(frontRoot, 'ELISEI_BUILD_5_3_20_EL_FRONTEND.txt'), `ELISEI 5.3.20 EL FRONTEND\nApplied: ${new Date().toISOString()}\n`);
+console.log(`ELISEI 5.3.20 frontend установлен в ${indexRel}.`);

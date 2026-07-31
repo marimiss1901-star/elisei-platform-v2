@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-node --check "$ROOT/payload/frontend/public/elisei-el.js"
-for f in "$ROOT"/payload/backend/src/**/*.cjs; do node --check "$f"; done
-node "$ROOT/tests/test-sources.cjs"
-node "$ROOT/tests/test-agent.cjs"
-bash "$ROOT/tests/test-installer.sh"
-echo 'ALL TESTS PASSED'
+node --check ../backend/apply-el-all-modules.mjs
+node --check ../frontend/apply-el-all-modules-frontend.mjs
+for f in ../backend/payload/backend/src/routes/*.cjs ../backend/payload/backend/src/services/*.cjs ../frontend/payload/frontend/public/elisei-el.js; do node --check "$f"; done
+node test-capabilities.cjs
+node test-agent.cjs
