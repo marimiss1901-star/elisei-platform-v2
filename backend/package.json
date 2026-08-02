@@ -1,13 +1,13 @@
 {
   "name": "elisei-wb-backend",
-  "version": "2.8.1",
+  "version": "2.9.0",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test:stocks": "node tests/wb-integration-core.test.mjs",
-    "test": "node tests/wb-integration-core.test.mjs"
+    "test": "node tests/wb-integration-core.test.mjs && node tests/wb-stream-store.test.mjs && node tests/wb-stream-recovery.test.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",

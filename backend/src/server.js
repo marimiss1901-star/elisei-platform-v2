@@ -20,6 +20,7 @@ import {
 } from './wb/adapters/promotion.js'
 import { buildProductMaster } from './wb/product-master.js'
 import { ensureSnapshotSchema, saveSnapshot, latestSnapshot } from './wb/snapshot-store.js'
+import { ensureStreamSchema, saveStreamData, hydrateStreamData, streamCount as persistedStreamCount, WB_STREAMS } from './wb/stream-store.js'
 import elRouter from './routes/el.js'
 
 const { Pool } = pg
@@ -170,6 +171,7 @@ async function initDatabase() {
     CREATE INDEX IF NOT EXISTS el_entitlements_status_idx ON el_entitlements(status, tier);
   `)
   await ensureSnapshotSchema(pool)
+  await ensureStreamSchema(pool)
   await migrateLegacyWbTokens()
   await ensurePrimaryTokens()
 }
@@ -866,6 +868,53 @@ function rebuildUnifiedProductData(data = {}) {
   })
   data.products = data.productMaster
   return data
+}
+
+
+function compactConnectionData(data = {}, streamSources = {}) {
+  const compact = { ...(data && typeof data === 'object' ? data : {}) }
+  for (const stream of WB_STREAMS) delete compact[stream]
+  delete compact.productMaster
+  delete compact.stockAllocation
+  compact.dataManifest = {
+    schemaVersion: 2,
+    storage: 'wb_stream_data',
+    updatedAt: new Date().toISOString(),
+    streams: Object.fromEntries(WB_STREAMS.map(stream => [stream, {
+      count: Number(streamSources?.[stream]?.count || 0),
+      source: streamSources?.[stream]?.source || 'stream_store',
+      updatedAt: streamSources?.[stream]?.updatedAt || null,
+      checksum: streamSources?.[stream]?.checksum || null,
+    }])),
+  }
+  return compact
+}
+
+function streamSourcesFromData(data = {}, source = 'sync') {
+  return Object.fromEntries(WB_STREAMS.map(stream => [stream, {
+    source,
+    count: persistedStreamCount(stream, data?.[stream]),
+    updatedAt: new Date().toISOString(),
+    checksum: null,
+  }]))
+}
+
+async function canonicalConnectionData(connection, { repair = true, persistManifest = true } = {}) {
+  if (!connection) return { data: {}, sources: {}, recovered: [] }
+  const hydrated = await hydrateStreamData(pool, connection.id, connection.data || {}, { repair })
+  const data = hydrated.data
+  if (Array.isArray(data.stocks) && data.stocks.length && !isTrustedStockSnapshot(data)) {
+    data.stockMeta = buildWarehouseMetaStrict(data.stocks, { recovered: true })
+  }
+  rebuildUnifiedProductData(data)
+  if (persistManifest && (hydrated.recovered.length || !connection.data?.dataManifest)) {
+    await pool.query(`
+      UPDATE marketplace_connections
+      SET data=$1::jsonb,updated_at=NOW()
+      WHERE id=$2
+    `, [JSON.stringify(compactConnectionData(data, hydrated.sources)), connection.id])
+  }
+  return hydrated
 }
 
 function buildCoreAnalytics(data = {}, rawSettings = {}) {
@@ -2008,6 +2057,19 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       })
     }
 
+    await saveStreamData(pool, {
+      connectionId: connection.id,
+      stream: stage,
+      payload: value,
+      metadata: {
+        endpoint: snapshot?.endpoint || stage,
+        validation: snapshot?.validation || meta || {},
+        tokenId: selected.row.id,
+        lastSuccessAt: new Date().toISOString(),
+      },
+      source: 'sync',
+    })
+
     const count = stageCount(stage, value)
     const stateMetadata = {
       tokenId:selected.row.id,
@@ -2092,7 +2154,7 @@ app.get('/health', async (_req, res) => {
   res.json({
     ok: true,
     service: 'elisei-api',
-    version: '2.8.0',
+    version: '2.9.0',
     database,
     backgroundWorker: {
       running: backgroundWorkerState.running,
@@ -2254,7 +2316,8 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
   try {
     const tokens = await getWbTokens(req.auth.sub, connection.id)
     if (!tokens.length) return res.status(400).json({ error: 'Добавьте хотя бы один API-токен Wildberries' })
-    const data = { ...(connection.data || {}) }
+    const canonical = await canonicalConnectionData(connection, { repair:true, persistManifest:false })
+    const data = canonical.data
     const stageStatus = { ...(data.stageStatus || {}) }
     const warnings = []
     const results = []
@@ -2308,7 +2371,8 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
       status: hasSuccess ? 'success' : 'partial', durationMs: Date.now() - startedAt, counts, warnings,
       stages: Object.fromEntries(results.map(result => [result.stage, result.status])),
     })
-    const updated = await pool.query(`UPDATE marketplace_connections SET data=$1::jsonb,sync_history=$2::jsonb,last_sync_at=CASE WHEN $3 THEN NOW() ELSE last_sync_at END,updated_at=NOW(),status='connected' WHERE id=$4 AND user_id=$5 RETURNING *`, [JSON.stringify(data), JSON.stringify(history), hasSuccess, connection.id, req.auth.sub])
+    const compactData = compactConnectionData(data, streamSourcesFromData(data, 'sync'))
+    const updated = await pool.query(`UPDATE marketplace_connections SET data=$1::jsonb,sync_history=$2::jsonb,last_sync_at=CASE WHEN $3 THEN NOW() ELSE last_sync_at END,updated_at=NOW(),status='connected' WHERE id=$4 AND user_id=$5 RETURNING *`, [JSON.stringify(compactData), JSON.stringify(history), hasSuccess, connection.id, req.auth.sub])
     const row = updated.rows[0]
     const settings = await getBusinessSettings(req.auth.sub)
     const core = buildCoreAnalytics(data, settings)
@@ -2326,27 +2390,36 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
 app.get('/api/wb/dashboard/:id', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, req.params.id)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
-  const settings = await getBusinessSettings(req.auth.sub)
-  res.json({ dashboard: buildDashboard(connection.data || {}, settings), lastSync: connection.last_sync_at || null })
+  const [{ data, sources, recovered }, settings] = await Promise.all([
+    canonicalConnectionData(connection),
+    getBusinessSettings(req.auth.sub),
+  ])
+  res.json({ dashboard: buildDashboard(data, settings), dataSources:sources, recovered, lastSync: connection.last_sync_at || null })
 })
 
 app.get('/api/wb/core/:id', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, req.params.id)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
-  const settings = await getBusinessSettings(req.auth.sub)
-  res.json({ core: buildCoreAnalytics(connection.data || {}, settings), lastSync: connection.last_sync_at || null })
+  const [{ data, sources, recovered }, settings] = await Promise.all([
+    canonicalConnectionData(connection),
+    getBusinessSettings(req.auth.sub),
+  ])
+  res.json({ core: buildCoreAnalytics(data, settings), dataSources:sources, recovered, lastSync: connection.last_sync_at || null })
 })
 
 app.get('/api/wb/advertising/:id', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, req.params.id)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
-  const advertising = connection.data?.advertising && typeof connection.data.advertising === 'object'
-    ? connection.data.advertising
+  const canonical = await canonicalConnectionData(connection)
+  const advertising = canonical.data?.advertising && typeof canonical.data.advertising === 'object'
+    ? canonical.data.advertising
     : { campaigns: [], totals: {}, period: null, truncated: false }
   const stateResult = await pool.query('SELECT * FROM wb_sync_states WHERE connection_id=$1 AND stage=$2', [connection.id, 'advertising'])
   res.json({
     advertising,
     meta: advertising.meta || buildAdvertisingMeta(advertising),
+    dataSource:canonical.sources?.advertising || null,
+    recovered:canonical.recovered || [],
     syncState: stateResult.rows[0] ? publicSyncState(stateResult.rows[0]) : null,
     lastSync: connection.last_sync_at || null,
   })
@@ -2398,12 +2471,17 @@ app.post('/api/wb/stocks/:id/repair', authRequired, async (req, res) => {
       })
 
       const refreshed = await getConnection(req.auth.sub, connection.id)
-      const [settings, states] = await Promise.all([getBusinessSettings(req.auth.sub), getSyncStates(connection.id)])
+      const [settings, states, canonical] = await Promise.all([
+        getBusinessSettings(req.auth.sub),
+        getSyncStates(connection.id),
+        canonicalConnectionData(refreshed),
+      ])
       return res.json({
         ok:true, queued:false, repaired:true,
         message:`Детализация восстановлена: ${persisted.persistedRows} строк, ${Math.round(persisted.persistedQuantity)} шт.`,
-        core:buildCoreAnalytics(refreshed.data || {}, settings),
-        dashboard:buildDashboard(refreshed.data || {}, settings),
+        core:buildCoreAnalytics(canonical.data, settings),
+        dashboard:buildDashboard(canonical.data, settings),
+        dataSources:canonical.sources,
         syncStates:states.map(publicSyncState),
         lastSync:refreshed.last_sync_at || null,
       })
@@ -2434,15 +2512,16 @@ app.get('/api/business/settings', authRequired, async (req, res) => {
 app.put('/api/business/settings', authRequired, async (req, res) => {
   const settings = await saveBusinessSettings(req.auth.sub, req.body || {})
   const connection = await getConnection(req.auth.sub)
-  res.json({ settings, core: connection ? buildCoreAnalytics(connection.data || {}, settings) : null })
+  const canonical = connection ? await canonicalConnectionData(connection) : null
+  res.json({ settings, core: canonical ? buildCoreAnalytics(canonical.data, settings) : null })
 })
 
 app.get('/api/wb/diagnostics/:id', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, req.params.id)
   if (!connection) return res.status(404).json({ error:'Подключение не найдено' })
-  const streams = ['products','orders','sales','stocks','advertising']
+  const canonical = await canonicalConnectionData(connection)
   const snapshots = {}
-  for (const stream of streams) {
+  for (const stream of WB_STREAMS) {
     const snapshot = await latestSnapshot(pool, connection.id, stream)
     snapshots[stream] = snapshot ? {
       id:snapshot.id,
@@ -2453,17 +2532,45 @@ app.get('/api/wb/diagnostics/:id', authRequired, async (req, res) => {
       createdAt:snapshot.created_at,
     } : null
   }
+  const master = Array.isArray(canonical.data?.productMaster) ? canonical.data.productMaster : []
   res.json({
     snapshots,
-    stockMeta:connection.data?.stockMeta || null,
-    stockAllocation:connection.data?.stockAllocation?.diagnostics || null,
-    advertisingMeta:connection.data?.advertising?.meta || null,
+    streamStore:canonical.sources,
+    recovered:canonical.recovered,
+    stockMeta:canonical.data?.stockMeta || null,
+    stockAllocation:canonical.data?.stockAllocation?.diagnostics || null,
+    advertisingMeta:canonical.data?.advertising?.meta || null,
     productMaster:{
-      products:Array.isArray(connection.data?.productMaster) ? connection.data.productMaster.length : 0,
-      withBarcodes:(connection.data?.productMaster || []).filter(item => Array.isArray(item?.barcodes) && item.barcodes.length).length,
-      withMappedStock:(connection.data?.productMaster || []).filter(item => item?.stockMapped).length,
-      withAdvertising:(connection.data?.productMaster || []).filter(item => item?.advertising).length,
+      products:master.length,
+      withBarcodes:master.filter(item => Array.isArray(item?.barcodes) && item.barcodes.length).length,
+      withMappedStock:master.filter(item => item?.stockMapped).length,
+      withAdvertising:master.filter(item => item?.advertising).length,
     },
+  })
+})
+
+app.post('/api/wb/data-repair/:id', authRequired, async (req, res) => {
+  const connection = await getConnection(req.auth.sub, req.params.id)
+  if (!connection) return res.status(404).json({ error:'Подключение не найдено' })
+  const canonical = await canonicalConnectionData(connection, { repair:true, persistManifest:true })
+  const settings = await getBusinessSettings(req.auth.sub)
+  const core = buildCoreAnalytics(canonical.data, settings)
+  res.json({
+    ok:true,
+    message:canonical.recovered.length
+      ? `Восстановлено потоков: ${canonical.recovered.length}`
+      : 'Потоки данных уже находятся в едином хранилище.',
+    recovered:canonical.recovered,
+    dataSources:canonical.sources,
+    counts:{
+      products:Array.isArray(canonical.data.products) ? canonical.data.products.length : 0,
+      orders:Array.isArray(canonical.data.orders) ? canonical.data.orders.length : 0,
+      sales:Array.isArray(canonical.data.sales) ? canonical.data.sales.length : 0,
+      stocks:Array.isArray(canonical.data.stocks) ? canonical.data.stocks.length : 0,
+      advertising:Array.isArray(canonical.data.advertising?.campaigns) ? canonical.data.advertising.campaigns.length : 0,
+    },
+    dashboard:buildDashboard(canonical.data, settings),
+    core,
   })
 })
 
@@ -2476,7 +2583,8 @@ app.get('/api/wb/sync-history/:id', authRequired, async (req, res) => {
 app.get('/api/wb/products/:id', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, req.params.id)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
-  res.json({ products: connection.data?.products || [], lastSync: connection.last_sync_at || null })
+  const canonical = await canonicalConnectionData(connection)
+  res.json({ products: canonical.data?.products || [], dataSource:canonical.sources?.products || null, recovered:canonical.recovered || [], lastSync: connection.last_sync_at || null })
 })
 
 app.post('/api/wb/disconnect', authRequired, async (req, res) => {
@@ -2592,7 +2700,8 @@ async function buildElModuleData({ req, identity, period, module, focus }) {
   }
 
   const settings = await getBusinessSettings(userId)
-  const filtered = elFilterDataByPeriod(connection.data || {}, period || {})
+  const canonical = await canonicalConnectionData(connection)
+  const filtered = elFilterDataByPeriod(canonical.data || {}, period || {})
   const core = buildCoreAnalytics(filtered.data, settings)
   const products = Array.isArray(core.products) ? core.products : []
   const syncStates = (await getSyncStates(connection.id)).map(publicSyncState)
@@ -2922,7 +3031,13 @@ async function persistStockSnapshot(connectionId, rows, stockMeta) {
     const current = await client.query('SELECT data FROM marketplace_connections WHERE id=$1 FOR UPDATE', [connectionId])
     if (!current.rowCount) throw new Error('Подключение WB не найдено при сохранении остатков')
     const data = { ...(current.rows[0].data || {}) }
-    data.stocks = normalizedRows
+    const saved = await saveStreamData(client, {
+      connectionId,
+      stream:'stocks',
+      payload:normalizedRows,
+      metadata:normalizedMeta,
+      source:'background_sync',
+    })
     data.stockMeta = normalizedMeta
     data.stageStatus = {
       ...(data.stageStatus || {}),
@@ -2932,21 +3047,26 @@ async function persistStockSnapshot(connectionId, rows, stockMeta) {
       },
     }
     data.syncWarnings = (Array.isArray(data.syncWarnings) ? data.syncWarnings : []).filter(text => !String(text).startsWith('Остатки:'))
-    rebuildUnifiedProductData(data)
-    const updated = await client.query(`
+    const existingSources = data?.dataManifest?.streams && typeof data.dataManifest.streams === 'object'
+      ? data.dataManifest.streams
+      : {}
+    const sources = {
+      ...existingSources,
+      stocks:{ source:'background_sync', count:Number(saved.row_count || normalizedRows.length), updatedAt:saved.updated_at || new Date().toISOString(), checksum:saved.checksum || null },
+    }
+    const compactData = compactConnectionData(data, sources)
+    await client.query(`
       UPDATE marketplace_connections
       SET data=$1::jsonb,last_sync_at=NOW(),updated_at=NOW(),status='connected'
       WHERE id=$2
-      RETURNING jsonb_array_length(COALESCE(data->'stocks','[]'::jsonb)) AS persisted_rows,
-                COALESCE((data->'stockMeta'->>'totalQuantity')::numeric,0) AS persisted_quantity
-    `, [JSON.stringify(data), connectionId])
-    const persistedRows = Number(updated.rows[0]?.persisted_rows || 0)
-    const persistedQuantity = Number(updated.rows[0]?.persisted_quantity || 0)
-    if (persistedRows !== normalizedRows.length || Math.round(persistedQuantity) !== Math.round(Number(normalizedMeta.totalQuantity || 0))) {
-      throw new Error(`Остатки WB не прошли проверку сохранения: ${persistedRows}/${normalizedRows.length} строк, ${persistedQuantity}/${normalizedMeta.totalQuantity || 0} шт.`)
+    `, [JSON.stringify(compactData), connectionId])
+    const persistedRows = Number(saved.row_count || 0)
+    const persistedQuantity = Number(normalizedMeta.totalQuantity || 0)
+    if (persistedRows !== normalizedRows.length) {
+      throw new Error(`Остатки WB не прошли проверку сохранения: ${persistedRows}/${normalizedRows.length} строк.`)
     }
     await client.query('COMMIT')
-    return { data, persistedRows, persistedQuantity }
+    return { data:compactData, persistedRows, persistedQuantity }
   } catch (error) {
     await client.query('ROLLBACK')
     throw error
@@ -3048,7 +3168,8 @@ async function processDueDeferredStages() {
       const connection = connectionResult.rows[0]
       if (!connection) continue
       const tokens = await getWbTokens(row.user_id, row.connection_id)
-      const data = { ...(connection.data || {}) }
+      const canonical = await canonicalConnectionData(connection, { repair:true, persistManifest:false })
+      const data = canonical.data
       const result = await runSyncStage({ connection, tokens, data, stage:row.stage, deadlineAt:Date.now() + 85000 })
       const stageStatus = { ...(data.stageStatus || {}) }
       stageStatus[row.stage] = {
@@ -3073,12 +3194,13 @@ async function processDueDeferredStages() {
         warnings:result.warning ? [result.warning] : [],
         stages:{ [row.stage]:result.status },
       })
+      const compactData = compactConnectionData(data, streamSourcesFromData(data, result.status === 'success' ? 'sync' : 'stream_store'))
       await pool.query(`
         UPDATE marketplace_connections
         SET data=$1::jsonb,sync_history=$2::jsonb,last_sync_at=CASE WHEN $3 THEN NOW() ELSE last_sync_at END,
             updated_at=NOW(),status='connected'
         WHERE id=$4 AND user_id=$5
-      `, [JSON.stringify(data), JSON.stringify(history), result.status === 'success', row.connection_id, row.user_id])
+      `, [JSON.stringify(compactData), JSON.stringify(history), result.status === 'success', row.connection_id, row.user_id])
     } catch (error) {
       console.warn(`Deferred WB stage ${row.stage} failed:`, error.message)
     } finally {
