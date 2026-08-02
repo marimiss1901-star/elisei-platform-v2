@@ -8,8 +8,8 @@ const { moduleNames, detectModules } = require('./elModuleRegistry.cjs');
 
 const MAX_TOOL_ROUNDS = 6;
 
-function functionTools() {
-  return [
+function functionTools(options = {}) {
+  const tools = [
     {
       type: 'function',
       name: 'get_elisei_module_data',
@@ -47,21 +47,26 @@ function functionTools() {
       parameters: { type: 'object', properties: { focus: { type: 'string' } }, required: ['focus'], additionalProperties: false },
       strict: true,
     },
-    {
-      type: 'function',
-      name: 'remember_user_preference',
-      description: 'Сохранить устойчивое предпочтение или правило пользователя. Использовать только при явной просьбе запомнить или для явно долгосрочного правила.',
-      parameters: { type: 'object', properties: { text: { type: 'string' }, category: { type: 'string', enum: ['communication', 'analytics', 'business_rule', 'workflow', 'preference'] } }, required: ['text', 'category'], additionalProperties: false },
-      strict: true,
-    },
-    {
-      type: 'function',
-      name: 'forget_user_memory',
-      description: 'Удалить сохранённую память по просьбе пользователя.',
-      parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false },
-      strict: true,
-    },
   ];
+  if (options.allowMemory !== false) {
+    tools.push(
+      {
+        type: 'function',
+        name: 'remember_user_preference',
+        description: 'Сохранить устойчивое предпочтение или правило пользователя. Использовать только при явной просьбе запомнить или для явно долгосрочного правила.',
+        parameters: { type: 'object', properties: { text: { type: 'string' }, category: { type: 'string', enum: ['communication', 'analytics', 'business_rule', 'workflow', 'preference'] } }, required: ['text', 'category'], additionalProperties: false },
+        strict: true,
+      },
+      {
+        type: 'function',
+        name: 'forget_user_memory',
+        description: 'Удалить сохранённую память по просьбе пользователя.',
+        parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false },
+        strict: true,
+      },
+    );
+  }
+  return tools;
 }
 
 function normalizeHistory(history) {
@@ -97,10 +102,15 @@ async function executeTool(call, deps) {
 }
 
 async function runElAgent(options) {
-  const model = options.model || process.env.ELISEI_AI_MODEL || 'gpt-5.6';
+  const model = options.model || process.env.ELISEI_AI_MODEL || '';
+  if (!model) {
+    const error = new Error('Для платных режимов Эла не настроена модель OpenAI. Добавьте ELISEI_GPT_MODEL и ELISEI_PRO_MODEL либо общий ELISEI_AI_MODEL.');
+    error.code = 'ELISEI_AI_MODEL_MISSING';
+    throw error;
+  }
   const reasoningEffort = options.reasoningEffort || process.env.ELISEI_REASONING_EFFORT || 'medium';
   const detectedModules = detectModules(options.message, 4);
-  const tools = [...functionTools()];
+  const tools = [...functionTools({ allowMemory: options.allowMemoryTools !== false })];
   if (options.allowWeb !== false && process.env.ELISEI_WEB_SEARCH !== 'false') {
     tools.unshift({ type: 'web_search', search_context_size: process.env.ELISEI_WEB_SEARCH_CONTEXT || 'medium' });
   }

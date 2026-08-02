@@ -158,6 +158,16 @@ async function initDatabase() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS el_memories_user_idx ON el_memories(user_id, cabinet_id, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS el_entitlements (
+      user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      tier TEXT NOT NULL DEFAULT 'analyst' CHECK (tier IN ('analyst','gpt','pro')),
+      status TEXT NOT NULL DEFAULT 'active',
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      starts_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS el_entitlements_status_idx ON el_entitlements(status, tier);
   `)
   await ensureSnapshotSchema(pool)
   await migrateLegacyWbTokens()
@@ -2837,6 +2847,56 @@ const elPostgresMemoryStore = pool ? {
 } : null
 
 if (elPostgresMemoryStore) app.locals.elMemoryStore = elPostgresMemoryStore
+
+function normalizeElTier(value, fallback = 'analyst') {
+  const tier = String(value || '').trim().toLowerCase()
+  return ['analyst','gpt','pro'].includes(tier) ? tier : fallback
+}
+
+function elAdminEmails() {
+  return String(process.env.ELISEI_ADMIN_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean)
+}
+
+function isElAdmin(req) {
+  const email = String(req?.auth?.email || '').trim().toLowerCase()
+  return Boolean(email && elAdminEmails().includes(email))
+}
+
+app.locals.getElPlan = async ({ req, identity }) => {
+  const email = String(req?.auth?.email || '').trim().toLowerCase()
+  const ownerEmails = String(process.env.ELISEI_EL_OWNER_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean)
+  if (email && ownerEmails.includes(email)) {
+    return { tier:normalizeElTier(process.env.ELISEI_EL_OWNER_TIER || 'pro'), status:'active', source:'owner-environment' }
+  }
+  if (pool && identity?.userId && /^[0-9a-f-]{36}$/i.test(String(identity.userId))) {
+    const result = await pool.query(
+      `SELECT tier,status,metadata,starts_at,expires_at FROM el_entitlements WHERE user_id=$1 AND status='active' AND (expires_at IS NULL OR expires_at > NOW())`,
+      [identity.userId],
+    )
+    if (result.rowCount) return { ...result.rows[0], source:'database' }
+  }
+  return { tier:normalizeElTier(process.env.ELISEI_EL_DEFAULT_TIER || 'analyst'), status:'active', source:'default' }
+}
+
+app.locals.setElPlan = async ({ req, identity, body }) => {
+  if (!isElAdmin(req)) throw Object.assign(new Error('Только администратор ELISEI может менять тариф Эла.'), { status:403 })
+  if (!pool) throw Object.assign(new Error('DATABASE_URL не настроен'), { status:503 })
+  const targetUserId = String(body?.userId || identity?.userId || '')
+  if (!/^[0-9a-f-]{36}$/i.test(targetUserId)) throw Object.assign(new Error('Некорректный userId'), { status:400 })
+  const tier = normalizeElTier(body?.tier, '')
+  if (!tier) throw Object.assign(new Error('Тариф должен быть analyst, gpt или pro'), { status:400 })
+  const status = ['active','paused','cancelled'].includes(String(body?.status || 'active')) ? String(body?.status || 'active') : 'active'
+  const expiresAt = body?.expiresAt || null
+  const metadata = body?.metadata && typeof body.metadata === 'object' ? body.metadata : {}
+  const result = await pool.query(
+    `INSERT INTO el_entitlements (user_id,tier,status,metadata,expires_at,updated_at)
+     VALUES ($1,$2,$3,$4::jsonb,$5,NOW())
+     ON CONFLICT (user_id) DO UPDATE SET tier=EXCLUDED.tier,status=EXCLUDED.status,metadata=EXCLUDED.metadata,expires_at=EXCLUDED.expires_at,updated_at=NOW()
+     RETURNING tier,status,metadata,starts_at,expires_at`,
+    [targetUserId,tier,status,JSON.stringify(metadata),expiresAt],
+  )
+  return { ...result.rows[0], source:'database-admin' }
+}
 
 app.locals.getElModuleData = buildElModuleData
 app.locals.getElBusinessContext = async options => {

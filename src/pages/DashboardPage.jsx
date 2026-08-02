@@ -20,7 +20,19 @@ const csvCell = value => `"${String(value ?? '').replaceAll('"','""')}"`
 const EL_CHAT_MESSAGES_KEY = 'elisei.el.embedded.messages.v2'
 const EL_CHAT_CONVERSATION_KEY = 'elisei.el.embedded.conversation.v2'
 const EL_CHAT_SETTINGS_KEY = 'elisei.el.embedded.settings.v2'
+const EL_CHAT_MODE_KEY = 'elisei.el.mode.v1'
 const EL_PERIOD_KEYS = ['elisei.globalPeriod.v3','elisei.globalPeriod','elisei.period.v4']
+
+const defaultElPlan = {
+  tier:'analyst', status:'active',
+  features:{ analyst:true, gpt:false, pro:false, webSearch:false, longMemory:false, externalResearch:false },
+}
+
+const elModeMeta = {
+  analyst:{ title:'Эл Аналитик', subtitle:'WB-кабинет', description:'Продажи, реклама, остатки, финансы и другие данные кабинета. Без расходов OpenAI.' },
+  gpt:{ title:'Эл GPT', subtitle:'Доп. функция', description:'Свободное общение, тексты, идеи и универсальные задачи.' },
+  pro:{ title:'Эл Pro', subtitle:'Premium', description:'Интернет, внешние исследования и расширенная память.' },
+}
 
 function readStoredJson(key, fallback) {
   try {
@@ -118,12 +130,14 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [chat, setChat] = useState('')
   const [chatBusy, setChatBusy] = useState(false)
   const [elConversationId, setElConversationId] = useState(() => localStorage.getItem(EL_CHAT_CONVERSATION_KEY) || createElConversationId())
-  const [elSettings, setElSettings] = useState(() => ({ allowWeb:true, humor:true, ...readStoredJson(EL_CHAT_SETTINGS_KEY, {}) }))
+  const [elSettings, setElSettings] = useState(() => ({ allowWeb:false, humor:true, ...readStoredJson(EL_CHAT_SETTINGS_KEY, {}) }))
+  const [elPlan, setElPlan] = useState(defaultElPlan)
+  const [elMode, setElMode] = useState(() => localStorage.getItem(EL_CHAT_MODE_KEY) || 'analyst')
   const [messages, setMessages] = useState(() => {
     const stored = readStoredJson(EL_CHAT_MESSAGES_KEY, [])
     return Array.isArray(stored) && stored.length ? stored.slice(-50) : [{
       role:'el',
-      text:`${greeting}${displayName ? `, ${displayName}` : ''}. Я готов думать вместе: вижу продажи, рекламу, остатки, финансы, товары, возвраты и могу искать свежие данные в интернете.`
+      text:`${greeting}${displayName ? `, ${displayName}` : ''}. По WB-кабинету я работаю как встроенный аналитик без расходов OpenAI. GPT-общение и интернет подключаются отдельно.`
     }]
   })
   const [connection, setConnection] = useState(emptyConnection)
@@ -183,6 +197,23 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   useEffect(() => {
     localStorage.setItem(EL_CHAT_SETTINGS_KEY, JSON.stringify(elSettings))
   }, [elSettings])
+
+  useEffect(() => {
+    localStorage.setItem(EL_CHAT_MODE_KEY, elMode)
+  }, [elMode])
+
+  useEffect(() => {
+    if (!elApi?.status) return
+    elApi.status().then(result => {
+      const plan = result?.plan || defaultElPlan
+      setElPlan({ ...defaultElPlan, ...plan, features:{ ...defaultElPlan.features, ...(plan.features || {}) } })
+      setElMode(current => {
+        if (current === 'pro' && !plan?.features?.pro) return plan?.features?.gpt ? 'gpt' : 'analyst'
+        if (current === 'gpt' && !plan?.features?.gpt) return 'analyst'
+        return current
+      })
+    }).catch(() => setElPlan(defaultElPlan))
+  }, [])
 
   useEffect(() => {
     if (active !== 'Спросить ЭЛа') lastBusinessSectionRef.current = active
@@ -486,7 +517,8 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
           role:item.role === 'el' ? 'assistant' : 'user',
           content:item.text,
         })),
-        allowWeb:elSettings.allowWeb,
+        mode:elMode,
+        allowWeb:elMode === 'pro' && elSettings.allowWeb,
         tone:elSettings.humor ? 'adaptive_playful' : 'professional',
         cabinetId:connection.connectionId || 'main',
         cabinetName:user?.company || 'Основной кабинет WB',
@@ -519,12 +551,14 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         modules:Array.isArray(result.modulesUsed) ? result.modulesUsed : [],
         usedWeb:Boolean(result.usedWeb),
         model:result.model || null,
+        mode:result.mode || elMode,
+        apiUsed:Boolean(result.apiUsed),
         createdAt:new Date().toISOString(),
       }])
     } catch (error) {
       setMessages(current => [...current, {
         role:'el',
-        text:error.message || 'Не удалось связаться с интеллектом Эла. Проверьте backend и OPENAI_API_KEY.',
+        text:error.message || 'Не удалось получить ответ Эла. Базовый аналитик работает без OpenAI; GPT и Pro требуют подключённой допфункции и активного API-баланса.',
         error:true,
         createdAt:new Date().toISOString(),
       }])
@@ -834,53 +868,105 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
   const renderSettings = () => <section className="app-page glass-panel"><div className="page-title"><span>Настройки</span><h1>Параметры бизнеса</h1><p>Финансовые допущения сохраняются отдельно для вашего аккаунта.</p></div><div className="settings-card standalone"><h3><Settings size={20}/> Основные параметры</h3><div className="settings-grid"><label>Комиссия WB, %<input type="number" value={settingsDraft.commissionPercent ?? 0} onChange={e => updateSetting('commissionPercent',e.target.value)}/></label><label>Логистика за продажу, ₽<input type="number" value={settingsDraft.logisticsPerSale ?? 0} onChange={e => updateSetting('logisticsPerSale',e.target.value)}/></label><label>Налог, %<input type="number" value={settingsDraft.taxPercent ?? 0} onChange={e => updateSetting('taxPercent',e.target.value)}/></label><label>Целевая маржа, %<input type="number" value={settingsDraft.targetMarginPercent ?? 20} onChange={e => updateSetting('targetMarginPercent',e.target.value)}/></label></div><button className="primary-btn" onClick={saveSettings} disabled={savingSettings}><Save size={17}/> Сохранить</button></div><div className="security-note"><ShieldCheck size={22}/><div><strong>MAXADORRE и ELISEI не связаны данными</strong><p>В ELISEI перенесена проверенная бизнес-логика, но репозитории, базы, API-ключи и клиентские данные полностью раздельны.</p></div></div></section>
 
-  const renderChat = () => (
-    <section className="app-page glass-panel chat-page el-embedded-chat">
-      <div className="page-title el-chat-title">
-        <div>
-          <span>AI-партнёр</span>
-          <h1>Спросить ЭЛа</h1>
-          <p>Живой AI-чат: анализирует весь кабинет, связывает разделы, помнит контекст и при необходимости ищет свежую информацию в интернете.</p>
-        </div>
-        <div className="el-chat-actions">
-          <label className="el-chat-toggle"><input type="checkbox" checked={elSettings.allowWeb} onChange={event => setElSettings(current => ({ ...current, allowWeb:event.target.checked }))}/> Интернет</label>
-          <label className="el-chat-toggle"><input type="checkbox" checked={elSettings.humor} onChange={event => setElSettings(current => ({ ...current, humor:event.target.checked }))}/> Можно с юмором</label>
-          <button type="button" className="secondary-btn" onClick={startNewElConversation} disabled={chatBusy}>Новый диалог</button>
-        </div>
-      </div>
-
-      <div className="chat-suggestions">
-        {[
+  const renderChat = () => {
+    const planTitle = elPlan.tier === 'pro' ? 'Эл Pro' : elPlan.tier === 'gpt' ? 'Эл GPT' : 'Эл Аналитик'
+    const modeAvailable = mode => mode === 'analyst' || Boolean(elPlan.features?.[mode])
+    const chooseMode = mode => {
+      if (!modeAvailable(mode)) {
+        notify(`${elModeMeta[mode].title} — дополнительная функция. Сейчас доступен бесплатный Эл Аналитик по WB-кабинету.`)
+        return
+      }
+      setElMode(mode)
+      if (mode !== 'pro') setElSettings(current => ({ ...current, allowWeb:false }))
+    }
+    const suggestions = elMode === 'analyst'
+      ? [
           'Какие рекламные кампании съедают прибыль?',
           'Что сейчас важнее всего по кабинету?',
           'Какие товары скоро закончатся и стоит ли их дозаказывать?',
           'Свяжи возвраты с отзывами и карточками',
-          'Найди свежие изменения правил Wildberries',
-        ].map(text => <button key={text} disabled={chatBusy} onClick={() => sendChat(null, text)}>{text}</button>)}
-      </div>
+          'Почему прибыль ниже выручки?',
+        ]
+      : elMode === 'gpt'
+        ? ['Помоги написать ответ покупателю', 'Придумай идеи для карточки товара', 'Поболтай со мной и оцени идею', 'Составь план запуска нового товара']
+        : ['Найди свежие изменения правил Wildberries', 'Сравни мой кабинет с трендами рынка', 'Проведи исследование конкурентов', 'Проверь свежие новости маркетплейсов']
 
-      <div className="chat-stream" aria-live="polite">
-        {messages.map((message,index) => (
-          <div key={`${message.createdAt || index}-${index}`} className={`chat-message ${message.role} ${message.error ? 'error' : ''}`}>
-            {message.role === 'el' && <b>ЭЛ</b>}
-            <p>{message.text}</p>
-            {message.modules?.length > 0 && <div className="el-chat-badges">{message.modules.map(module => <span key={module}>{elModuleNames[module] || module}</span>)}</div>}
-            {message.usedWeb && <div className="el-web-note">Проверил актуальные источники в интернете</div>}
-            {message.sources?.length > 0 && <div className="el-chat-sources">
-              {message.sources.map((source,sourceIndex) => <a key={`${source.url}-${sourceIndex}`} href={source.url} target="_blank" rel="noreferrer">{source.title || source.url}</a>)}
-            </div>}
+    return (
+      <section className="app-page glass-panel chat-page el-embedded-chat">
+        <div className="page-title el-chat-title">
+          <div>
+            <span>AI-партнёр</span>
+            <h1>Спросить ЭЛа</h1>
+            <p>Вопросы по WB-кабинету обрабатывает собственный аналитический движок Елисея без расходов OpenAI. GPT-общение и внешние исследования подключаются отдельно.</p>
           </div>
-        ))}
-        {chatBusy && <div className="chat-message el el-thinking-message"><b>ЭЛ</b><p><RefreshCw size={16} className="spin"/> Думаю, проверяю данные и несу ответственность за каждую цифру…</p></div>}
-      </div>
+          <div className="el-chat-actions">
+            <span className="el-current-plan">Тариф Эла: <strong>{planTitle}</strong></span>
+            {elMode === 'pro' && <label className="el-chat-toggle"><input type="checkbox" checked={elSettings.allowWeb} onChange={event => setElSettings(current => ({ ...current, allowWeb:event.target.checked }))}/> Интернет</label>}
+            <label className="el-chat-toggle"><input type="checkbox" checked={elSettings.humor} onChange={event => setElSettings(current => ({ ...current, humor:event.target.checked }))}/> Можно с юмором</label>
+            <button type="button" className="secondary-btn" onClick={startNewElConversation} disabled={chatBusy}>Новый диалог</button>
+          </div>
+        </div>
 
-      <form className="chat-form" onSubmit={sendChat}>
-        <input value={chat} disabled={chatBusy} onChange={event => setChat(event.target.value)} placeholder="Например: почему реклама даёт заказы, но не даёт прибыль?"/>
-        <button className="primary-btn" aria-label="Отправить" disabled={chatBusy || !chat.trim()}>{chatBusy ? <RefreshCw size={18} className="spin"/> : <Send size={18}/>}</button>
-      </form>
-      <small className="el-chat-safety">Эл анализирует и предлагает действия. Изменение цен, ставок, бюджетов и данных — только после отдельного подтверждения.</small>
-    </section>
-  )
+        <div className="el-mode-switcher" role="tablist" aria-label="Режим Эла">
+          {Object.entries(elModeMeta).map(([mode, meta]) => {
+            const available = modeAvailable(mode)
+            return <button
+              key={mode}
+              type="button"
+              className={`el-mode-card ${elMode === mode ? 'active' : ''} ${available ? '' : 'locked'}`}
+              onClick={() => chooseMode(mode)}
+              aria-selected={elMode === mode}
+            >
+              <span className="el-mode-card-top"><strong>{meta.title}</strong><small>{mode === 'analyst' ? 'Включён' : available ? 'Подключён' : meta.subtitle}</small></span>
+              <span>{meta.description}</span>
+              <b>{mode === 'analyst' ? '0 ₽ за вопросы по кабинету' : available ? 'Доступно' : 'Подключить отдельно'}</b>
+            </button>
+          })}
+        </div>
+
+        <div className={`el-mode-notice ${elMode}`}>
+          <ShieldCheck size={18}/>
+          <div>
+            <strong>{elModeMeta[elMode].title}</strong>
+            <span>{elMode === 'analyst'
+              ? 'Работает на данных и расчётах ELISEI. OpenAI API не вызывается.'
+              : elMode === 'gpt'
+                ? 'Использует OpenAI API только для свободного общения. Вопросы по кабинету автоматически остаются в бесплатном аналитике.'
+                : 'Использует OpenAI API и интернет-поиск. Вопросы только по кабинету всё равно маршрутизируются в бесплатный аналитик.'}</span>
+          </div>
+        </div>
+
+        <div className="chat-suggestions">
+          {suggestions.map(text => <button key={text} disabled={chatBusy} onClick={() => sendChat(null, text)}>{text}</button>)}
+        </div>
+
+        <div className="chat-stream" aria-live="polite">
+          {messages.map((message,index) => (
+            <div key={`${message.createdAt || index}-${index}`} className={`chat-message ${message.role} ${message.error ? 'error' : ''}`}>
+              {message.role === 'el' && <b>ЭЛ</b>}
+              <p>{message.text}</p>
+              {message.role === 'el' && message.mode && <div className="el-response-mode">
+                <span>{message.mode === 'analyst' ? 'Эл Аналитик' : message.mode === 'gpt' ? 'Эл GPT' : 'Эл Pro'}</span>
+                <small>{message.apiUsed ? 'использован AI API' : 'без расходов OpenAI'}</small>
+              </div>}
+              {message.modules?.length > 0 && <div className="el-chat-badges">{message.modules.map(module => <span key={module}>{elModuleNames[module] || module}</span>)}</div>}
+              {message.usedWeb && <div className="el-web-note">Проверил актуальные источники в интернете</div>}
+              {message.sources?.length > 0 && <div className="el-chat-sources">
+                {message.sources.map((source,sourceIndex) => <a key={`${source.url}-${sourceIndex}`} href={source.url} target="_blank" rel="noreferrer">{source.title || source.url}</a>)}
+              </div>}
+            </div>
+          ))}
+          {chatBusy && <div className="chat-message el el-thinking-message"><b>ЭЛ</b><p><RefreshCw size={16} className="spin"/> {elMode === 'analyst' ? 'Считаю по данным кабинета…' : 'Думаю и проверяю источники…'}</p></div>}
+        </div>
+
+        <form className="chat-form" onSubmit={sendChat}>
+          <input value={chat} disabled={chatBusy} onChange={event => setChat(event.target.value)} placeholder={elMode === 'analyst' ? 'Например: почему реклама даёт заказы, но не даёт прибыль?' : 'Напишите Элу сообщение…'}/>
+          <button className="primary-btn" aria-label="Отправить" disabled={chatBusy || !chat.trim()}>{chatBusy ? <RefreshCw size={18} className="spin"/> : <Send size={18}/>}</button>
+        </form>
+        <small className="el-chat-safety">Эл только анализирует и предлагает действия. Изменение цен, ставок, бюджетов и данных — после отдельного подтверждения.</small>
+      </section>
+    )
+  }
 
   const renderers = {
     'Главная':renderHome, 'Аналитика':renderAnalytics, 'Товары':renderProducts, 'Остатки':renderStocks,

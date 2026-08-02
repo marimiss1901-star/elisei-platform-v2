@@ -68,6 +68,8 @@ export const businessApi = {
 
 export const elApi = {
   status: () => request('/api/el/status'),
+  plan: () => request('/api/el/plan'),
+  setPlan: (payload) => request('/api/el/plan', { method:'PUT', body:JSON.stringify(payload) }),
   capabilities: () => request('/api/el/capabilities'),
   chat: (payload) => request('/api/el/chat', {
     method: 'POST',

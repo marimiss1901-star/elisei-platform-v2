@@ -4,14 +4,34 @@ const crypto = require('node:crypto');
 const { createMemoryStore } = require('../services/elMemoryStore.cjs');
 const { identityFromRequest, collectBusinessContext } = require('../services/elContext.cjs');
 const { runElAgent } = require('../services/elAgent.cjs');
+const { runElAnalyst } = require('../services/elAnalystEngine.cjs');
+const { classifyElRequest } = require('../services/elModeRouter.cjs');
 const { createBusinessDataBridge } = require('../services/elBusinessDataBridge.cjs');
 const { publicCapabilities } = require('../services/elModuleRegistry.cjs');
+const { resolveElPlan, normalizeMode, canUseMode, publicPlan, modeLabel } = require('../services/elPlans.cjs');
 
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 
 function errorPayload(error) {
-  const setup = error?.code === 'OPENAI_API_KEY_MISSING';
-  return { ok: false, error: setup ? 'Эл почти готов, но на backend не добавлен OPENAI_API_KEY.' : (error?.message || 'Не удалось получить ответ Эла.'), code: error?.code || 'EL_CHAT_ERROR', setupRequired: setup };
+  const setup = ['OPENAI_API_KEY_MISSING','ELISEI_AI_MODEL_MISSING'].includes(error?.code);
+  const setupMessage = error?.code === 'ELISEI_AI_MODEL_MISSING'
+    ? error.message
+    : 'Для «Эл GPT» и «Эл Pro» на backend не добавлен OPENAI_API_KEY или закончился баланс API. Базовый «Эл Аналитик» продолжает работать без OpenAI.';
+  return {
+    ok: false,
+    error: setup ? setupMessage : (error?.message || 'Не удалось получить ответ Эла.'),
+    code: error?.code || 'EL_CHAT_ERROR',
+    setupRequired: setup,
+  };
+}
+
+function upgradeError(mode, plan) {
+  const error = new Error(`${modeLabel(mode)} не входит в текущий тариф. Вопросы по WB-кабинету доступны бесплатно в режиме «Эл Аналитик».`);
+  error.status = 402;
+  error.code = 'EL_UPGRADE_REQUIRED';
+  error.upgradeRequired = mode;
+  error.plan = plan;
+  return error;
 }
 
 function createRouter(express) {
@@ -20,16 +40,47 @@ function createRouter(express) {
 
   router.get('/status', asyncRoute(async (req, res) => {
     const identity = identityFromRequest(req);
+    const plan = await resolveElPlan(req, identity);
     res.json({
-      ok: true, version: '5.4.2', name: 'El Whole Business Brain', configured: Boolean(process.env.OPENAI_API_KEY),
-      model: process.env.ELISEI_AI_MODEL || 'gpt-5.6', webSearch: process.env.ELISEI_WEB_SEARCH !== 'false',
-      memory: req.app?.locals?.elMemoryStore ? 'custom' : 'file-fallback',
-      identity: { cabinetId: identity.cabinetId, cabinetName: identity.cabinetName }, writeActions: false,
+      ok: true,
+      version: '5.4.3',
+      name: 'El Tiered Intelligence',
+      configured: Boolean(process.env.OPENAI_API_KEY && (process.env.ELISEI_GPT_MODEL || process.env.ELISEI_PRO_MODEL || process.env.ELISEI_AI_MODEL)),
+      models: {
+        gpt: process.env.ELISEI_GPT_MODEL || process.env.ELISEI_AI_MODEL || null,
+        pro: process.env.ELISEI_PRO_MODEL || process.env.ELISEI_AI_MODEL || null,
+      },
+      webSearch: plan.features.webSearch && process.env.ELISEI_WEB_SEARCH !== 'false',
+      memory: req.app?.locals?.elMemoryStore ? 'postgres' : 'file-fallback',
+      identity: { cabinetId: identity.cabinetId, cabinetName: identity.cabinetName },
+      plan,
+      modes: {
+        analyst: { available: true, apiUsed: false, description: 'Аналитика WB-кабинета без OpenAI API' },
+        gpt: { available: plan.features.gpt, apiUsed: true, description: 'Свободное GPT-общение как дополнительная функция' },
+        pro: { available: plan.features.pro, apiUsed: true, description: 'Интернет и внешние исследования как Premium-функция' },
+      },
+      writeActions: false,
       capabilities: publicCapabilities(),
     });
   }));
 
-  router.get('/capabilities', (req, res) => res.json({ ok: true, version: '5.4.2', modules: publicCapabilities(), writeActions: false }));
+  router.get('/plan', asyncRoute(async (req, res) => {
+    const identity = identityFromRequest(req);
+    res.json({ ok: true, plan: await resolveElPlan(req, identity) });
+  }));
+
+  router.put('/plan', asyncRoute(async (req, res) => {
+    if (typeof req.app?.locals?.setElPlan !== 'function') return res.status(501).json({ ok: false, error: 'Управление тарифами ещё не подключено.' });
+    const identity = identityFromRequest(req, req.body || {});
+    const plan = await req.app.locals.setElPlan({ req, identity, body: req.body || {} });
+    res.json({ ok: true, plan: publicPlan(plan) });
+  }));
+
+  router.get('/capabilities', asyncRoute(async (req, res) => {
+    const identity = identityFromRequest(req);
+    const plan = await resolveElPlan(req, identity);
+    res.json({ ok: true, version: '5.4.3', modules: publicCapabilities(), plan, writeActions: false });
+  }));
 
   router.post('/chat', asyncRoute(async (req, res) => {
     const body = req.body || {};
@@ -42,10 +93,17 @@ function createRouter(express) {
       return res.status(401).json({ ok: false, error: 'Не удалось определить пользователя для изоляции диалога.' });
     }
 
+    const plan = await resolveElPlan(req, identity);
+    const requestedMode = normalizeMode(body.mode || 'analyst');
     const memoryStore = createMemoryStore(req.app?.locals?.elMemoryStore);
     const conversationId = String(body.conversationId || crypto.randomUUID()).slice(0, 100);
     const serverHistory = await memoryStore.loadConversation(identity, conversationId);
     const history = serverHistory.length ? serverHistory : body.history;
+    const classification = classifyElRequest({ message, requestedMode, history, page: body.page });
+    const effectiveMode = classification.mode;
+
+    if (!canUseMode(plan, effectiveMode)) throw upgradeError(effectiveMode, plan);
+
     const memories = await memoryStore.listMemories(identity);
     const context = await collectBusinessContext(req, body, identity);
     const dataBridge = createBusinessDataBridge({ req, identity, period: body.period, question: message });
@@ -53,15 +111,53 @@ function createRouter(express) {
     context.moduleCoverage = { detected: prefetched.detectedModules, prefetched: prefetched.data };
 
     try {
-      const answer = await runElAgent({ message, history, context, memories, identity, tone: body.tone || 'auto', allowWeb: body.allowWeb !== false, memoryStore, dataBridge });
+      let answer;
+      if (effectiveMode === 'analyst') {
+        answer = await runElAnalyst({
+          message, history, context, memories, identity,
+          tone: body.tone || 'auto', memoryStore, dataBridge, classification,
+        });
+      } else {
+        const isPro = effectiveMode === 'pro';
+        answer = await runElAgent({
+          message, history, context, memories: isPro ? memories : [], identity,
+          tone: body.tone || 'auto',
+          allowMemoryTools: isPro,
+          allowWeb: isPro && body.allowWeb !== false,
+          memoryStore, dataBridge,
+          model: isPro
+            ? (process.env.ELISEI_PRO_MODEL || process.env.ELISEI_AI_MODEL)
+            : (process.env.ELISEI_GPT_MODEL || process.env.ELISEI_AI_MODEL),
+          reasoningEffort: isPro
+            ? (process.env.ELISEI_PRO_REASONING_EFFORT || process.env.ELISEI_REASONING_EFFORT || 'medium')
+            : (process.env.ELISEI_GPT_REASONING_EFFORT || 'low'),
+        });
+        answer.apiUsed = true;
+      }
+
       await memoryStore.appendMessages(identity, conversationId, [
-        { role: 'user', content: message, createdAt: new Date().toISOString() },
-        { role: 'assistant', content: answer.text, sources: answer.sources, modulesUsed: answer.modulesUsed, createdAt: new Date().toISOString() },
+        { role: 'user', content: message, mode: effectiveMode, createdAt: new Date().toISOString() },
+        { role: 'assistant', content: answer.text, mode: effectiveMode, sources: answer.sources, modulesUsed: answer.modulesUsed, createdAt: new Date().toISOString() },
       ]);
-      res.json({ ok: true, conversationId, answer: answer.text, sources: answer.sources, usedWeb: answer.usedWeb, model: answer.model, toolTrace: answer.toolTrace, modulesUsed: answer.modulesUsed, detectedModules: prefetched.detectedModules });
+      res.json({
+        ok: true,
+        conversationId,
+        answer: answer.text,
+        sources: answer.sources,
+        usedWeb: answer.usedWeb,
+        model: answer.model,
+        apiUsed: Boolean(answer.apiUsed),
+        mode: effectiveMode,
+        requestedMode,
+        routeReason: classification.reason,
+        plan,
+        toolTrace: answer.toolTrace,
+        modulesUsed: answer.modulesUsed,
+        detectedModules: prefetched.detectedModules,
+      });
     } catch (error) {
       const payload = errorPayload(error);
-      res.status(payload.setupRequired ? 503 : (error.status || 500)).json(payload);
+      res.status(payload.setupRequired ? 503 : (error.status || 500)).json({ ...payload, upgradeRequired: error.upgradeRequired || null, plan: error.plan || plan });
     }
   }));
 
@@ -96,7 +192,9 @@ function createRouter(express) {
   });
   router.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
-    console.error('[ELISEI EL ERROR]', error); res.status(error.status || 500).json(errorPayload(error));
+    console.error('[ELISEI EL ERROR]', error);
+    const payload = errorPayload(error);
+    res.status(error.status || 500).json({ ...payload, upgradeRequired: error.upgradeRequired || null, plan: error.plan || null });
   });
   return router;
 }
