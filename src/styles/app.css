@@ -278,3 +278,16 @@ body{background:radial-gradient(circle at 72% 7%,rgba(124,58,237,.18),transparen
 .el-response-mode small{color:#7f87a5;font-size:9px}
 .el-embedded-chat .chat-stream{max-height:calc(100vh - 610px);min-height:300px}
 @media(max-width:980px){.el-mode-switcher{grid-template-columns:1fr}.el-mode-card{min-height:auto}.el-embedded-chat .chat-stream{max-height:none}}
+
+/* ELISEI 5.4.6 — WB finance + FBS/FBO */
+.data-row.product-master-row{grid-template-columns:260px 120px 150px 155px 125px 90px 90px 90px 120px 120px 120px;min-width:1640px}
+.fulfillment-pill{display:inline-flex;align-items:center;justify-content:center;min-width:58px;padding:6px 9px;border-radius:999px;background:rgba(117,78,214,.18);border:1px solid rgba(152,114,255,.28);color:#d8cbff;font-size:11px;font-weight:800;white-space:nowrap}
+.fulfillment-pill.fbs{background:rgba(24,179,155,.13);border-color:rgba(42,208,175,.3);color:#67e6bd}
+.fulfillment-pill.fbo{background:rgba(75,123,255,.13);border-color:rgba(91,142,255,.3);color:#8eb4ff}
+.fulfillment-pill.fbs-fbo{background:linear-gradient(90deg,rgba(24,179,155,.14),rgba(96,80,220,.18));border-color:rgba(129,120,240,.36);color:#d4d0ff}
+.scheme-stock{display:block;margin-top:5px;color:#838ca9;font-size:10px;white-space:nowrap}
+.settings-hint{margin:-4px 0 18px;color:#9690aa;font-size:12px;line-height:1.55}
+.finance-source-note{display:flex;align-items:flex-start;gap:8px;margin-top:14px;padding:11px 12px;border-radius:12px;background:rgba(80,210,165,.07);border:1px solid rgba(80,210,165,.16);color:#9edbc7;font-size:11px;line-height:1.45}
+.mode-economics{margin:18px 0;padding:16px;border-radius:17px;background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.08)}
+.mode-economics h3{margin:0 0 10px;font-size:15px}.mode-economics-row{display:grid;grid-template-columns:48px 1fr 1fr 100px;gap:10px;align-items:center;padding:10px 0;border-top:1px solid rgba(255,255,255,.06);font-size:12px}.mode-economics-row:first-of-type{border-top:0}.mode-economics-row b{color:#bb9cff}.mode-economics-row span{color:#9993aa}.mode-economics-row strong{text-align:right}
+@media(max-width:850px){.data-row.product-master-row{min-width:1640px}.mode-economics-row{grid-template-columns:44px 1fr 1fr 85px}}

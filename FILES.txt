@@ -1,8 +1,10 @@
-README_5_4_5.md
-README_5_4_5A.md
-RELEASE_NOTES_V5_4_5.txt
-RELEASE_NOTES_V5_4_5A.txt
+FILES.txt
+README_5_4_6.md
+RELEASE_NOTES_V5_4_6.txt
+SHA256SUMS.txt
 backend/package.json
 backend/src/server.js
 backend/src/wb/stream-store.js
-backend/tests/wb-self-heal.test.mjs
+backend/tests/wb-finance-fbs-fbo.test.mjs
+src/pages/DashboardPage.jsx
+src/styles/app.css

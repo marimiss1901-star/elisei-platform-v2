@@ -54,6 +54,7 @@ function kickBackgroundWorkers(reason = 'timer') {
     // Выполняем последовательно, чтобы два тяжёлых запроса WB одного продавца
     // не стартовали в одну секунду и не провоцировали глобальный лимитер.
     await processPendingStockReports()
+    await processPendingGeneratedReports()
     await processDueDeferredStages()
   })().catch(error => {
     backgroundWorkerState.lastError = error.message
@@ -228,8 +229,13 @@ const WB_SYNC_STAGES = Object.freeze({
   products: { label: 'Товары', scope: 'content' },
   orders: { label: 'Заказы', scope: 'statistics' },
   sales: { label: 'Продажи', scope: 'statistics' },
-  stocks: { label: 'Остатки', scope: 'analytics' },
+  stocks: { label: 'Остатки FBO', scope: 'analytics' },
+  sellerStocks: { label: 'Остатки FBS', scope: 'marketplace' },
   advertising: { label: 'Реклама', scope: 'promotion' },
+  finance: { label: 'Финансы WB', scope: 'finance' },
+  paidStorage: { label: 'Платное хранение', scope: 'analytics' },
+  acceptance: { label: 'Платная приёмка', scope: 'analytics' },
+  acquiring: { label: 'Эквайринг', scope: 'finance' },
 })
 const CORE_SYNC_SCOPES = [...new Set(Object.values(WB_SYNC_STAGES).map(item => item.scope))]
 const STOCK_DATA_SCHEMA_VERSION = 5
@@ -978,6 +984,14 @@ async function recoverStreamFromSnapshotStrict(connectionId, stream) {
       payload.meta = buildAdvertisingMeta(payload)
       return { payload, meta:{ snapshotId:snapshot.id, endpoint:snapshot.endpoint } }
     }
+    if (stream === 'finance' || stream === 'acquiring') {
+      if (normalized && typeof normalized === 'object' && !Array.isArray(normalized)) return { payload:normalized, meta:{ snapshotId:snapshot.id, endpoint:snapshot.endpoint } }
+      return null
+    }
+    if (['sellerStocks','paidStorage','acceptance'].includes(stream)) {
+      const rows = Array.isArray(normalized) ? normalized : Array.isArray(snapshot.raw_payload) ? snapshot.raw_payload : []
+      return rows.length ? { payload:rows, meta:{ snapshotId:snapshot.id, endpoint:snapshot.endpoint } } : null
+    }
   } catch (error) {
     console.warn(`WB snapshot strict recovery failed for ${stream}:`, error.message)
   }
@@ -998,7 +1012,7 @@ async function queueMissingStreamsForRecovery(connection, data, sources) {
     await updateSyncState(connection.id, stream, {
       status:'queued',
       nextAllowedAt:new Date().toISOString(),
-      taskId:stream === 'stocks' ? null : state.task_id,
+      taskId:['stocks','paidStorage','acceptance'].includes(stream) ? null : state.task_id,
       lastError:`Сохранён счётчик ${Number(state.last_count || 0)}, но сами строки отсутствуют. ELISEI автоматически восстанавливает поток.`,
       metadata:{ ...(state.metadata || {}), recoveryReason:'payload_missing', expectedCount:Number(state.last_count || 0) },
     })
@@ -1062,21 +1076,53 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
   // Старые тестовые/ошибочно разобранные остатки не должны попадать в аналитику.
   // Доверяем только снимку, который прошёл новый нормализатор и имеет метаданные происхождения.
   const trustedStocks = isTrustedStockSnapshot(data)
-  const stocks = trustedStocks && Array.isArray(data.stocks) ? data.stocks : []
+  const fboStocks = trustedStocks && Array.isArray(data.stocks)
+    ? data.stocks.map(row => ({ ...row, fulfillmentMode:row?.fulfillmentMode || 'FBO', stockScheme:'FBO' }))
+    : []
+  const sellerStocks = Array.isArray(data.sellerStocks)
+    ? data.sellerStocks.map(row => ({ ...row, fulfillmentMode:'FBS', stockScheme:'FBS' }))
+    : []
+  const stocks = [...fboStocks, ...sellerStocks]
   const stockMeta = trustedStocks && data?.stockMeta && typeof data.stockMeta === 'object' ? { ...data.stockMeta } : null
   const advertisingData = data?.advertising && typeof data.advertising === 'object' ? data.advertising : { campaigns: [], totals: {} }
+  const financeData = data?.finance && typeof data.finance === 'object' && !Array.isArray(data.finance) ? data.finance : { rows:[], totals:{}, balance:null, period:null }
+  const financeRows = Array.isArray(financeData.rows) ? financeData.rows : []
+  const paidStorageRows = Array.isArray(data?.paidStorage) ? data.paidStorage : []
+  const acceptanceRows = Array.isArray(data?.acceptance) ? data.acceptance : []
+  const acquiringData = data?.acquiring && typeof data.acquiring === 'object' && !Array.isArray(data.acquiring) ? data.acquiring : { rows:[], totals:{} }
+  const acquiringRows = Array.isArray(acquiringData.rows) ? acquiringData.rows : []
   const stageStatus = data?.stageStatus && typeof data.stageStatus === 'object' ? data.stageStatus : {}
   const availability = {
     products: stageStatus.products?.available ?? rawProducts.length > 0,
     orders: stageStatus.orders?.available ?? orders.length > 0,
     sales: stageStatus.sales?.available ?? salesRows.length > 0,
-    stocks: trustedStocks && Boolean(stageStatus.stocks?.available ?? true),
-    stockDetails: trustedStocks && stocks.length > 0,
+    stocks: Boolean((trustedStocks && (stageStatus.stocks?.available ?? true)) || (stageStatus.sellerStocks?.available ?? sellerStocks.length > 0)),
+    fboStocks: trustedStocks && Boolean(stageStatus.stocks?.available ?? true),
+    sellerStocks: stageStatus.sellerStocks?.available ?? sellerStocks.length > 0,
+    stockDetails: stocks.length > 0,
     advertising: stageStatus.advertising?.available ?? (Array.isArray(advertisingData.campaigns) && advertisingData.campaigns.length > 0),
+    finance: stageStatus.finance?.available ?? financeRows.length > 0,
+    paidStorage: stageStatus.paidStorage?.available ?? paidStorageRows.length > 0,
+    acceptance: stageStatus.acceptance?.available ?? acceptanceRows.length > 0,
+    acquiring: stageStatus.acquiring?.available ?? acquiringRows.length > 0,
   }
   const periodDays = Math.max(1, Math.min(366, Number(data?.__periodDays || 30)))
   const productMap = new Map()
   const productAliases = new Map()
+  const modeBySrid = new Map()
+  const fulfillmentMode = (row = {}) => {
+    const raw = String(row.fulfillmentMode || row.deliveryMethod || row.delivery_method || row.warehouseType || row.warehouse_type || '').toLowerCase()
+    if (raw.includes('продав') || raw === 'fbs') return 'FBS'
+    if (raw.includes('склад wb') || raw.includes('wildberries') || raw === 'fbo' || raw === 'fbw') return 'FBO'
+    if (row.assemblyId != null || row.assembly_id != null || row.stickerId != null || row.sticker_id != null) return 'FBS'
+    return 'UNKNOWN'
+  }
+  const modeStats = () => ({ orders:0, sales:0, returns:0, revenue:0, stock:0, commission:0, logistics:0, storage:0, acceptance:0, acquiring:0, penalties:0, deductions:0, additionalPayment:0, sellerPayable:0, detailStorage:0, detailAcceptance:0, detailAcquiring:0 })
+  const touchMode = (item, mode) => {
+    if (!item || !['FBS','FBO'].includes(mode)) return null
+    item.fulfillmentModes[mode] = true
+    return item.modeStats[mode]
+  }
   const mergeUnique = (left = [], right = []) => uniqueIdentities([...(Array.isArray(left) ? left : []), ...(Array.isArray(right) ? right : [])])
   const registerAliases = (item, row = {}) => {
     for (const alias of identityAliases(row)) productAliases.set(alias, item)
@@ -1143,6 +1189,20 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
         adOrders: 0,
         adRevenue: 0,
         adCampaignIds: [],
+        fulfillmentModes:{ FBS:false, FBO:false },
+        modeStats:{ FBS:modeStats(), FBO:modeStats() },
+        financeCommission:0,
+        financeLogistics:0,
+        financeStorage:0,
+        financeAcceptance:0,
+        financeAcquiring:0,
+        financePenalties:0,
+        financeDeductions:0,
+        financeAdditionalPayment:0,
+        financeSellerPayable:0,
+        detailStorage:0,
+        detailAcceptance:0,
+        detailAcquiring:0,
       })
     }
     const item = productMap.get(key)
@@ -1213,6 +1273,9 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     }
     item.stock += quantity
     item.stockRows += 1
+    const stockMode = fulfillmentMode(row) === 'FBS' ? 'FBS' : 'FBO'
+    const stockBucket = touchMode(item, stockMode)
+    if (stockBucket) stockBucket.stock += quantity
     mappedStockRows += 1
     mappedStockQuantity += quantity
     if (matched.method && Object.prototype.hasOwnProperty.call(stockMatchMethods, matched.method)) stockMatchMethods[matched.method] += 1
@@ -1232,21 +1295,38 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
 
   for (const row of orders) {
     const item = ensure(row)
-    if (item) item.ordersCount += 1
+    const mode = fulfillmentMode(row)
+    const srid = String(row.srid || row.rid || '').trim()
+    if (srid && mode !== 'UNKNOWN') modeBySrid.set(srid, mode)
+    if (item) {
+      item.ordersCount += 1
+      const bucket = touchMode(item, mode)
+      if (bucket) bucket.orders += 1
+    }
     const day = dateKey(row.date || row.lastChangeDate || row.createdAt)
     if (dailyMap.has(day)) dailyMap.get(day).orders += 1
   }
 
   for (const row of salesRows) {
     const item = ensure(row)
+    const mode = fulfillmentMode(row)
+    const srid = String(row.srid || row.rid || '').trim()
+    if (srid && mode !== 'UNKNOWN') modeBySrid.set(srid, mode)
     const isReturn = String(row.saleID || row.saleId || '').toUpperCase().startsWith('R') || Boolean(row.isReturn)
     let amount = firstNumber(row, ['forPay', 'finishedPrice', 'priceWithDisc', 'totalPrice'], 0)
     if (isReturn && amount > 0) amount = -amount
     const day = dateKey(row.sale_dt || row.date || row.lastChangeDate || row.createdAt)
     if (item) {
       item.revenue += amount
-      if (isReturn) item.returnsCount += 1
-      else item.salesCount += 1
+      const modeBucket = touchMode(item, mode)
+      if (isReturn) {
+        item.returnsCount += 1
+        if (modeBucket) modeBucket.returns += 1
+      } else {
+        item.salesCount += 1
+        if (modeBucket) modeBucket.sales += 1
+      }
+      if (modeBucket) modeBucket.revenue += amount
       if (day) item.dailySales[day] = (item.dailySales[day] || 0) + (isReturn ? -1 : 1)
     }
     if (dailyMap.has(day)) {
@@ -1255,6 +1335,90 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
       if (isReturn) bucket.returns += 1
       else bucket.sales += 1
     }
+  }
+
+  const unallocatedFinance = { commission:0, logistics:0, storage:0, acceptance:0, acquiring:0, penalties:0, deductions:0, additionalPayment:0 }
+  for (const row of financeRows) {
+    const item = ensure(row)
+    const srid = String(row.srid || '').trim()
+    const mode = modeBySrid.get(srid) || fulfillmentMode(row)
+    const sign = financeSign(row)
+    const commission = financeCommissionAmount(row)
+    const logistics = Math.abs(fieldNumber(row,['deliveryRub','delivery_rub','deliveryService','delivery_service'],0)) + Math.abs(fieldNumber(row,['rebillLogisticCost','rebill_logistic_cost'],0))
+    const storage = Math.abs(fieldNumber(row,['paidStorage','paid_storage','storageFee','storage_fee'],0))
+    const acceptance = Math.abs(fieldNumber(row,['paidAcceptance','paid_acceptance','acceptance'],0))
+    const acquiring = Math.abs(fieldNumber(row,['acquiringFee','acquiring_fee'],0))
+    const penalties = Math.abs(fieldNumber(row,['penalty'],0))
+    const deductions = Math.abs(fieldNumber(row,['deduction'],0))
+    const additionalPayment = fieldNumber(row,['additionalPayment','additional_payment'],0)
+    const sellerPayable = sign * Math.abs(fieldNumber(row,['forPay','for_pay','ppvzForPay','ppvz_for_pay'],0))
+    if (item) {
+      item.financeCommission += commission
+      item.financeLogistics += logistics
+      item.financeStorage += storage
+      item.financeAcceptance += acceptance
+      item.financeAcquiring += acquiring
+      item.financePenalties += penalties
+      item.financeDeductions += deductions
+      item.financeAdditionalPayment += additionalPayment
+      item.financeSellerPayable += sellerPayable
+      const bucket = touchMode(item, mode)
+      if (bucket) {
+        bucket.commission += commission
+        bucket.logistics += logistics
+        bucket.storage += storage
+        bucket.acceptance += acceptance
+        bucket.acquiring += acquiring
+        bucket.penalties += penalties
+        bucket.deductions += deductions
+        bucket.additionalPayment += additionalPayment
+        bucket.sellerPayable += sellerPayable
+      }
+    } else {
+      unallocatedFinance.commission += commission
+      unallocatedFinance.logistics += logistics
+      unallocatedFinance.storage += storage
+      unallocatedFinance.acceptance += acceptance
+      unallocatedFinance.acquiring += acquiring
+      unallocatedFinance.penalties += penalties
+      unallocatedFinance.deductions += deductions
+      unallocatedFinance.additionalPayment += additionalPayment
+    }
+  }
+
+  let unallocatedPaidStorage = 0
+  for (const row of paidStorageRows) {
+    const amount = Math.abs(fieldNumber(row,['warehousePrice'],0))
+    const item = ensure(row)
+    if (item) {
+      item.detailStorage += amount
+      const bucket = touchMode(item,'FBO')
+      if (bucket) bucket.detailStorage += amount
+    } else unallocatedPaidStorage += amount
+  }
+
+  let unallocatedAcceptance = 0
+  for (const row of acceptanceRows) {
+    const amount = Math.abs(fieldNumber(row,['total'],0))
+    const item = ensure(row)
+    if (item) {
+      item.detailAcceptance += amount
+      const bucket = touchMode(item,'FBO')
+      if (bucket) bucket.detailAcceptance += amount
+    } else unallocatedAcceptance += amount
+  }
+
+  let unallocatedAcquiring = 0
+  for (const row of acquiringRows) {
+    const amount = Math.abs(fieldNumber(row,['acquiringFee','acquiring_fee'],0))
+    const item = ensure(row)
+    const srid = String(row.srid || '').trim()
+    const mode = modeBySrid.get(srid) || fulfillmentMode(row)
+    if (item) {
+      item.detailAcquiring += amount
+      const bucket = touchMode(item,mode)
+      if (bucket) bucket.detailAcquiring += amount
+    } else unallocatedAcquiring += amount
   }
 
   // Реклама связывается с товаром по nmID. Кампания может содержать
@@ -1322,12 +1486,30 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
   // Нулевая статистика — валидный результат. Признак загрузки берём из ответа fullstats,
   // а не из ненулевых расходов/показов.
   const advertisingStatsAvailable = rawCampaigns.some(campaign => campaign?.statsStatus === 'loaded')
-  const advertisingExpense = availability.advertising && advertisingStatsAvailable ? actualAdvertisingSpend : settings.advertisingMonthly
+  const periodFactor = Math.max(1 / 30, periodDays / 30)
+  const manualAdvertisingExpense = Math.max(0, settings.advertisingMonthly * periodFactor)
+  const advertisingExpense = availability.advertising && advertisingStatsAvailable ? actualAdvertisingSpend : manualAdvertisingExpense
   const mappedAdvertisingScale = mappedAdvertisingSpend > 0 && advertisingExpense >= 0
     ? Math.min(1, advertisingExpense / mappedAdvertisingSpend)
     : 1
   const resolvedMappedAdvertisingSpend = mappedAdvertisingSpend * mappedAdvertisingScale
-  const sharedNonAdvertisingExpenses = settings.storageMonthly + settings.fixedMonthly
+
+  const financeTotals = financeData?.totals && typeof financeData.totals === 'object'
+    ? { ...summarizeFinanceRows(financeRows), ...financeData.totals }
+    : summarizeFinanceRows(financeRows)
+  const dedicatedStorageTotal = paidStorageRows.reduce((sum,row) => sum + Math.abs(fieldNumber(row,['warehousePrice','warehouse_price'],0)),0)
+  const dedicatedAcceptanceTotal = acceptanceRows.reduce((sum,row) => sum + Math.abs(fieldNumber(row,['total'],0)),0)
+  const dedicatedAcquiringTotal = acquiringRows.reduce((sum,row) => sum + Math.abs(fieldNumber(row,['acquiringFee','acquiring_fee'],0)),0)
+  const financeHasRows = availability.finance && financeRows.length > 0
+  const financeStorageAvailable = financeHasRows && Math.abs(finiteNumber(financeTotals.storage,0)) > 0
+  const financeAcceptanceAvailable = financeHasRows && Math.abs(finiteNumber(financeTotals.acceptance,0)) > 0
+  const financeAcquiringAvailable = financeHasRows && Math.abs(finiteNumber(financeTotals.acquiring,0)) > 0
+  const storageSource = financeStorageAvailable ? 'finance_report' : availability.paidStorage ? 'paid_storage_report' : 'manual'
+  const acceptanceSource = financeAcceptanceAvailable ? 'finance_report' : availability.acceptance ? 'acceptance_report' : 'not_loaded'
+  const acquiringSource = financeAcquiringAvailable ? 'finance_report' : availability.acquiring ? 'acquiring_report' : 'not_loaded'
+  const manualStorageExpense = Math.max(0, settings.storageMonthly * periodFactor)
+  const sharedFixedExpenses = Math.max(0, settings.fixedMonthly * periodFactor)
+
   let totalRevenue = 0
   let totalSales = 0
   let totalReturns = 0
@@ -1359,14 +1541,39 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     if (!unitCost && settings.defaultCostPercent > 0 && averagePrice > 0) unitCost = averagePrice * settings.defaultCostPercent / 100
     const hasCost = unitCost > 0
     const cogs = unitCost * netUnits
-    const commission = Math.max(0, item.revenue) * settings.commissionPercent / 100
-    const tax = Math.max(0, item.revenue) * settings.taxPercent / 100
-    const logistics = item.salesCount * settings.logisticsPerSale
     const revenueShare = positiveRevenue > 0 ? Math.max(0, item.revenue) / positiveRevenue : 0
+    const manualCommission = Math.max(0, item.revenue) * settings.commissionPercent / 100
+    const manualLogistics = item.salesCount * settings.logisticsPerSale
+    const commission = financeHasRows
+      ? item.financeCommission + unallocatedFinance.commission * revenueShare
+      : manualCommission
+    const logistics = financeHasRows
+      ? item.financeLogistics + unallocatedFinance.logistics * revenueShare
+      : manualLogistics
+    const storage = financeStorageAvailable
+      ? item.financeStorage + unallocatedFinance.storage * revenueShare
+      : availability.paidStorage
+        ? item.detailStorage + unallocatedPaidStorage * revenueShare
+        : manualStorageExpense * revenueShare
+    const acceptance = financeAcceptanceAvailable
+      ? item.financeAcceptance + unallocatedFinance.acceptance * revenueShare
+      : availability.acceptance
+        ? item.detailAcceptance + unallocatedAcceptance * revenueShare
+        : 0
+    const acquiring = financeAcquiringAvailable
+      ? item.financeAcquiring + unallocatedFinance.acquiring * revenueShare
+      : availability.acquiring
+        ? item.detailAcquiring + unallocatedAcquiring * revenueShare
+        : 0
+    const penalties = financeHasRows ? item.financePenalties + unallocatedFinance.penalties * revenueShare : 0
+    const deductions = financeHasRows ? item.financeDeductions + unallocatedFinance.deductions * revenueShare : 0
+    const additionalPayment = financeHasRows ? item.financeAdditionalPayment + unallocatedFinance.additionalPayment * revenueShare : 0
+    const sellerPayable = financeHasRows ? item.financeSellerPayable : 0
+    const tax = Math.max(0, item.revenue) * settings.taxPercent / 100
     const unallocatedAdvertising = Math.max(0, advertisingExpense - resolvedMappedAdvertisingSpend)
     const allocatedAdvertising = Math.max(0, item.adSpend) * mappedAdvertisingScale + unallocatedAdvertising * revenueShare
-    const allocatedShared = sharedNonAdvertisingExpenses * revenueShare
-    const expenses = cogs + commission + tax + logistics + allocatedAdvertising + allocatedShared
+    const allocatedFixed = sharedFixedExpenses * revenueShare
+    const expenses = cogs + commission + tax + logistics + storage + acceptance + acquiring + penalties + deductions + allocatedAdvertising + allocatedFixed - additionalPayment
     const profit = hasCost ? item.revenue - expenses : null
     const margin = profit != null && item.revenue > 0 ? profit / item.revenue * 100 : null
     const dailyAverage = item.salesCount / periodDays
@@ -1377,11 +1584,63 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     const cv = mean > 0 ? Math.sqrt(variance) / mean : null
     const xyz = cv == null ? 'Z' : cv <= 0.5 ? 'X' : cv <= 1 ? 'Y' : 'Z'
     const returnRate = item.salesCount > 0 ? item.returnsCount / item.salesCount * 100 : 0
-    const denominator = 1 - (settings.commissionPercent + settings.taxPercent) / 100
-    const breakevenPrice = hasCost && denominator > 0 ? (unitCost + settings.logisticsPerSale) / denominator : null
+    const breakevenPrice = hasCost && netUnits > 0 ? expenses / netUnits : null
     const targetDenominator = 1 - settings.targetMarginPercent / 100
     const targetPrice = breakevenPrice != null && targetDenominator > 0 ? breakevenPrice / targetDenominator : null
     const frozenMoney = availability.stockDetails && item.salesCount === 0 && item.stock > 0 ? item.stock * (unitCost || averagePrice * 0.5) : 0
+
+    const activeModeNames = ['FBS','FBO'].filter(mode => {
+      const bucket = item.modeStats[mode]
+      return item.fulfillmentModes[mode] || bucket.orders || bucket.sales || bucket.returns || bucket.stock || Math.abs(bucket.revenue) > 0
+    })
+    const fulfillmentLabel = activeModeNames.length === 2 ? 'FBS + FBO' : activeModeNames[0] || 'Не определено'
+    const modeWeightTotal = activeModeNames.reduce((sum,mode) => {
+      const bucket = item.modeStats[mode]
+      return sum + Math.max(0, bucket.revenue) + Math.max(0, bucket.sales) * Math.max(1, averagePrice)
+    },0)
+    const modeBreakdown = Object.fromEntries(['FBS','FBO'].map(mode => {
+      const bucket = item.modeStats[mode]
+      const observedWeight = Math.max(0, bucket.revenue) + Math.max(0, bucket.sales) * Math.max(1, averagePrice)
+      const share = activeModeNames.includes(mode)
+        ? modeWeightTotal > 0 ? observedWeight / modeWeightTotal : 1 / Math.max(1,activeModeNames.length)
+        : 0
+      const observedFinanceCommission = Math.max(0,bucket.commission)
+      const observedFinanceLogistics = Math.max(0,bucket.logistics)
+      const observedFinanceStorage = Math.max(0,bucket.storage)
+      const observedFinanceAcceptance = Math.max(0,bucket.acceptance)
+      const observedFinanceAcquiring = Math.max(0,bucket.acquiring)
+      const modeCommission = financeHasRows ? observedFinanceCommission + Math.max(0,commission - item.financeCommission) * share : commission * share
+      const modeLogistics = financeHasRows ? observedFinanceLogistics + Math.max(0,logistics - item.financeLogistics) * share : logistics * share
+      const modeStorage = financeStorageAvailable
+        ? observedFinanceStorage + Math.max(0,storage - item.financeStorage) * share
+        : availability.paidStorage ? Math.max(0,bucket.detailStorage) + Math.max(0,storage - item.detailStorage) * share : storage * share
+      const modeAcceptance = financeAcceptanceAvailable
+        ? observedFinanceAcceptance + Math.max(0,acceptance - item.financeAcceptance) * share
+        : availability.acceptance ? Math.max(0,bucket.detailAcceptance) + Math.max(0,acceptance - item.detailAcceptance) * share : acceptance * share
+      const modeAcquiring = financeAcquiringAvailable
+        ? observedFinanceAcquiring + Math.max(0,acquiring - item.financeAcquiring) * share
+        : availability.acquiring ? Math.max(0,bucket.detailAcquiring) + Math.max(0,acquiring - item.detailAcquiring) * share : acquiring * share
+      const modePenalties = financeHasRows ? Math.max(0,bucket.penalties) + Math.max(0,penalties - item.financePenalties) * share : 0
+      const modeDeductions = financeHasRows ? Math.max(0,bucket.deductions) + Math.max(0,deductions - item.financeDeductions) * share : 0
+      const modeAdditional = financeHasRows ? bucket.additionalPayment + (additionalPayment - item.financeAdditionalPayment) * share : 0
+      const modeCogs = cogs * share
+      const modeTax = tax * share
+      const modeAdvertising = allocatedAdvertising * share
+      const modeFixed = allocatedFixed * share
+      const modeExpenses = modeCogs + modeCommission + modeLogistics + modeStorage + modeAcceptance + modeAcquiring + modePenalties + modeDeductions + modeTax + modeAdvertising + modeFixed - modeAdditional
+      const modeRevenue = bucket.revenue || item.revenue * share
+      const modeProfit = hasCost && share > 0 ? modeRevenue - modeExpenses : null
+      return [mode, {
+        mode,
+        active:activeModeNames.includes(mode),
+        orders:Math.round(bucket.orders || 0), sales:Math.round(bucket.sales || 0), returns:Math.round(bucket.returns || 0), stock:Math.round(bucket.stock || 0),
+        revenue:Math.round(modeRevenue || 0), commission:Math.round(modeCommission), logistics:Math.round(modeLogistics), storage:Math.round(modeStorage),
+        acceptance:Math.round(modeAcceptance), acquiring:Math.round(modeAcquiring), penalties:Math.round(modePenalties), deductions:Math.round(modeDeductions),
+        additionalPayment:Math.round(modeAdditional), expenses:Math.round(modeExpenses), profit:modeProfit == null ? null : Math.round(modeProfit),
+        margin:modeProfit != null && modeRevenue > 0 ? Math.round(modeProfit / modeRevenue * 1000) / 10 : null,
+      }]
+    }))
+
     let stockStatus = availability.stockDetails ? 'В наличии' : (availability.stocks ? 'Детализация ожидается' : 'Не загружено')
     if (availability.stockDetails && item.stock <= 0) stockStatus = 'Нет остатка'
     else if (availability.stockDetails && stockCoverDays != null && stockCoverDays < 14) stockStatus = 'Заканчивается'
@@ -1398,6 +1657,10 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
 
     return {
       ...item,
+      fulfillmentMode:fulfillmentLabel,
+      modeBreakdown,
+      fbsStock:Math.round(item.modeStats.FBS.stock || 0),
+      fboStock:Math.round(item.modeStats.FBO.stock || 0),
       revenue: Math.round(item.revenue),
       stock: availability.stockDetails ? Math.round(item.stock) : null,
       stockAvailable: availability.stockDetails,
@@ -1407,10 +1670,22 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
       cogs: Math.round(cogs),
       commission: Math.round(commission),
       logistics: Math.round(logistics),
+      storage: Math.round(storage),
+      acceptance: Math.round(acceptance),
+      acquiring: Math.round(acquiring),
+      penalties: Math.round(penalties),
+      deductions: Math.round(deductions),
+      additionalPayment: Math.round(additionalPayment),
+      sellerPayable: Math.round(sellerPayable),
       tax: Math.round(tax),
       advertising: Math.round(allocatedAdvertising),
-      sharedExpenses: Math.round(allocatedShared),
+      fixedExpenses: Math.round(allocatedFixed),
+      sharedExpenses: Math.round(allocatedFixed),
       expenses: Math.round(expenses),
+      financeSource:financeHasRows ? 'wb_finance_api' : 'manual_fallback',
+      storageSource,
+      acceptanceSource,
+      acquiringSource,
       adViews: Math.round(item.adViews || 0),
       adClicks: Math.round(item.adClicks || 0),
       adOrders: Math.round(item.adOrders || 0),
@@ -1431,19 +1706,33 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
   })
 
   const totals = products.reduce((acc, item) => {
-    acc.cogs += item.cogs || 0
-    acc.commission += item.commission || 0
-    acc.logistics += item.logistics || 0
+    for (const field of ['cogs','commission','logistics','storage','acceptance','acquiring','penalties','deductions','additionalPayment','tax','advertising','fixedExpenses']) {
+      acc[field] += Number(item[field] || 0)
+    }
     return acc
-  }, { cogs: 0, commission: 0, logistics: 0 })
-  const tax = Math.max(0, totalRevenue) * settings.taxPercent / 100
+  }, { cogs:0, commission:0, logistics:0, storage:0, acceptance:0, acquiring:0, penalties:0, deductions:0, additionalPayment:0, tax:0, advertising:0, fixedExpenses:0 })
+  const tax = totals.tax
   const costConfigured = products.some(item => item.unitCost > 0)
   const operatingProfit = costConfigured
-    ? totalRevenue - totals.cogs - totals.commission - totals.logistics - tax - advertisingExpense - sharedNonAdvertisingExpenses
+    ? totalRevenue - totals.cogs - totals.commission - totals.logistics - totals.storage - totals.acceptance - totals.acquiring - totals.penalties - totals.deductions - totals.tax - totals.advertising - totals.fixedExpenses + totals.additionalPayment
     : null
   const margin = operatingProfit != null && totalRevenue > 0 ? operatingProfit / totalRevenue * 100 : null
   const averageDailySales = totalSales / periodDays
   const stockCoverDays = averageDailySales > 0 ? totalStock / averageDailySales : null
+
+  const fulfillment = {
+    products:{ FBS:products.filter(item => item.fulfillmentMode === 'FBS').length, FBO:products.filter(item => item.fulfillmentMode === 'FBO').length, both:products.filter(item => item.fulfillmentMode === 'FBS + FBO').length, unknown:products.filter(item => item.fulfillmentMode === 'Не определено').length },
+    FBS:{ orders:0,sales:0,returns:0,stock:0,revenue:0,expenses:0,profit:costConfigured?0:null },
+    FBO:{ orders:0,sales:0,returns:0,stock:0,revenue:0,expenses:0,profit:costConfigured?0:null },
+  }
+  for (const item of products) {
+    for (const mode of ['FBS','FBO']) {
+      const row = item.modeBreakdown?.[mode]
+      if (!row?.active) continue
+      for (const field of ['orders','sales','returns','stock','revenue','expenses']) fulfillment[mode][field] += Number(row[field] || 0)
+      if (costConfigured && row.profit != null) fulfillment[mode].profit += Number(row.profit || 0)
+    }
+  }
 
   const recommendations = []
   const pushRecommendation = (priority, type, product, title, text, effect = '') => {
@@ -1507,11 +1796,22 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
       stockCoverDays: stockCoverDays == null ? null : Math.round(stockCoverDays),
       cogs: costConfigured ? Math.round(totals.cogs) : null,
       commission: Math.round(totals.commission),
+      commissionSource: financeHasRows ? 'wb_api' : 'manual',
       logistics: Math.round(totals.logistics),
-      advertising: Math.round(advertisingExpense),
+      logisticsSource: financeHasRows ? 'wb_api' : 'manual',
+      advertising: Math.round(totals.advertising),
       advertisingSource: availability.advertising && advertisingStatsAvailable ? 'wb_api' : 'manual',
-      storage: Math.round(settings.storageMonthly),
-      fixed: Math.round(settings.fixedMonthly),
+      storage: Math.round(totals.storage),
+      storageSource,
+      acceptance: Math.round(totals.acceptance),
+      acceptanceSource,
+      acquiring: Math.round(totals.acquiring),
+      acquiringSource,
+      penalties: Math.round(totals.penalties),
+      deductions: Math.round(totals.deductions),
+      additionalPayment: Math.round(totals.additionalPayment),
+      sellerBalance: financeData?.balance || null,
+      fixed: Math.round(totals.fixedExpenses),
       tax: Math.round(tax),
       operatingProfit: operatingProfit == null ? null : Math.round(operatingProfit),
       margin: margin == null ? null : Math.round(margin * 10) / 10,
@@ -1542,6 +1842,10 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
         vendorCodes: new Set(rawProducts.flatMap(productVendorCodes).map(cleanVendorIdentity)).size,
         chrtIds: new Set(rawProducts.flatMap(productChrtIds)).size,
       },
+      fboRows:fboStocks.length,
+      sellerRows:sellerStocks.length,
+      fboQuantity:Math.round(fboStocks.reduce((sum,row) => sum + Math.max(0,firstNumber(row,['quantity','amount','stock'],0)),0)),
+      sellerQuantity:Math.round(sellerStocks.reduce((sum,row) => sum + Math.max(0,firstNumber(row,['quantity','amount','stock'],0)),0)),
       detailsAvailable: availability.stockDetails,
       needsCatalogRefresh: rawStockQuantity > 0 && mappedStockRows === 0,
       needsIdentifierRefresh: false,
@@ -1564,6 +1868,16 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
       mappedProductRows: campaignProductRows.filter(row => row.mapped).length,
       source: availability.advertising ? 'wb_api' : 'manual',
     },
+    finance: {
+      rows: financeRows,
+      totals: financeTotals,
+      balance: financeData?.balance || null,
+      period: financeData?.period || null,
+      complete: financeData?.complete !== false,
+      sources:{ commission:financeHasRows?'finance_report':'manual', logistics:financeHasRows?'finance_report':'manual', storage:storageSource, acceptance:acceptanceSource, acquiring:acquiringSource },
+      dedicated:{ paidStorageRows:paidStorageRows.length, acceptanceRows:acceptanceRows.length, acquiringRows:acquiringRows.length },
+    },
+    fulfillment,
     products,
     dailyTrend: [...dailyMap.values()].map(row => ({ ...row, revenue: Math.round(row.revenue) })),
     warehouses: [...warehouses.entries()].map(([name, quantity]) => ({ name, quantity: Math.round(quantity) })).sort((a, b) => b.quantity - a.quantity),
@@ -1597,6 +1911,53 @@ async function loadProducts(token, { limit = 100, maxPages = 300, deadlineAt = 0
   }
   const validation = validateCatalogStrict(products)
   return { value:products, rawPayload:rawPages, validation, endpoint }
+}
+
+async function loadSellerStocks(token, products = [], { deadlineAt = 0 } = {}) {
+  const warehouseEndpoint = 'https://marketplace-api.wildberries.ru/api/v3/warehouses'
+  const warehouses = await wbFetch(warehouseEndpoint, token, {
+    label:'Склады продавца FBS', timeoutMs:30000, maxAttempts:2, maxRetryDelayMs:3000, deadlineAt,
+  })
+  const sellerWarehouses = Array.isArray(warehouses) ? warehouses : []
+  const chrtIds = uniqueIdentities((Array.isArray(products) ? products : []).flatMap(productChrtIds), cleanNumericIdentity).map(Number).filter(Number.isFinite)
+  if (!sellerWarehouses.length || !chrtIds.length) {
+    return { value:[], rawPayload:{ warehouses:sellerWarehouses, stocks:[] }, validation:{ warehouses:sellerWarehouses.length, chrtIds:chrtIds.length, rows:0 }, endpoint:warehouseEndpoint }
+  }
+  const rows = []
+  const rawStocks = []
+  for (const warehouse of sellerWarehouses) {
+    const warehouseId = Number(warehouse?.id ?? warehouse?.ID ?? warehouse?.warehouseId)
+    if (!Number.isFinite(warehouseId)) continue
+    for (let offset=0; offset<chrtIds.length; offset+=1000) {
+      const batch = chrtIds.slice(offset,offset+1000)
+      const endpoint = `https://marketplace-api.wildberries.ru/api/v3/stocks/${warehouseId}`
+      const payload = await wbFetch(endpoint, token, {
+        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ chrtIds:batch }),
+        label:`Остатки FBS · ${warehouse?.name || warehouseId}`, timeoutMs:30000, maxAttempts:2, maxRetryDelayMs:3000, deadlineAt,
+      })
+      rawStocks.push({ warehouse, payload })
+      for (const stock of Array.isArray(payload?.stocks) ? payload.stocks : []) {
+        rows.push({
+          ...stock,
+          chrtId:stock?.chrtId,
+          quantity:Math.max(0,Number(stock?.amount || 0)),
+          amount:Math.max(0,Number(stock?.amount || 0)),
+          warehouseId,
+          warehouseName:String(warehouse?.name || `Склад продавца ${warehouseId}`),
+          fulfillmentMode:'FBS',
+          stockScheme:'FBS',
+          source:'marketplace_seller_stock',
+        })
+      }
+      if (offset + 1000 < chrtIds.length) await sleep(250)
+    }
+  }
+  return {
+    value:rows,
+    rawPayload:{ warehouses:sellerWarehouses, stocks:rawStocks },
+    validation:{ warehouses:sellerWarehouses.length, chrtIds:chrtIds.length, rows:rows.length, totalQuantity:rows.reduce((sum,row)=>sum+Number(row.quantity||0),0) },
+    endpoint:'https://marketplace-api.wildberries.ru/api/v3/stocks/{warehouseId}',
+  }
 }
 
 function firstDefined(sources = [], keys = [], fallback = null) {
@@ -1813,11 +2174,14 @@ function stageDataKey(stage) {
 function previousStageValue(data, stage) {
   const value = data?.[stageDataKey(stage)]
   if (stage === 'advertising') return value && typeof value === 'object' ? value : { campaigns: [], totals: {}, period: null }
+  if (stage === 'finance') return value && typeof value === 'object' ? value : { rows:[], totals:{}, period:null, balance:null, complete:true }
+  if (stage === 'acquiring') return value && typeof value === 'object' ? value : { rows:[], totals:{}, period:null, complete:true }
   return Array.isArray(value) ? value : []
 }
 
 function stageCount(stage, value) {
   if (stage === 'advertising') return Array.isArray(value?.campaigns) ? value.campaigns.length : 0
+  if (stage === 'finance' || stage === 'acquiring') return Array.isArray(value?.rows) ? value.rows.length : 0
   return Array.isArray(value) ? value.length : 0
 }
 
@@ -2088,6 +2452,203 @@ async function loadAdvertising(token, { deadlineAt = 0, previous = {} } = {}) {
   }
 }
 
+
+function reportPeriod(days = 30) {
+  const end = new Date()
+  const start = new Date(end.getTime() - (Math.max(1, days) - 1) * 86400000)
+  return { dateFrom:start.toISOString().slice(0,10), dateTo:end.toISOString().slice(0,10), days:Math.max(1, days) }
+}
+
+function reportRowKey(stream, row = {}, index = 0) {
+  if (stream === 'finance' || stream === 'acquiring') {
+    const rrd = row.rrdId ?? row.rrd_id
+    if (rrd != null && String(rrd).trim()) return `${stream}:rrd:${rrd}`
+    return [stream,row.srid || '',row.nmId ?? row.nm_id ?? '',row.docTypeName || row.doc_type_name || '',row.rrDate || row.rr_dt || row.saleDate || row.sale_dt || '',index].join(':')
+  }
+  if (stream === 'paidStorage') return [stream,row.date || '',row.originalDate || '',row.nmId ?? row.nmID ?? '',row.chrtId ?? '',row.barcode || '',row.warehouse || '',index].join(':')
+  if (stream === 'acceptance') return [stream,row.incomeId ?? '',row.nmID ?? row.nmId ?? '',row.shkCreateDate || '',index].join(':')
+  return `${stream}:${index}`
+}
+
+function mergeReportRows(stream, previousRows = [], incomingRows = []) {
+  const map = new Map()
+  ;(Array.isArray(previousRows) ? previousRows : []).forEach((row,index) => map.set(reportRowKey(stream,row,index), row))
+  ;(Array.isArray(incomingRows) ? incomingRows : []).forEach((row,index) => map.set(reportRowKey(stream,row,index), row))
+  return [...map.values()]
+}
+
+function fieldNumber(row = {}, aliases = [], fallback = 0) {
+  for (const key of aliases) {
+    const value = Number(row?.[key])
+    if (Number.isFinite(value)) return value
+  }
+  return fallback
+}
+
+function financeSign(row = {}) {
+  const text = String(row.docTypeName || row.doc_type_name || row.sellerOperName || row.supplier_oper_name || '').toLowerCase()
+  return text.includes('возврат') || text.includes('сторно') ? -1 : 1
+}
+
+function financeCommissionAmount(row = {}) {
+  // В новом Finance API фактическое вознаграждение WB — vw + НДС (vwNds).
+  // ppvzSalesCommission оставляем fallback для старых/неполных ответов, чтобы не удваивать комиссию.
+  const vw = fieldNumber(row,['vw','ppvzVw','ppvz_vw'],Number.NaN)
+  const vat = Math.abs(fieldNumber(row,['vwNds','vw_nds','ppvzVwNds','ppvz_vw_nds'],0))
+  if (Number.isFinite(vw)) return Math.abs(vw) + vat
+  return Math.abs(fieldNumber(row,['ppvzSalesCommission','ppvz_sales_commission'],0)) + vat
+}
+
+function summarizeFinanceRows(rows = []) {
+  const totals = {
+    grossRevenue:0, sellerPayable:0, commission:0, logistics:0, storage:0, acceptance:0,
+    acquiring:0, penalties:0, deductions:0, additionalPayment:0, logisticsRebill:0,
+  }
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const sign = financeSign(row)
+    totals.grossRevenue += sign * Math.abs(fieldNumber(row,['retailPriceWithDiscRub','retail_price_withdisc_rub','retailAmount','retail_amount'],0))
+    totals.sellerPayable += sign * Math.abs(fieldNumber(row,['forPay','for_pay','ppvzForPay','ppvz_for_pay'],0))
+    totals.commission += financeCommissionAmount(row)
+    totals.logistics += Math.abs(fieldNumber(row,['deliveryRub','delivery_rub','deliveryService','delivery_service'],0))
+    totals.logisticsRebill += Math.abs(fieldNumber(row,['rebillLogisticCost','rebill_logistic_cost'],0))
+    totals.storage += Math.abs(fieldNumber(row,['paidStorage','paid_storage','storageFee','storage_fee'],0))
+    totals.acceptance += Math.abs(fieldNumber(row,['paidAcceptance','paid_acceptance','acceptance'],0))
+    totals.acquiring += Math.abs(fieldNumber(row,['acquiringFee','acquiring_fee'],0))
+    totals.penalties += Math.abs(fieldNumber(row,['penalty'],0))
+    totals.deductions += Math.abs(fieldNumber(row,['deduction'],0))
+    totals.additionalPayment += fieldNumber(row,['additionalPayment','additional_payment'],0)
+  }
+  return Object.fromEntries(Object.entries(totals).map(([key,value]) => [key,Math.round(value*100)/100]))
+}
+
+async function loadFinanceReports(token, { deadlineAt = 0, previous = null } = {}) {
+  const period = reportPeriod(30)
+  const endpoint = 'https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed'
+  const rows = []
+  let rrdId = 0
+  let complete = true
+  const limit = 100000
+  for (let page = 0; page < 3; page += 1) {
+    const payload = await wbFetch(endpoint, token, {
+      method:'POST',
+      body:JSON.stringify({ dateFrom:period.dateFrom, dateTo:period.dateTo, limit, rrdId, period:'daily' }),
+      headers:{ 'Content-Type':'application/json' },
+      label:'Финансовая детализация WB', timeoutMs:60000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
+    })
+    const pageRows = Array.isArray(payload) ? payload : []
+    if (!pageRows.length) break
+    rows.push(...pageRows)
+    if (pageRows.length < limit) break
+    const nextRrdId = Number(pageRows.at(-1)?.rrdId ?? pageRows.at(-1)?.rrd_id ?? 0)
+    if (!nextRrdId || nextRrdId === rrdId) { complete = false; break }
+    rrdId = nextRrdId
+    if (deadlineAt && Date.now() + 61000 > deadlineAt) { complete = false; break }
+    await sleep(61000)
+  }
+  let balance = previous?.balance || null
+  try {
+    balance = await wbFetch('https://finance-api.wildberries.ru/api/v1/account/balance', token, {
+      label:'Баланс WB', timeoutMs:20000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
+    })
+  } catch (error) {
+    // Баланс — дополнительный виджет. Не обнуляем финансовую детализацию из-за его отдельного лимита.
+    console.warn('WB balance skipped:', error.message)
+  }
+  const mergedRows = mergeReportRows('finance', previous?.rows, rows)
+  return {
+    value:{ rows:mergedRows, totals:summarizeFinanceRows(mergedRows), period, balance, complete, lastRrdId:rrdId || null },
+    rawPayload:rows,
+    validation:{ incomingRows:rows.length, mergedRows:mergedRows.length, complete, period },
+    endpoint,
+  }
+}
+
+async function loadAcquiringReports(token, { deadlineAt = 0, previous = null } = {}) {
+  const period = reportPeriod(30)
+  const endpoint = 'https://finance-api.wildberries.ru/api/finance/v1/acquiring/detailed'
+  const payload = await wbFetch(endpoint, token, {
+    method:'POST',
+    body:JSON.stringify({ dateFrom:period.dateFrom, dateTo:period.dateTo, limit:100000, rrdId:0 }),
+    headers:{ 'Content-Type':'application/json' },
+    label:'Эквайринг WB', timeoutMs:60000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
+  })
+  const incoming = Array.isArray(payload) ? payload : []
+  const rows = mergeReportRows('acquiring', previous?.rows, incoming)
+  const total = rows.reduce((sum,row) => sum + Math.abs(fieldNumber(row,['acquiringFee','acquiring_fee'],0)),0)
+  return {
+    value:{ rows, totals:{ acquiring:Math.round(total*100)/100 }, period, complete:incoming.length < 100000 },
+    rawPayload:payload,
+    validation:{ incomingRows:incoming.length, mergedRows:rows.length, period },
+    endpoint,
+  }
+}
+
+const GENERATED_REPORTS = Object.freeze({
+  paidStorage:{ base:'https://seller-analytics-api.wildberries.ru/api/v1/paid_storage', chunkDays:8, totalDays:30, label:'Платное хранение WB' },
+  acceptance:{ base:'https://seller-analytics-api.wildberries.ru/api/v1/acceptance_report', chunkDays:31, totalDays:30, label:'Платная приёмка WB' },
+})
+
+function generatedReportChunks(definition) {
+  const end = new Date()
+  const start = new Date(end.getTime() - (definition.totalDays - 1) * 86400000)
+  const chunks = []
+  let cursor = new Date(start)
+  while (cursor <= end) {
+    const chunkEnd = new Date(Math.min(end.getTime(), cursor.getTime() + (definition.chunkDays - 1) * 86400000))
+    chunks.push({ dateFrom:cursor.toISOString().slice(0,10), dateTo:chunkEnd.toISOString().slice(0,10) })
+    cursor = new Date(chunkEnd.getTime() + 86400000)
+  }
+  return chunks
+}
+
+async function advanceGeneratedReportTask(stage, token, state, { deadlineAt = 0 } = {}) {
+  const definition = GENERATED_REPORTS[stage]
+  if (!definition) throw new Error(`Неизвестный отчёт WB: ${stage}`)
+  const metadata = state?.metadata && typeof state.metadata === 'object' ? state.metadata : {}
+  const chunks = Array.isArray(metadata.chunks) && metadata.chunks.length ? metadata.chunks : generatedReportChunks(definition)
+  const chunkIndex = Math.max(0, Math.min(chunks.length - 1, Number(metadata.chunkIndex || 0)))
+  const chunk = chunks[chunkIndex]
+  const taskId = state?.task_id || null
+  if (!taskId) {
+    const created = await wbFetch(`${definition.base}?dateFrom=${encodeURIComponent(chunk.dateFrom)}&dateTo=${encodeURIComponent(chunk.dateTo)}`, token, {
+      label:`Создание отчёта «${definition.label}»`, timeoutMs:30000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
+    })
+    const createdTaskId = created?.data?.taskId
+    if (!createdTaskId) throw Object.assign(new Error(`${definition.label}: не получен taskId`), { status:502 })
+    return {
+      pending:true, taskId:createdTaskId, taskStatus:'new',
+      nextAllowedAt:new Date(Date.now()+10000).toISOString(),
+      metadata:{ ...metadata, chunks, chunkIndex, reportFrom:chunk.dateFrom, reportTo:chunk.dateTo },
+    }
+  }
+  const statusPayload = await wbFetch(`${definition.base}/tasks/${encodeURIComponent(taskId)}/status`, token, {
+    label:`Проверка отчёта «${definition.label}»`, timeoutMs:20000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
+  })
+  const taskStatus = String(statusPayload?.data?.status || '').toLowerCase()
+  if (taskStatus === 'done') {
+    const payload = await wbFetch(`${definition.base}/tasks/${encodeURIComponent(taskId)}/download`, token, {
+      label:`Загрузка отчёта «${definition.label}»`, timeoutMs:60000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
+    })
+    const rows = Array.isArray(payload) ? payload : []
+    return {
+      pending:false, rows, rawPayload:payload,
+      endpoint:`${definition.base}/tasks/${taskId}/download`,
+      validation:{ rows:rows.length, chunkIndex, chunks:chunks.length, ...chunk },
+      moreChunks:chunkIndex + 1 < chunks.length,
+      nextChunkIndex:chunkIndex + 1,
+      metadata:{ ...metadata, chunks, chunkIndex, reportFrom:chunk.dateFrom, reportTo:chunk.dateTo },
+    }
+  }
+  if (taskStatus === 'canceled' || taskStatus === 'purged') {
+    throw Object.assign(new Error(`${definition.label}: отчёт завершён со статусом ${taskStatus}. Будет создан заново.`), { status:502, resetTask:true })
+  }
+  return {
+    pending:true, taskId, taskStatus:taskStatus || 'processing',
+    nextAllowedAt:new Date(Date.now()+10000).toISOString(),
+    metadata:{ ...metadata, chunks, chunkIndex, reportFrom:chunk.dateFrom, reportTo:chunk.dateTo },
+  }
+}
+
 async function advanceWarehouseRemainsTask(token, state, { deadlineAt = 0 } = {}) {
   const base = 'https://seller-analytics-api.wildberries.ru/api/v1/warehouse_remains'
   // Отчёт создаём сразу в детализации, необходимой для единой карточки товара.
@@ -2158,6 +2719,11 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       const loaded = await loadProducts(selected.token, { deadlineAt })
       value = loaded.value
       snapshot = loaded
+    } else if (stage === 'sellerStocks') {
+      const loaded = await loadSellerStocks(selected.token, Array.isArray(data.products) ? data.products : [], { deadlineAt })
+      value = loaded.value
+      meta = loaded.validation || null
+      snapshot = loaded
     } else if (stage === 'orders' || stage === 'sales') {
       const loaded = await loadStatisticsRows(stage, selected.token, { deadlineAt, previousRows:fallback })
       value = loaded.value
@@ -2167,6 +2733,29 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       value = loaded.value
       meta = value.meta || null
       snapshot = loaded
+    } else if (stage === 'finance') {
+      const loaded = await loadFinanceReports(selected.token, { deadlineAt, previous:fallback })
+      value = loaded.value
+      meta = { ...loaded.validation, totals:value.totals, balance:value.balance }
+      snapshot = loaded
+    } else if (stage === 'acquiring') {
+      const loaded = await loadAcquiringReports(selected.token, { deadlineAt, previous:fallback })
+      value = loaded.value
+      meta = { ...loaded.validation, totals:value.totals }
+      snapshot = loaded
+    } else if (stage === 'paidStorage' || stage === 'acceptance') {
+      const result = await advanceGeneratedReportTask(stage, selected.token, state, { deadlineAt })
+      if (result.pending) {
+        state = await updateSyncState(connection.id, stage, {
+          status:'pending', lastAttemptAt:new Date().toISOString(), nextAllowedAt:result.nextAllowedAt,
+          lastError:null, taskId:result.taskId,
+          metadata:{ ...result.metadata, taskStatus:result.taskStatus, tokenId:selected.row.id, tokenLabel:selected.row.label, primary:Boolean(selected.row.is_primary) },
+        })
+        return { stage, status:'pending', value:fallback, warning:`${definition.label}: отчёт WB формируется в фоне. ELISEI загрузит его автоматически.`, state }
+      }
+      value = mergeReportRows(stage, fallback, result.rows)
+      meta = { ...result.validation, moreChunks:result.moreChunks, nextChunkIndex:result.nextChunkIndex }
+      snapshot = result
     } else if (stage === 'stocks') {
       const result = await advanceWarehouseRemainsTask(selected.token, state, { deadlineAt })
       if (result.pending) {
@@ -2186,11 +2775,11 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
         connectionId:connection.id,
         stream:stage,
         endpoint:snapshot.endpoint || stage,
-        requestKey:stage === 'stocks' ? String(meta?.taskId || '') : '',
+        requestKey:['stocks','paidStorage','acceptance'].includes(stage) ? String(state?.task_id || meta?.taskId || '') : '',
         rawPayload:snapshot.rawPayload,
-        normalizedPayload:['products','stocks','advertising'].includes(stage) ? value : null,
+        normalizedPayload:['products','stocks','sellerStocks','advertising','finance','paidStorage','acceptance','acquiring'].includes(stage) ? value : null,
         validation:snapshot.validation || meta || {},
-        keep:['orders','sales'].includes(stage) ? 1 : 3,
+        keep:['orders','sales','finance','acquiring'].includes(stage) ? 2 : 4,
       })
     }
 
@@ -2208,6 +2797,14 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
     })
 
     const count = stageCount(stage, value)
+    if ((stage === 'paidStorage' || stage === 'acceptance') && meta?.moreChunks) {
+      state = await updateSyncState(connection.id, stage, {
+        status:'queued', lastAttemptAt:new Date().toISOString(), lastSuccessAt:new Date().toISOString(),
+        nextAllowedAt:new Date(Date.now()+61000).toISOString(), lastError:null, lastCount:count, taskId:null,
+        metadata:{ ...(state?.metadata || {}), chunkIndex:meta.nextChunkIndex, completedChunks:Number(meta.nextChunkIndex || 0), tokenId:selected.row.id, tokenLabel:selected.row.label },
+      })
+      return { stage, status:'queued', value, meta, warning:`${definition.label}: загружена часть периода, остальные интервалы поставлены в очередь.`, state }
+    }
     const stateMetadata = {
       tokenId:selected.row.id,
       tokenLabel:selected.row.label,
@@ -2291,7 +2888,7 @@ app.get('/health', async (_req, res) => {
   res.json({
     ok: true,
     service: 'elisei-api',
-    version: '2.9.0',
+    version: '2.10.0',
     database,
     backgroundWorker: {
       running: backgroundWorkerState.running,
@@ -2476,7 +3073,7 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
       const result = await runSyncStage({ connection, tokens, data, stage, deadlineAt })
       results.push(result)
       if (result.warning) warnings.push(result.warning)
-      if (result.status === 'success') {
+      if (result.status === 'success' || (result.status === 'queued' && stageCount(stage,result.value) > 0)) {
         data[stageDataKey(stage)] = result.value
         if (stage === 'stocks') data.stockMeta = result.meta || buildStockMeta(result.value)
       }
@@ -2501,9 +3098,14 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
       orders: Array.isArray(data.orders) ? data.orders.length : 0,
       sales: Array.isArray(data.sales) ? data.sales.length : 0,
       stocks: Array.isArray(data.stocks) ? data.stocks.length : 0,
+      sellerStocks: Array.isArray(data.sellerStocks) ? data.sellerStocks.length : 0,
       advertising: Array.isArray(data.advertising?.campaigns) ? data.advertising.campaigns.length : 0,
+      finance: Array.isArray(data.finance?.rows) ? data.finance.rows.length : 0,
+      paidStorage: Array.isArray(data.paidStorage) ? data.paidStorage.length : 0,
+      acceptance: Array.isArray(data.acceptance) ? data.acceptance.length : 0,
+      acquiring: Array.isArray(data.acquiring?.rows) ? data.acquiring.rows.length : 0,
     }
-    const hasSuccess = results.some(result => result.status === 'success')
+    const hasSuccess = results.some(result => result.status === 'success' || (result.status === 'queued' && stageCount(result.stage,result.value) > 0))
     const history = withSyncLog(connection.sync_history, {
       status: hasSuccess ? 'success' : 'partial', durationMs: Date.now() - startedAt, counts, warnings,
       stages: Object.fromEntries(results.map(result => [result.stage, result.status])),
@@ -3277,6 +3879,62 @@ async function processPendingStockReports() {
 }
 
 
+
+const generatedReportLocks = new Set()
+async function processPendingGeneratedReports() {
+  if (!pool) return
+  let due = []
+  try {
+    const result = await pool.query(`
+      SELECT s.*, c.user_id, c.data, c.sync_history
+      FROM wb_sync_states s
+      JOIN marketplace_connections c ON c.id=s.connection_id
+      WHERE s.stage IN ('paidStorage','acceptance')
+        AND s.status IN ('pending','queued','rate_limited')
+        AND (s.next_allowed_at IS NULL OR s.next_allowed_at <= NOW())
+      ORDER BY s.updated_at
+      LIMIT 6
+    `)
+    due = result.rows
+  } catch (error) {
+    console.warn('Generated WB reports scan failed:', error.message)
+    return
+  }
+
+  for (const row of due) {
+    if (generatedReportLocks.has(row.connection_id)) continue
+    generatedReportLocks.add(row.connection_id)
+    try {
+      const connectionResult = await pool.query('SELECT * FROM marketplace_connections WHERE id=$1 AND user_id=$2', [row.connection_id,row.user_id])
+      const connection = connectionResult.rows[0]
+      if (!connection) continue
+      const tokens = await getWbTokens(row.user_id,row.connection_id)
+      const canonical = await canonicalConnectionData(connection,{ repair:true,persistManifest:false,queueMissing:false })
+      const data = canonical.data
+      const result = await runSyncStage({ connection,tokens,data,stage:row.stage,deadlineAt:Date.now()+85000 })
+      if (['success','queued'].includes(result.status)) data[stageDataKey(row.stage)] = result.value
+      const stageStatus = { ...(data.stageStatus || {}) }
+      stageStatus[row.stage] = {
+        status:result.status,
+        available:stageCount(row.stage,result.value) > 0,
+        count:stageCount(row.stage,result.value),
+        lastSuccessAt:result.state?.last_success_at || null,
+        nextAllowedAt:result.state?.next_allowed_at || null,
+        error:result.state?.last_error || null,
+      }
+      data.stageStatus = stageStatus
+      const existingSources = data?.dataManifest?.streams && typeof data.dataManifest.streams === 'object' ? data.dataManifest.streams : {}
+      const sources = { ...existingSources, [row.stage]:{ source:'background_sync', count:stageCount(row.stage,result.value), updatedAt:new Date().toISOString(), checksum:null } }
+      const compactData = compactConnectionData(data,sources)
+      await pool.query(`UPDATE marketplace_connections SET data=$1::jsonb,updated_at=NOW(),status='connected' WHERE id=$2`,[JSON.stringify(compactData),row.connection_id])
+    } catch (error) {
+      console.warn(`Generated WB report ${row.stage} failed:`,error.message)
+    } finally {
+      generatedReportLocks.delete(row.connection_id)
+    }
+  }
+}
+
 const deferredStageLocks = new Set()
 async function processDueDeferredStages() {
   if (!pool) return
@@ -3286,7 +3944,7 @@ async function processDueDeferredStages() {
       SELECT s.*, c.user_id, c.data, c.sync_history, c.id AS connection_id
       FROM wb_sync_states s
       JOIN marketplace_connections c ON c.id=s.connection_id
-      WHERE s.stage <> 'stocks' AND s.status IN ('rate_limited','queued')
+      WHERE s.stage NOT IN ('stocks','paidStorage','acceptance') AND s.status IN ('rate_limited','queued')
         AND s.next_allowed_at IS NOT NULL AND s.next_allowed_at <= NOW()
       ORDER BY s.next_allowed_at
       LIMIT 10

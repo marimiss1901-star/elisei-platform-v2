@@ -1,6 +1,19 @@
 import crypto from 'node:crypto'
 
-export const WB_STREAMS = Object.freeze(['products', 'orders', 'sales', 'stocks', 'advertising'])
+export const WB_STREAMS = Object.freeze([
+  'products',
+  'orders',
+  'sales',
+  'stocks',
+  'sellerStocks',
+  'advertising',
+  'finance',
+  'paidStorage',
+  'acceptance',
+  'acquiring',
+])
+
+const OBJECT_STREAMS = new Set(['advertising', 'finance', 'acquiring'])
 
 function checksum(payload) {
   return crypto.createHash('sha256').update(JSON.stringify(payload ?? null)).digest('hex')
@@ -8,6 +21,7 @@ function checksum(payload) {
 
 export function streamCount(stream, payload) {
   if (stream === 'advertising') return Array.isArray(payload?.campaigns) ? payload.campaigns.length : 0
+  if (OBJECT_STREAMS.has(stream)) return Array.isArray(payload?.rows) ? payload.rows.length : 0
   return Array.isArray(payload) ? payload.length : 0
 }
 
@@ -16,6 +30,16 @@ export function normalizeStreamPayload(stream, payload) {
     return payload && typeof payload === 'object' && !Array.isArray(payload)
       ? payload
       : { campaigns: [], totals: {}, period: null, truncated: false }
+  }
+  if (stream === 'finance') {
+    return payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? { rows: [], totals: {}, modeTotals: {}, period: null, balance: null, complete: true, ...payload }
+      : { rows: [], totals: {}, modeTotals: {}, period: null, balance: null, complete: true }
+  }
+  if (stream === 'acquiring') {
+    return payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? { rows: [], totals: {}, period: null, complete: true, ...payload }
+      : { rows: [], totals: {}, period: null, complete: true }
   }
   return Array.isArray(payload) ? payload : []
 }
@@ -31,9 +55,11 @@ export async function ensureStreamSchema(db) {
       metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
       source TEXT NOT NULL DEFAULT 'sync',
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      PRIMARY KEY(connection_id, stream),
-      CHECK (stream IN ('products','orders','sales','stocks','advertising'))
+      PRIMARY KEY(connection_id, stream)
     );
+    ALTER TABLE wb_stream_data DROP CONSTRAINT IF EXISTS wb_stream_data_stream_check;
+    ALTER TABLE wb_stream_data ADD CONSTRAINT wb_stream_data_stream_check
+      CHECK (stream IN ('products','orders','sales','stocks','sellerStocks','advertising','finance','paidStorage','acceptance','acquiring'));
     CREATE INDEX IF NOT EXISTS wb_stream_data_updated_idx
       ON wb_stream_data(connection_id, updated_at DESC);
   `)
@@ -88,7 +114,7 @@ export async function latestSnapshotForStream(db, connectionId, stream) {
 export function snapshotPayload(stream, snapshot) {
   if (!snapshot) return null
   const normalized = snapshot.normalized_payload
-  if (stream === 'advertising') {
+  if (OBJECT_STREAMS.has(stream)) {
     if (normalized && typeof normalized === 'object' && !Array.isArray(normalized)) return normalized
     return null
   }
@@ -118,7 +144,7 @@ export async function hydrateStreamData(db, connectionId, legacyData = {}, { rep
     }
 
     const legacyValue = normalizeStreamPayload(stream, data[stream])
-    const legacyHasValue = stream === 'advertising'
+    const legacyHasValue = OBJECT_STREAMS.has(stream)
       ? Boolean(data[stream] && typeof data[stream] === 'object' && !Array.isArray(data[stream]))
       : Array.isArray(data[stream])
 
