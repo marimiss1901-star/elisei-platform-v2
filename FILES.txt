@@ -1,5 +1,7 @@
 README_5_4_5.md
+README_5_4_5A.md
 RELEASE_NOTES_V5_4_5.txt
+RELEASE_NOTES_V5_4_5A.txt
 backend/package.json
 backend/src/server.js
 backend/src/wb/stream-store.js

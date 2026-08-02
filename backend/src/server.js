@@ -1439,7 +1439,7 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
   const tax = Math.max(0, totalRevenue) * settings.taxPercent / 100
   const costConfigured = products.some(item => item.unitCost > 0)
   const operatingProfit = costConfigured
-    ? totalRevenue - totals.cogs - totals.commission - totals.logistics - tax - sharedExpenses
+    ? totalRevenue - totals.cogs - totals.commission - totals.logistics - tax - advertisingExpense - sharedNonAdvertisingExpenses
     : null
   const margin = operatingProfit != null && totalRevenue > 0 ? operatingProfit / totalRevenue * 100 : null
   const averageDailySales = totalSales / periodDays
