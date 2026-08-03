@@ -1,8 +1,2 @@
-79a3ff576df3e94b5e37be05daa0c161ac3a827ef9610c689de5d8c3f8a212d7  ./FILES.txt
-7fbb52d984694e3fd9e91a736bfd028fbf417c233772a0cb49bf8e331725ac8f  ./README_5_4_7.md
-15da91641fb17150cf150415e7d2b52b6308b4eae158e78c38dfd89bee540b20  ./RELEASE_NOTES_V5_4_7.txt
-4f51ce5f230a19e0e7d03e5547c33de97c970955d33db2851fa7ed94f4a19d25  ./backend/package.json
-6e6afd048d55e608c945a6ac2dc0149d2e20c85ed8e07d9fe69dd70aea0c4181  ./backend/src/server.js
-4d13f6076d707091b8ded82204128a1f7be8a026296ba197d09d86cc6a602d5b  ./backend/src/wb/stream-store.js
-4401d3f85367de36a3dc5d20f514dc7823569973239b9c8c438ca37f116f73dd  ./backend/tests/wb-finance-fbs-fbo.test.mjs
-1dab6f488541a381130123be6b84ad65e87be3283d9233276677517a1159acf7  ./backend/tests/wb-memory-safe-sync.test.mjs
+71992c5834beb2b414e9364d4a75ac49d17c33386d3228f3837c77a97e383160  backend/src/server.js
+f25df4d7ce89a19ea407f1e933b4e6cd9a06503a982dfae0a79536370fa4a52c  README_5_4_7A.md

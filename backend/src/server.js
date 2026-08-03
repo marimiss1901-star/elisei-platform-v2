@@ -36,6 +36,40 @@ const databaseUrl = process.env.DATABASE_URL || ''
 const pool = databaseUrl ? new Pool({ connectionString: databaseUrl, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined }) : null
 const encryptionSecret = process.env.ENCRYPTION_KEY || jwtSecret
 const encryptionKey = encryptionSecret ? crypto.createHash('sha256').update(encryptionSecret).digest() : null
+const staleRunningMinutes = Math.max(2, Math.min(30, Number(process.env.WB_STALE_RUNNING_MINUTES || 3)))
+
+async function recoverStaleSyncStates({ connectionId = null, reason = 'watchdog' } = {}) {
+  if (!pool) return []
+  const params = [staleRunningMinutes, reason]
+  let connectionFilter = ''
+  if (connectionId) {
+    params.push(connectionId)
+    connectionFilter = ' AND connection_id=$3'
+  }
+  const result = await pool.query(`
+    UPDATE wb_sync_states
+    SET status='queued',
+        next_allowed_at=NOW(),
+        last_error=CASE
+          WHEN COALESCE(last_error,'') LIKE '%автоматически восстановлен%' THEN last_error
+          ELSE CONCAT('Этап автоматически восстановлен после прерывания процесса (', $1::text, ' мин.).')
+        END,
+        metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object(
+          'recoveredFromStaleRunning', true,
+          'recoveredAt', NOW(),
+          'recoveryReason', $2::text
+        ),
+        updated_at=NOW()
+    WHERE status='running'
+      AND updated_at < NOW() - ($1::double precision * INTERVAL '1 minute')
+      ${connectionFilter}
+    RETURNING connection_id, stage
+  `, params)
+  if (result.rows.length) {
+    console.warn(`WB sync watchdog recovered ${result.rows.length} stale stage(s):`, result.rows.map(row => `${row.connection_id}:${row.stage}`).join(', '))
+  }
+  return result.rows
+}
 
 
 const backgroundWorkerState = {
@@ -54,6 +88,7 @@ function kickBackgroundWorkers(reason = 'timer') {
   backgroundWorkerState.lastReason = reason
   backgroundWorkerState.lastError = null
   const promise = (async () => {
+    await recoverStaleSyncStates({ reason:`worker:${reason}` })
     // Выполняем последовательно, чтобы два тяжёлых запроса WB одного продавца
     // не стартовали в одну секунду и не провоцировали глобальный лимитер.
     await processPendingStockReports()
@@ -178,6 +213,7 @@ async function initDatabase() {
   await ensureStreamSchema(pool)
   await migrateLegacyWbTokens()
   await ensurePrimaryTokens()
+  await recoverStaleSyncStates({ reason:'startup' })
 }
 
 function requireBackendConfig() {
@@ -3172,6 +3208,9 @@ app.post('/api/wb/tokens/:tokenId/primary', authRequired, async (req, res) => {
 app.get('/api/wb/status/:id', authRequired, async (req, res) => {
   let connection = await getConnection(req.auth.sub, req.params.id)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
+  // После перезапуска Render в БД мог остаться status=running, хотя процесса уже нет.
+  // Watchdog переводит такой этап обратно в очередь и не позволяет ему блокировать остальные потоки.
+  await recoverStaleSyncStates({ connectionId:connection.id, reason:'status-heartbeat' })
   // Статус опрашивается открытым интерфейсом. Используем этот heartbeat как
   // надёжный запуск фоновой очереди после окончания next_allowed_at.
   const kick = kickBackgroundWorkers(`status:${connection.id}`)
@@ -3184,6 +3223,7 @@ app.get('/api/wb/status/:id', authRequired, async (req, res) => {
 app.post('/api/wb/sync', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, String(req.body?.connectionId || '') || null)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено. Подключите Wildberries.' })
+  await recoverStaleSyncStates({ connectionId:connection.id, reason:'manual-sync' })
   const requestedStages = Array.isArray(req.body?.stages) ? req.body.stages.filter(stage => WB_SYNC_STAGES[stage]) : Object.keys(WB_SYNC_STAGES)
   if (!requestedStages.length) return res.status(400).json({ error: 'Не выбраны этапы синхронизации' })
 
