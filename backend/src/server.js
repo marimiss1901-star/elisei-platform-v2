@@ -378,9 +378,14 @@ const WB_SYNC_STAGES = Object.freeze({
   paidStorage: { label: 'Платное хранение', scope: 'analytics' },
   acceptance: { label: 'Платная приёмка', scope: 'analytics' },
   acquiring: { label: 'Эквайринг', scope: 'finance' },
+  financeReports: { label: 'Сводки отчётов реализации', scope: 'finance' },
+  acquiringReports: { label: 'Сводки отчётов эквайринга', scope: 'finance' },
   fbsArchive: { label: 'Архив заказов FBS', scope: 'marketplace' },
   measurementPenalties: { label: 'Штрафы за габариты', scope: 'analytics' },
   deductionsReport: { label: 'Подмены и неверные вложения', scope: 'analytics' },
+  warehouseMeasurements: { label: 'Замеры склада', scope: 'analytics' },
+  antifraudRetention: { label: 'Удержания за самовыкупы', scope: 'analytics' },
+  labelingRetention: { label: 'Штрафы за маркировку', scope: 'analytics' },
   goodsReturns: { label: 'Возвраты и перемещения', scope: 'analytics' },
   tariffs: { label: 'Тарифы и комиссии', scope: 'content' },
   funnel: { label: 'Воронка карточек', scope: 'analytics' },
@@ -395,12 +400,12 @@ const CORE_SYNC_SCOPES = [...new Set(Object.values(WB_SYNC_STAGES).map(item => i
 const STOCK_DATA_SCHEMA_VERSION = 5
 const STOCK_DATA_SOURCE = 'wb_warehouse_remains'
 const STOCK_REPORT_PROFILE = 'article_barcode_size_v1'
-const HEAVY_SYNC_STAGES = Object.freeze(['finance','paidStorage','acceptance','acquiring','fbsArchive','measurementPenalties','deductionsReport','searchQueries','stockHistory','reviews','questions','chats'])
+const HEAVY_SYNC_STAGES = Object.freeze(['finance','paidStorage','acceptance','acquiring','financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','searchQueries','stockHistory','reviews','questions','chats'])
 const HEAVY_PAGE_LIMIT = Math.max(500, Math.min(5000, Number(process.env.WB_HEAVY_PAGE_LIMIT || 2500)))
 const HEAVY_DB_BATCH_SIZE = Math.max(100, Math.min(500, Number(process.env.WB_HEAVY_DB_BATCH_SIZE || 250)))
 const HEAVY_STAGE_COOLDOWN_MS = Math.max(5000, Number(process.env.WB_HEAVY_STAGE_COOLDOWN_MS || 65000))
 const FBS_ARCHIVE_MONTHS = Math.max(1, Math.min(60, Number(process.env.WB_FBS_ARCHIVE_MONTHS || 24)))
-const EXTENDED_OBJECT_STAGES = new Set(['fbsArchive','measurementPenalties','deductionsReport','goodsReturns','tariffs','funnel','documents','searchQueries','stockHistory','reviews','questions','chats'])
+const EXTENDED_OBJECT_STAGES = new Set(['financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','goodsReturns','tariffs','funnel','documents','searchQueries','stockHistory','reviews','questions','chats'])
 
 function decodeJwtPayload(value, invalidMessage) {
   try {
@@ -493,7 +498,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.7.9 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.13.0 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -3007,6 +3012,58 @@ async function advancePagedFinanceTask(stage, connectionId, token, state, { dead
   }
 }
 
+
+const FINANCE_REPORT_LISTS = Object.freeze({
+  financeReports:{
+    endpoint:'https://finance-api.wildberries.ru/api/finance/v1/sales-reports/list',
+    label:'Сводки отчётов реализации WB', periodDays:365, pageSize:1000, includePeriod:true,
+  },
+  acquiringReports:{
+    endpoint:'https://finance-api.wildberries.ru/api/finance/v1/acquiring/list',
+    label:'Сводки отчётов эквайринга WB', periodDays:365, pageSize:1000, includePeriod:false,
+  },
+})
+
+async function advanceFinanceReportListTask(stage, connectionId, token, state, { deadlineAt = 0, tokenInfo = null } = {}) {
+  const definition = FINANCE_REPORT_LISTS[stage]
+  if (!definition) throw new Error(`Неизвестный список финансовых отчётов WB: ${stage}`)
+  // Методы списка доступны Персональному/Сервисному токену. Облачный ELISEI
+  // принимает Сервисный токен; для других типов оставляем понятный статус вместо ложного нуля.
+  if (![3,4].includes(Number(tokenInfo?.typeId || 0))) {
+    throw Object.assign(new Error(`${definition.label}: WB разрешает этот метод только Персональному или Сервисному токену. Для облачного ELISEI подключите Сервисный токен после регистрации приложения.`), { status:403, code:'WB_FINANCE_REPORT_TOKEN_TYPE' })
+  }
+  const period = state?.metadata?.period || reportPeriod(definition.periodDays)
+  const syncId = String(state?.metadata?.syncId || crypto.randomUUID())
+  const offset = Math.max(0,Number(state?.metadata?.offset || 0))
+  const pageNumber = Math.max(0,Number(state?.metadata?.pageNumber || 0))
+  const body = { dateFrom:period.dateFrom,dateTo:period.dateTo,limit:definition.pageSize,offset }
+  if (definition.includePeriod) body.period = 'daily'
+  const payload = await wbFetch(definition.endpoint,token,{
+    method:'POST',body:JSON.stringify(body),headers:{'Content-Type':'application/json'},
+    label:definition.label,timeoutMs:45000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+  })
+  const rows = Array.isArray(payload) ? payload : extractExtendedRows(payload,['reports','items'])
+  await saveStreamItemBatch(pool,{
+    connectionId,stream:stage,syncId,rows,
+    keyOf:(row,index)=>extendedRowKey(stage,row,offset+index),batchSize:HEAVY_DB_BATCH_SIZE,
+  })
+  const persistedCount = await countStreamItems(pool,{connectionId,stream:stage,syncId})
+  const hasMore = rows.length >= definition.pageSize
+  if (hasMore) {
+    return {
+      pending:true,nextAllowedAt:new Date(Date.now()+HEAVY_STAGE_COOLDOWN_MS).toISOString(),
+      metadata:{period,syncId,offset:offset+rows.length,pageNumber:pageNumber+1,persistedCount,lastPageRows:rows.length},
+    }
+  }
+  await finalizeStreamItems(pool,{connectionId,stream:stage,syncId})
+  return {
+    pending:false,
+    value:compactExtendedValue({rows,totalRows:persistedCount,syncId,period,extra:{pages:pageNumber+1,reportType:stage === 'financeReports' ? 'sales' : 'acquiring'}}),
+    validation:{incomingRows:rows.length,persistedRows:persistedCount,pages:pageNumber+1,period,memorySafe:true},
+    endpoint:definition.endpoint,
+  }
+}
+
 const GENERATED_REPORTS = Object.freeze({
   // Используем максимально допустимые интервалы WB, чтобы не создавать лишние задания
   // и не упираться в глобальный лимитер: хранение — до 8 дней, приёмка — до 31 дня.
@@ -3163,7 +3220,7 @@ function extractExtendedRows(payload, preferredKeys = []) {
 }
 
 function extendedRowKey(stage, row = {}, index = 0) {
-  const explicit = row.id ?? row.orderId ?? row.order_id ?? row.rrdId ?? row.rrd_id ?? row.serviceName ?? row.srid ?? row.rid
+  const explicit = row.id ?? row.reportId ?? row.report_id ?? row.dimId ?? row.dim_id ?? row.orderId ?? row.order_id ?? row.rrdId ?? row.rrd_id ?? row.serviceName ?? row.srid ?? row.rid
   if (explicit != null && String(explicit).trim()) return `${stage}:id:${String(explicit).trim()}`
   const identity = [
     row.nmId ?? row.nmID ?? row.nm_id ?? '',
@@ -3256,6 +3313,10 @@ const OFFSET_REPORTS = Object.freeze({
     endpoint:'https://seller-analytics-api.wildberries.ru/api/analytics/v1/deductions',
     label:'Подмены и неверные вложения', preferredKeys:['reports','items'], pageSize:1000,
   },
+  warehouseMeasurements:{
+    endpoint:'https://seller-analytics-api.wildberries.ru/api/analytics/v1/warehouse-measurements',
+    label:'Замеры склада WB', preferredKeys:['reports','report','items'], pageSize:1000, periodDays:90,
+  },
   documents:{
     endpoint:'https://documents-api.wildberries.ru/api/v1/documents/list',
     label:'Список документов WB', preferredKeys:['documents'], pageSize:50,
@@ -3265,7 +3326,7 @@ const OFFSET_REPORTS = Object.freeze({
 async function advanceOffsetReportTask(stage, connectionId, token, state, { deadlineAt = 0 } = {}) {
   const definition = OFFSET_REPORTS[stage]
   if (!definition) throw new Error(`Неизвестный постраничный поток WB: ${stage}`)
-  const period = state?.metadata?.period || reportPeriod(stage === 'documents' ? 365 : 30)
+  const period = state?.metadata?.period || reportPeriod(stage === 'documents' ? 365 : (definition.periodDays || 30))
   const syncId = String(state?.metadata?.syncId || crypto.randomUUID())
   const offset = Math.max(0, Number(state?.metadata?.offset || 0))
   const pageNumber = Math.max(0, Number(state?.metadata?.pageNumber || 0))
@@ -3317,6 +3378,47 @@ async function advanceOffsetReportTask(stage, connectionId, token, state, { dead
     pending:false,
     value:compactExtendedValue({rows,totalRows:persistedCount,syncId,period,extra:{pages:pageNumber+1}}),
     validation:{ incomingRows:rows.length,persistedRows:persistedCount,pages:pageNumber+1,period,memorySafe:true },
+    endpoint,
+  }
+}
+
+
+const RETENTION_REPORTS = Object.freeze({
+  antifraudRetention:{
+    endpoint:'https://seller-analytics-api.wildberries.ru/api/v1/analytics/antifraud-details',
+    label:'Удержания за самовыкупы WB', preferredKeys:['details','report','items'], periodDays:null,
+  },
+  labelingRetention:{
+    endpoint:'https://seller-analytics-api.wildberries.ru/api/v1/analytics/goods-labeling',
+    label:'Удержания за маркировку WB', preferredKeys:['report','items'], periodDays:31,
+  },
+})
+
+async function loadRetentionReport(stage, connectionId, token, state, { deadlineAt = 0 } = {}) {
+  const definition = RETENTION_REPORTS[stage]
+  if (!definition) throw new Error(`Неизвестный отчёт удержаний WB: ${stage}`)
+  const period = definition.periodDays ? (state?.metadata?.period || reportPeriod(definition.periodDays)) : null
+  const syncId = String(state?.metadata?.syncId || crypto.randomUUID())
+  const params = new URLSearchParams()
+  if (period) { params.set('dateFrom',period.dateFrom); params.set('dateTo',period.dateTo) }
+  const endpoint = `${definition.endpoint}${params.size ? `?${params.toString()}` : ''}`
+  const payload = await wbFetch(endpoint,token,{
+    label:definition.label,timeoutMs:45000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+  })
+  const rows = extractExtendedRows(payload,definition.preferredKeys)
+  await saveStreamItemBatch(pool,{
+    connectionId,stream:stage,syncId,rows,
+    keyOf:(row,index)=>extendedRowKey(stage,row,index),batchSize:HEAVY_DB_BATCH_SIZE,
+  })
+  await persistFinanceLedgerBatch(pool,{
+    connectionId,stream:stage,rows,
+    keyOf:(row,index)=>extendedRowKey(stage,row,index),batchSize:HEAVY_DB_BATCH_SIZE,
+  })
+  const persistedCount = await countStreamItems(pool,{connectionId,stream:stage,syncId})
+  await finalizeStreamItems(pool,{connectionId,stream:stage,syncId})
+  return {
+    value:compactExtendedValue({rows,totalRows:persistedCount,syncId,period,extra:{reportType:stage === 'antifraudRetention' ? 'self-purchases' : 'labeling'}}),
+    validation:{rows:rows.length,persistedRows:persistedCount,period,memorySafe:true},
     endpoint,
   }
 }
@@ -3922,6 +4024,16 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       value = loaded.value
       meta = value.meta || null
       snapshot = loaded
+    } else if (stage === 'financeReports' || stage === 'acquiringReports') {
+      const result = await advanceFinanceReportListTask(stage,connection.id,selected.token,state,{deadlineAt,tokenInfo:selected.info})
+      if (result.pending) {
+        state = await updateSyncState(connection.id,stage,{
+          status:'queued',lastAttemptAt:new Date().toISOString(),nextAllowedAt:result.nextAllowedAt,lastError:null,taskId:null,
+          metadata:{...result.metadata,tokenId:selected.row.id,tokenLabel:selected.row.label,memorySafe:true},
+        })
+        return {stage,status:'queued',value:fallback,warning:`${definition.label}: сохранено ${Number(result.metadata.persistedCount||0)} отчётов, продолжение в очереди.`,state}
+      }
+      value=result.value; meta=result.validation; snapshot={endpoint:result.endpoint,validation:result.validation}
     } else if (stage === 'finance' || stage === 'acquiring') {
       const result = await advancePagedFinanceTask(stage,connection.id,selected.token,state,{ deadlineAt })
       if (result.pending) {
@@ -3946,7 +4058,7 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       value=result.value
       meta=result.validation
       snapshot={endpoint:result.endpoint,validation:result.validation}
-    } else if (stage === 'measurementPenalties' || stage === 'deductionsReport' || stage === 'documents') {
+    } else if (stage === 'measurementPenalties' || stage === 'deductionsReport' || stage === 'warehouseMeasurements' || stage === 'documents') {
       const result = await advanceOffsetReportTask(stage,connection.id,selected.token,state,{deadlineAt})
       if (result.pending) {
         state = await updateSyncState(connection.id,stage,{
@@ -3958,6 +4070,9 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       value=result.value
       meta=result.validation
       snapshot={endpoint:result.endpoint,validation:result.validation}
+    } else if (stage === 'antifraudRetention' || stage === 'labelingRetention') {
+      const loaded=await loadRetentionReport(stage,connection.id,selected.token,state,{deadlineAt})
+      value=loaded.value; meta=loaded.validation; snapshot=loaded
     } else if (stage === 'goodsReturns') {
       const loaded=await loadGoodsReturns(selected.token,{deadlineAt})
       value=loaded.value; meta=loaded.validation; snapshot=loaded
@@ -4316,7 +4431,7 @@ app.get('/api/wb/extended/:stream', authRequired, async (req, res) => {
     if (!connection) return res.status(404).json({error:'Подключение не найдено'})
     const limit=Math.max(20,Math.min(500,Number(req.query.limit)||100))
     const afterKey=String(req.query.afterKey||'')
-    if (['fbsArchive','measurementPenalties','deductionsReport','documents','searchQueries','stockHistory','reviews','questions','chats'].includes(stream)) {
+    if (['financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','documents','searchQueries','stockHistory','reviews','questions','chats'].includes(stream)) {
       const [page,stateResult,storedResult]=await Promise.all([
         latestExtendedRows(connection.id,stream,{afterKey,limit}),
         pool.query('SELECT * FROM wb_sync_states WHERE connection_id=$1 AND stage=$2',[connection.id,stream]),
@@ -4584,23 +4699,44 @@ app.get('/api/wb/finance-ledger/:id', authRequired, async (req, res) => {
     const states = await getSyncStates(connection.id)
     const stateMap = Object.fromEntries(states.map(item => [item.stage,publicSyncState(item)]))
     const financeReady = Boolean(stateMap.finance?.lastSuccessAt && Number(stateMap.finance?.lastCount || 0) > 0)
-    const financeStream = await pool.query(`SELECT payload,updated_at FROM wb_stream_data WHERE connection_id=$1 AND stream='finance'`,[connection.id])
-    const financePayload = financeStream.rows[0]?.payload || {}
+    const supportingStreams = ['finance','financeReports','acquiringReports','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention']
+    const streamRows = await pool.query(`SELECT stream,payload,row_count,updated_at FROM wb_stream_data WHERE connection_id=$1 AND stream=ANY($2::text[])`,[connection.id,supportingStreams])
+    const payloadByStream = Object.fromEntries(streamRows.rows.map(row => [row.stream,{payload:row.payload||{},rowCount:Number(row.row_count||0),updatedAt:row.updated_at||null}]))
+    const financePayload = payloadByStream.finance?.payload || {}
+    const compactRows = stream => Array.isArray(payloadByStream[stream]?.payload?.rows) ? payloadByStream[stream].payload.rows : []
     res.json({
       ...result,
       backfill,
       balance:financePayload.balance || null,
       reportPeriod:financePayload.period || null,
-      financeUpdatedAt:financeStream.rows[0]?.updated_at || null,
+      financeUpdatedAt:payloadByStream.finance?.updatedAt || null,
+      reports:{
+        sales:{ rows:compactRows('financeReports'),totalRows:Number(payloadByStream.financeReports?.payload?.totalRows || payloadByStream.financeReports?.rowCount || 0),period:payloadByStream.financeReports?.payload?.period || null,updatedAt:payloadByStream.financeReports?.updatedAt || null },
+        acquiring:{ rows:compactRows('acquiringReports'),totalRows:Number(payloadByStream.acquiringReports?.payload?.totalRows || payloadByStream.acquiringReports?.rowCount || 0),period:payloadByStream.acquiringReports?.payload?.period || null,updatedAt:payloadByStream.acquiringReports?.updatedAt || null },
+      },
+      riskDetails:{
+        measurementPenalties:{rows:compactRows('measurementPenalties'),totalRows:Number(payloadByStream.measurementPenalties?.payload?.totalRows || payloadByStream.measurementPenalties?.rowCount || 0),updatedAt:payloadByStream.measurementPenalties?.updatedAt || null},
+        deductions:{rows:compactRows('deductionsReport'),totalRows:Number(payloadByStream.deductionsReport?.payload?.totalRows || payloadByStream.deductionsReport?.rowCount || 0),updatedAt:payloadByStream.deductionsReport?.updatedAt || null},
+        warehouseMeasurements:{rows:compactRows('warehouseMeasurements'),totalRows:Number(payloadByStream.warehouseMeasurements?.payload?.totalRows || payloadByStream.warehouseMeasurements?.rowCount || 0),updatedAt:payloadByStream.warehouseMeasurements?.updatedAt || null},
+        antifraud:{rows:compactRows('antifraudRetention'),totalRows:Number(payloadByStream.antifraudRetention?.payload?.totalRows || payloadByStream.antifraudRetention?.rowCount || 0),updatedAt:payloadByStream.antifraudRetention?.updatedAt || null},
+        labeling:{rows:compactRows('labelingRetention'),totalRows:Number(payloadByStream.labelingRetention?.payload?.totalRows || payloadByStream.labelingRetention?.rowCount || 0),updatedAt:payloadByStream.labelingRetention?.updatedAt || null},
+      },
       coverage:{
         financeReady,
         finance:stateMap.finance || null,
         acquiring:stateMap.acquiring || null,
         paidStorage:stateMap.paidStorage || null,
         acceptance:stateMap.acceptance || null,
+        financeReports:stateMap.financeReports || null,
+        acquiringReports:stateMap.acquiringReports || null,
+        measurementPenalties:stateMap.measurementPenalties || null,
+        deductionsReport:stateMap.deductionsReport || null,
+        warehouseMeasurements:stateMap.warehouseMeasurements || null,
+        antifraudRetention:stateMap.antifraudRetention || null,
+        labelingRetention:stateMap.labelingRetention || null,
         waitingForFinance:!financeReady,
       },
-      note:'Сумма «к перечислению» берётся из поля forPay. Комиссия, логистика, хранение, приёмка, эквайринг, штрафы, удержания и компенсации показаны как расшифровка и не вычитаются повторно из forPay.',
+      note:'Сумма «к перечислению» берётся из поля forPay. Сводки отчётов используются для сверки, а отчёты по габаритам, подменам, самовыкупам и маркировке — для объяснения причин. Эти суммы не вычитаются повторно из P&L.',
     })
   } catch (error) {
     console.warn('WB finance ledger failed:',error.message)

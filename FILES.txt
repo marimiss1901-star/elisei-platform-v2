@@ -1,7 +1,9 @@
 README_5_4_9.md
 README_5_5_0.md
+README_5_6_0.md
 RELEASE_NOTES_V5_4_9.txt
 RELEASE_NOTES_V5_5_0.txt
+RELEASE_NOTES_V5_6_0.txt
 backend/package.json
 backend/src/server.js
 backend/src/wb/adapters/catalog.js
@@ -14,6 +16,7 @@ backend/src/wb/snapshot-store.js
 backend/src/wb/stream-store.js
 backend/tests/warehouse-remains-parser.test.mjs
 backend/tests/wb-extended-coverage.test.mjs
+backend/tests/wb-finance-complete.test.mjs
 backend/tests/wb-finance-fbs-fbo.test.mjs
 backend/tests/wb-integration-core.test.mjs
 backend/tests/wb-memory-safe-sync.test.mjs

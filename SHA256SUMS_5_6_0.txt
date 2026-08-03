@@ -1,0 +1,17 @@
+1b15fac12855e9910dc01f6c78c2ac4a430834f2fe46b61c1d38794cd7a3ae20  ./FILES.txt
+7d6e3c06b865eb9bc853be26efb0488e8ac4d84ce02b3c9cc007f56334323c6a  ./PATCH_FILES.txt
+6cdc8a3ed2d11e07c8cc821f8231e88375276e86f4772abbee9d2739a6fa6968  ./PATCH_MANIFEST.txt
+8b204791908be36793982cc8436e1a9ab05944b5fcd02e83fc17aa486e41d879  ./README.md
+bd17e1f973e9dd1b998de1779f8abcd31404a5fa5c09df5d2398089e5a6f0b47  ./README_5_6_0.md
+98fde9920a8a12910b9e3542c78237ffc986b0002ca6ac4545a4faec95a3f5f8  ./RELEASE_NOTES_V5_6_0.txt
+b5c0a0da958fea5d0b318717b1915f2521ffe7d972d88570f3ef6b54d85ca34e  ./backend/package.json
+3141b5e86ca9ebe299cf3cca7073a003b6359d0d1246451dc25b26eb9f2489b6  ./backend/src/server.js
+3802e57303e39931301a1b47617d434c987823eb15b1dc5e3306336734737958  ./backend/src/wb/finance-ledger.js
+8982829bb5799f1e673376545e7db10d1b5365659680be8dfdb36019adfbd3b5  ./backend/src/wb/stream-store.js
+3d6f910fe2ad8c362475dbed0e7b47c0f7c74967ec0e9af610fe9ebb9459c247  ./backend/tests/wb-extended-coverage.test.mjs
+9d3152a433d045e467766678d305745d1d82d4e7a85e6167cfb6e32edfd03ddd  ./backend/tests/wb-finance-complete.test.mjs
+8f541ebff989205dbc238262b8a2122a6b186745418428e9127d02050b8ba4fe  ./backend/tests/wb-finance-fbs-fbo.test.mjs
+4237304d3c977639a1ea0af6cad56b1b837c0364fb5dab02d9515132ac7aaa8d  ./docs/FEATURE_PARITY_ROADMAP.md
+0abb26af871f149fb30baacdd2dc4091b09a6e60c59cbf685f99c1b5682e36f7  ./package.json
+ec698758d7943db59cbd8931b2632bad312fbea53abb10f5596540bc401a0b84  ./src/pages/DashboardPage.jsx
+781c1dbe893572a1fb8340fd08e856bc987c92e58c4d69c4fcec0c6a35c4fdbb  ./src/styles/app.css

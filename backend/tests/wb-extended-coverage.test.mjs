@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { WB_STREAMS, normalizeStreamPayload, streamCount } from '../src/wb/stream-store.js'
 import { normalizeFinanceLedgerRows } from '../src/wb/finance-ledger.js'
 
-for (const stream of ['fbsArchive','measurementPenalties','deductionsReport','goodsReturns','tariffs','funnel','documents','searchQueries','stockHistory','reviews','questions','chats']) {
+for (const stream of ['financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','goodsReturns','tariffs','funnel','documents','searchQueries','stockHistory','reviews','questions','chats']) {
   assert.ok(WB_STREAMS.includes(stream), `${stream} is registered`)
   const payload=normalizeStreamPayload(stream,{rows:[{id:1}],totalRows:12})
   assert.equal(streamCount(stream,payload),12)
@@ -29,11 +29,28 @@ assert.equal(deduction[0].operationGroup,'deductions')
 assert.equal(deduction[0].amount,-490)
 assert.equal(deduction[0].detailOnly,true)
 
+const antifraud=normalizeFinanceLedgerRows('antifraudRetention',{nmID:42,sum:700,dateFrom:'2026-07-20'},'a1',0)
+assert.equal(antifraud.length,1)
+assert.equal(antifraud[0].operationCode,'self_purchase_deduction_detail')
+assert.equal(antifraud[0].amount,-700)
+assert.equal(antifraud[0].detailOnly,true)
+
+const labeling=normalizeFinanceLedgerRows('labelingRetention',{nmID:42,amount:1500,date:'2026-08-01',sku:'460000'},'l1',0)
+assert.equal(labeling.length,1)
+assert.equal(labeling[0].operationCode,'labeling_penalty_detail')
+assert.equal(labeling[0].amount,-1500)
+assert.equal(labeling[0].includedInPnl,false)
+
 const source=fs.readFileSync(new URL('../src/server.js',import.meta.url),'utf8')
 for (const marker of [
   '/api/marketplace/v3/fbs/orders/archive',
   '/api/analytics/v1/measurement-penalties',
   '/api/analytics/v1/deductions',
+  '/api/analytics/v1/warehouse-measurements',
+  '/api/v1/analytics/antifraud-details',
+  '/api/v1/analytics/goods-labeling',
+  '/api/finance/v1/sales-reports/list',
+  '/api/finance/v1/acquiring/list',
   '/api/v1/analytics/goods-return',
   '/api/v1/tariffs/commission',
   '/api/analytics/v3/sales-funnel/products',
@@ -48,6 +65,8 @@ for (const marker of [
   "app.get('/api/wb/extended/:stream'",
   'advanceFbsArchiveTask',
   'advanceOffsetReportTask',
+  'advanceFinanceReportListTask',
+  'loadRetentionReport',
   'advanceQuestionsTask',
   'advanceChatsTask',
   'sanitizeChatObject',

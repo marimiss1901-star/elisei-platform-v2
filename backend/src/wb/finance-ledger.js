@@ -1,4 +1,4 @@
-const STREAMS = ['finance','acquiring','paidStorage','acceptance','measurementPenalties','deductionsReport']
+const STREAMS = ['finance','acquiring','paidStorage','acceptance','measurementPenalties','deductionsReport','antifraudRetention','labelingRetention']
 
 const money = (row, aliases, fallback = 0) => {
   for (const key of aliases) {
@@ -52,7 +52,7 @@ const identity = (row = {}) => ({
   currency:text(row,['currency'],'RUB'),
   reportId:text(row,['reportId','report_id','realizationreport_id']),
   rrdId:text(row,['rrdId','rrd_id']),
-  operationDate:compactDate(text(row,['rrDate','rr_dt','saleDt','sale_dt','orderDt','order_dt','date','dtBonus','originalDate','shkCreateDate','giCreateDate'])),
+  operationDate:compactDate(text(row,['rrDate','rr_dt','saleDt','sale_dt','orderDt','order_dt','date','dateFrom','date_from','dtBonus','originalDate','shkCreateDate','giCreateDate'])),
   fulfillmentMode:financeFulfillmentMode(row),
 })
 
@@ -169,6 +169,16 @@ export function normalizeFinanceLedgerRows(stream, row = {}, sourceRowKey = '', 
   if (stream === 'deductionsReport') {
     const amount = Math.abs(money(row,['bonusSumm','bonus_summ','amount','sum','deduction'],0))
     addMovement(result,base,{ code:'substitution_deduction_detail',group:'deductions',name:text(row,['bonusType','bonus_type','reason'],'Подмена или неверное вложение'),amount:-amount,metricRole:'detail',detailOnly:true,includedInPnl:false,sourceField:'bonusSumm',note:'Детализация удержания за подмену/вложение. В P&L повторно не суммируется, если сумма уже есть в финансовой детализации.',index })
+  }
+
+  if (stream === 'antifraudRetention') {
+    const amount = Math.abs(money(row,['sum','amount','deduction'],0))
+    addMovement(result,base,{ code:'self_purchase_deduction_detail',group:'deductions',name:'Самовыкуп — удержание WB',amount:-amount,metricRole:'detail',detailOnly:true,includedInPnl:false,sourceField:'sum',note:'Официальная детализация удержаний за самовыкупы. В P&L не суммируется повторно, если сумма уже отражена в отчёте реализации.',index })
+  }
+
+  if (stream === 'labelingRetention') {
+    const amount = Math.abs(money(row,['amount','sum','penalty'],0))
+    addMovement(result,base,{ code:'labeling_penalty_detail',group:'penalties',name:'Штраф за отсутствие или нечитаемую маркировку',amount:-amount,metricRole:'detail',detailOnly:true,includedInPnl:false,sourceField:'amount',note:'Официальная детализация нарушения маркировки с фотофиксацией. В P&L не суммируется повторно, если штраф уже отражён в отчёте реализации.',index })
   }
 
   return result
@@ -382,6 +392,16 @@ export async function queryFinanceLedger(db,{ connectionId,from,to,group,mode,ro
     FROM wb_finance_ledger WHERE ${where}
     GROUP BY fulfillment_mode ORDER BY mode
   `,params)
+  const timelineRows = await db.query(`
+    SELECT operation_date AS date,COUNT(*)::int AS movements,
+      COALESCE(SUM(CASE WHEN metric_role='settlement' THEN amount ELSE 0 END),0)::float8 AS "sellerPayable",
+      COALESCE(SUM(CASE WHEN operation_code='gross_sale' THEN amount ELSE 0 END),0)::float8 AS "grossRevenue",
+      COALESCE(SUM(CASE WHEN included_in_pnl=TRUE AND detail_only=FALSE AND amount<0 THEN ABS(amount) ELSE 0 END),0)::float8 AS expenses,
+      COALESCE(SUM(CASE WHEN metric_role='adjustment' AND detail_only=FALSE AND amount>0 THEN amount ELSE 0 END),0)::float8 AS compensations,
+      COALESCE(SUM(CASE WHEN operation_group IN ('penalties','deductions') AND detail_only=FALSE THEN ABS(amount) ELSE 0 END),0)::float8 AS retentions
+    FROM wb_finance_ledger WHERE ${where} AND operation_date IS NOT NULL
+    GROUP BY operation_date ORDER BY operation_date
+  `,params)
   const value = summary.rows[0] || {}
   const componentNet = Number(value.gross_revenue||0) - Number(value.expenses||0) + Number(value.compensations||0)
   const difference = Number(value.seller_payable||0) - componentNet
@@ -400,5 +420,6 @@ export async function queryFinanceLedger(db,{ connectionId,from,to,group,mode,ro
     sources:sourceRows.rows,
     products:productRows.rows,
     modes:modeRows.rows,
+    timeline:timelineRows.rows,
   }
 }

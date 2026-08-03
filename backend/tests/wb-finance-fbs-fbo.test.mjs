@@ -5,7 +5,7 @@ import { WB_STREAMS, normalizeStreamPayload, streamCount } from '../src/wb/strea
 
 assert.deepEqual(WB_STREAMS, [
   'products','orders','sales','stocks','sellerStocks','advertising','finance','paidStorage','acceptance','acquiring',
-  'fbsArchive','measurementPenalties','deductionsReport','goodsReturns','tariffs','funnel','documents',
+  'financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','goodsReturns','tariffs','funnel','documents',
   'searchQueries','stockHistory','reviews','questions','chats',
 ])
 
@@ -20,6 +20,8 @@ const source = fs.readFileSync(new URL('../src/server.js', import.meta.url), 'ut
 for (const marker of [
   '/api/finance/v1/sales-reports/detailed',
   '/api/finance/v1/acquiring/detailed',
+  '/api/finance/v1/sales-reports/list',
+  '/api/finance/v1/acquiring/list',
   '/api/v1/paid_storage',
   '/api/v1/acceptance_report',
   '/api/v3/stocks/${warehouseId}',
