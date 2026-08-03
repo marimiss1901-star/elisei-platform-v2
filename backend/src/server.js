@@ -25,6 +25,9 @@ import {
   saveStreamItemBatch, loadStreamItemPage, countStreamItems, finalizeStreamItems,
 } from './wb/stream-store.js'
 import elRouter from './routes/el.js'
+import {
+  ensureFinanceLedgerSchema, persistFinanceLedgerBatch, backfillFinanceLedgerFromStreamItems, queryFinanceLedger,
+} from './wb/finance-ledger.js'
 
 const { Pool } = pg
 const app = express()
@@ -33,10 +36,93 @@ const allowedOrigins = (process.env.FRONTEND_ORIGIN || '').split(',').map(v => v
 const ttlMs = Number(process.env.CONNECTION_TTL_HOURS || 12) * 60 * 60 * 1000
 const jwtSecret = process.env.JWT_SECRET || ''
 const databaseUrl = process.env.DATABASE_URL || ''
-const pool = databaseUrl ? new Pool({ connectionString: databaseUrl, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined }) : null
+const pool = databaseUrl ? new Pool({
+  connectionString: databaseUrl,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
+  max: Math.max(2, Math.min(10, Number(process.env.PG_POOL_MAX || 5))),
+  connectionTimeoutMillis: Math.max(3000, Number(process.env.PG_CONNECT_TIMEOUT_MS || 8000)),
+  idleTimeoutMillis: Math.max(10000, Number(process.env.PG_IDLE_TIMEOUT_MS || 30000)),
+}) : null
 const encryptionSecret = process.env.ENCRYPTION_KEY || jwtSecret
 const encryptionKey = encryptionSecret ? crypto.createHash('sha256').update(encryptionSecret).digest() : null
 const staleRunningMinutes = Math.max(2, Math.min(30, Number(process.env.WB_STALE_RUNNING_MINUTES || 3)))
+
+const databaseState = {
+  ready: !pool,
+  status: pool ? 'connecting' : 'not-configured',
+  attempts: 0,
+  lastError: null,
+  lastConnectedAt: null,
+  nextRetryAt: null,
+}
+let databaseInitPromise = null
+let databaseRetryTimer = null
+
+function databaseRetryDelayMs(attempt) {
+  return Math.min(60000, 3000 * (2 ** Math.min(5, Math.max(0, attempt - 1))))
+}
+
+function scheduleDatabaseInitialization(delayMs = 0, reason = 'retry') {
+  if (!pool) return
+  if (databaseRetryTimer) clearTimeout(databaseRetryTimer)
+  databaseState.nextRetryAt = new Date(Date.now() + Math.max(0, delayMs)).toISOString()
+  databaseRetryTimer = setTimeout(() => {
+    databaseRetryTimer = null
+    initializeDatabaseWithRetry(reason).catch(error => {
+      console.warn('Database reconnect loop error:', error.message)
+    })
+  }, Math.max(0, delayMs))
+  databaseRetryTimer.unref?.()
+}
+
+async function initializeDatabaseWithRetry(reason = 'startup') {
+  if (!pool) {
+    databaseState.ready = true
+    databaseState.status = 'not-configured'
+    return true
+  }
+  if (databaseInitPromise) return databaseInitPromise
+  databaseInitPromise = (async () => {
+    databaseState.ready = false
+    databaseState.status = 'connecting'
+    databaseState.attempts += 1
+    databaseState.nextRetryAt = null
+    try {
+      await initDatabase()
+      databaseState.ready = true
+      databaseState.status = 'ok'
+      databaseState.lastError = null
+      databaseState.lastConnectedAt = new Date().toISOString()
+      databaseState.attempts = 0
+      console.log(`Database initialized (${reason})`)
+      setTimeout(() => kickBackgroundWorkers('database-ready'), 1500).unref?.()
+      return true
+    } catch (error) {
+      databaseState.ready = false
+      databaseState.status = 'reconnecting'
+      databaseState.lastError = error.message
+      const delayMs = databaseRetryDelayMs(databaseState.attempts)
+      console.error(`Database initialization failed (${reason}); retry in ${Math.round(delayMs / 1000)}s:`, error.message)
+      scheduleDatabaseInitialization(delayMs, 'automatic-retry')
+      return false
+    }
+  })()
+  try {
+    return await databaseInitPromise
+  } finally {
+    databaseInitPromise = null
+  }
+}
+
+if (pool) {
+  pool.on('error', error => {
+    databaseState.ready = false
+    databaseState.status = 'reconnecting'
+    databaseState.lastError = error.message
+    console.warn('PostgreSQL pool error; API stays online and will reconnect:', error.message)
+    scheduleDatabaseInitialization(2000, 'pool-error')
+  })
+}
 
 async function recoverStaleSyncStates({ connectionId = null, reason = 'watchdog' } = {}) {
   if (!pool) return []
@@ -109,6 +195,21 @@ function kickBackgroundWorkers(reason = 'timer') {
 app.use(helmet())
 app.use(cors({ origin(origin, cb) { if (!origin || !allowedOrigins.length || allowedOrigins.includes(origin)) return cb(null, true); cb(new Error('Origin is not allowed')) } }))
 app.use(express.json({ limit: '2mb' }))
+app.use('/api', (req, res, next) => {
+  if (!pool) return res.status(503).json({ error:'DATABASE_URL не настроен', code:'DATABASE_NOT_CONFIGURED' })
+  if (!databaseState.ready) {
+    const retryAfterSeconds = databaseState.nextRetryAt
+      ? Math.max(1, Math.ceil((new Date(databaseState.nextRetryAt).getTime() - Date.now()) / 1000))
+      : 3
+    res.setHeader('Retry-After', String(retryAfterSeconds))
+    return res.status(503).json({
+      error:'База данных временно переподключается. Backend работает и повторит подключение автоматически.',
+      code:'DATABASE_RECONNECTING',
+      retryAfterSeconds,
+    })
+  }
+  next()
+})
 
 async function initDatabase() {
   if (!pool) return
@@ -211,6 +312,7 @@ async function initDatabase() {
   `)
   await ensureSnapshotSchema(pool)
   await ensureStreamSchema(pool)
+  await ensureFinanceLedgerSchema(pool)
   await migrateLegacyWbTokens()
   await ensurePrimaryTokens()
   await recoverStaleSyncStates({ reason:'startup' })
@@ -2712,6 +2814,10 @@ async function advancePagedFinanceTask(stage, connectionId, token, state, { dead
     connectionId,stream:stage,syncId,rows:incoming,
     keyOf:(row,index)=>rawFinanceRowKey(stage,row,index),batchSize:HEAVY_DB_BATCH_SIZE,
   })
+  await persistFinanceLedgerBatch(pool, {
+    connectionId,stream:stage,rows:incoming,
+    keyOf:(row,index)=>rawFinanceRowKey(stage,row,index),batchSize:HEAVY_DB_BATCH_SIZE,
+  })
   const nextRrdId = Number(incoming.at(-1)?.rrdId ?? incoming.at(-1)?.rrd_id ?? 0)
   const hasMore = incoming.length >= HEAVY_PAGE_LIMIT && nextRrdId && nextRrdId !== rrdId
   const persistedCount = await countStreamItems(pool,{connectionId,stream:stage,syncId})
@@ -2933,6 +3039,10 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
         connectionId:connection.id,stream:stage,syncId,rows:result.rows,
         keyOf:(row,index)=>rawGeneratedReportKey(stage,row,index),batchSize:HEAVY_DB_BATCH_SIZE,
       })
+      await persistFinanceLedgerBatch(pool,{
+        connectionId:connection.id,stream:stage,rows:result.rows,
+        keyOf:(row,index)=>rawGeneratedReportKey(stage,row,index),batchSize:HEAVY_DB_BATCH_SIZE,
+      })
       const persistedCount = await countStreamItems(pool,{connectionId:connection.id,stream:stage,syncId})
       if (result.moreChunks) {
         state = await updateSyncState(connection.id,stage,{
@@ -3065,13 +3175,18 @@ function withSyncLog(history, entry) { return [{ id: crypto.randomUUID(), at: ne
 function buildDashboard(data, settings = DEFAULT_BUSINESS_SETTINGS) { const summary = buildCoreAnalytics(data, settings).summary; return { revenue: summary.revenue, orders: summary.orders, sales: summary.sales, returns: summary.returns, stockUnits: summary.stockUnits, profit: summary.operatingProfit, margin: summary.margin, periodDays: 30 } }
 
 app.get('/health', async (_req, res) => {
-  let database = 'not-configured'
-  if (pool) { try { await pool.query('SELECT 1'); database = 'ok' } catch { database = 'error' } }
   res.json({
     ok: true,
+    ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.10.1',
-    database,
+    version: '2.10.2',
+    database: databaseState.status,
+    databaseState: {
+      attempts: databaseState.attempts,
+      lastError: databaseState.lastError,
+      lastConnectedAt: databaseState.lastConnectedAt,
+      nextRetryAt: databaseState.nextRetryAt,
+    },
     backgroundWorker: {
       running: backgroundWorkerState.running,
       lastStartedAt: backgroundWorkerState.lastStartedAt,
@@ -3439,6 +3554,51 @@ app.put('/api/business/settings', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub)
   const canonical = connection ? await canonicalConnectionData(connection) : null
   res.json({ settings, core: canonical ? buildCoreAnalytics(canonical.data, settings) : null })
+})
+
+
+app.get('/api/wb/finance-ledger/:id', authRequired, async (req, res) => {
+  const connection = await getConnection(req.auth.sub, req.params.id)
+  if (!connection) return res.status(404).json({ error:'Подключение не найдено' })
+  try {
+    const backfill = await backfillFinanceLedgerFromStreamItems(pool,{ connectionId:connection.id })
+    const period = reportPeriod(30)
+    const result = await queryFinanceLedger(pool,{
+      connectionId:connection.id,
+      from:String(req.query.from || period.dateFrom),
+      to:String(req.query.to || period.dateTo),
+      group:String(req.query.group || 'all'),
+      mode:['FBS','FBO'].includes(String(req.query.mode || '').toUpperCase()) ? String(req.query.mode).toUpperCase() : 'all',
+      role:String(req.query.role || 'all'),
+      query:String(req.query.query || ''),
+      page:Number(req.query.page || 1),
+      limit:Number(req.query.limit || 100),
+    })
+    const states = await getSyncStates(connection.id)
+    const stateMap = Object.fromEntries(states.map(item => [item.stage,publicSyncState(item)]))
+    const financeReady = Boolean(stateMap.finance?.lastSuccessAt && Number(stateMap.finance?.lastCount || 0) > 0)
+    const financeStream = await pool.query(`SELECT payload,updated_at FROM wb_stream_data WHERE connection_id=$1 AND stream='finance'`,[connection.id])
+    const financePayload = financeStream.rows[0]?.payload || {}
+    res.json({
+      ...result,
+      backfill,
+      balance:financePayload.balance || null,
+      reportPeriod:financePayload.period || null,
+      financeUpdatedAt:financeStream.rows[0]?.updated_at || null,
+      coverage:{
+        financeReady,
+        finance:stateMap.finance || null,
+        acquiring:stateMap.acquiring || null,
+        paidStorage:stateMap.paidStorage || null,
+        acceptance:stateMap.acceptance || null,
+        waitingForFinance:!financeReady,
+      },
+      note:'Сумма «к перечислению» берётся из поля forPay. Комиссия, логистика, хранение, приёмка, эквайринг, штрафы, удержания и компенсации показаны как расшифровка и не вычитаются повторно из forPay.',
+    })
+  } catch (error) {
+    console.warn('WB finance ledger failed:',error.message)
+    res.status(error.status || 500).json({ error:error.message })
+  }
 })
 
 app.get('/api/wb/diagnostics/:id', authRequired, async (req, res) => {
@@ -4191,10 +4351,16 @@ async function processDueDeferredStages() {
   }
 }
 
-initDatabase().then(() => {
-  app.listen(port, () => console.log(`ELISEI API listening on ${port}`))
-  // Один координированный worker вместо двух параллельных таймеров. Таймер
-  // оставляем referenced, а HTTP heartbeat дублирует запуск после сна Render.
-  setInterval(() => kickBackgroundWorkers('interval'), 30000)
-  setTimeout(() => kickBackgroundWorkers('startup'), 5000)
-}).catch(error => { console.error('Database initialization failed:', error); process.exit(1) })
+app.listen(port, () => {
+  console.log(`ELISEI API listening on ${port}`)
+  // HTTP поднимается независимо от PostgreSQL. Если база Render просыпается
+  // дольше backend, сервис остаётся доступным и переподключается сам.
+  scheduleDatabaseInitialization(100, 'startup')
+})
+
+// Worker не трогает очередь, пока PostgreSQL не готов. Это предотвращает
+// падение API и ложные зависшие стадии во время краткого отказа базы.
+setInterval(() => {
+  if (databaseState.ready) kickBackgroundWorkers('interval')
+  else if (!databaseInitPromise && !databaseRetryTimer) scheduleDatabaseInitialization(0, 'interval-retry')
+}, 30000)

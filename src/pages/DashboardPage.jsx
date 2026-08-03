@@ -55,6 +55,22 @@ function readElPeriod() {
   return null
 }
 
+function financeDateRange() {
+  const period = readElPeriod() || {}
+  const from = period.from || period.dateFrom || period.date_from || period.start || period.startDate
+  const to = period.to || period.dateTo || period.date_to || period.end || period.endDate
+  if (from && to) return { from:String(from).slice(0,10), to:String(to).slice(0,10) }
+  const end = new Date()
+  const start = new Date(end.getTime() - 29 * 86400000)
+  return { from:start.toISOString().slice(0,10), to:end.toISOString().slice(0,10) }
+}
+
+const formatDate = value => {
+  if (!value) return '—'
+  const date = new Date(`${String(value).slice(0,10)}T00:00:00`)
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString('ru-RU')
+}
+
 const elModuleNames = {
   overview:'Обзор', sales:'Продажи', advertising:'Реклама', stocks:'Остатки', finance:'Финансы',
   products:'Товары', returns:'Возвраты', reviews:'Отзывы', pricing:'Цены', seasonality:'Сезонность',
@@ -151,6 +167,11 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [coreData, setCoreData] = useState(null)
   const [advertisingSnapshot, setAdvertisingSnapshot] = useState(null)
   const [integrationDiagnostics, setIntegrationDiagnostics] = useState(null)
+  const [financeLedger, setFinanceLedger] = useState(null)
+  const [financeLedgerLoading, setFinanceLedgerLoading] = useState(false)
+  const [financeTab, setFinanceTab] = useState('overview')
+  const [financeQuery, setFinanceQuery] = useState('')
+  const [financePage, setFinancePage] = useState(1)
   const [liveProducts, setLiveProducts] = useState([])
   const [syncHistory, setSyncHistory] = useState([])
   const [settingsDraft, setSettingsDraft] = useState(defaultSettings)
@@ -166,6 +187,50 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     setToast(text)
     window.clearTimeout(window.__eliseiToast)
     window.__eliseiToast = window.setTimeout(() => setToast(''), duration)
+  }
+
+  const financeRequestForTab = tab => {
+    if (tab === 'fbs') return { mode:'FBS' }
+    if (tab === 'fbo') return { mode:'FBO' }
+    if (tab === 'penalties') return { group:'penalties,deductions' }
+    if (tab === 'compensations') return { group:'compensations,adjustments' }
+    return {}
+  }
+
+  const loadFinanceLedger = async (connectionId = connection.connectionId, options = {}) => {
+    if (!connectionId) return
+    const range = financeDateRange()
+    setFinanceLedgerLoading(true)
+    try {
+      const result = await wbApi.financeLedger(connectionId, {
+        ...range,
+        ...financeRequestForTab(options.tab || financeTab),
+        query:options.query ?? financeQuery,
+        page:options.page ?? financePage,
+        limit:120,
+      })
+      setFinanceLedger(result)
+    } catch (error) {
+      notify(error.message, 8000)
+    } finally {
+      setFinanceLedgerLoading(false)
+    }
+  }
+
+  const exportFinanceLedger = () => {
+    const rows = Array.isArray(financeLedger?.rows) ? financeLedger.rows : []
+    if (!rows.length) return notify('В выбранном разделе пока нет финансовых операций.')
+    const headers = ['Дата','Операция','Группа','Приход/расход','Сумма','Схема','Артикул WB','Артикул продавца','Заказ/srid','Склад','Источник','Примечание']
+    const lines = [headers.map(csvCell).join(';'), ...rows.map(row => [
+      row.operationDate,row.operationName,row.operationGroup,row.direction,row.amount,row.fulfillmentMode,row.nmId,row.vendorCode,row.srid || row.orderId,row.warehouse,row.sourceStream,row.note,
+    ].map(csvCell).join(';'))]
+    const blob = new Blob([`\uFEFF${lines.join('\n')}`], { type:'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `elisei-finance-${financeDateRange().from}-${financeDateRange().to}.csv`
+    anchor.click()
+    URL.revokeObjectURL(url)
   }
 
   const loadConnectionData = async connectionId => {
@@ -261,6 +326,16 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     if (!['Остатки','Реклама'].includes(active) || !connection.connected || !connection.connectionId) return
     loadConnectionData(connection.connectionId).catch(() => {})
   }, [active, connection.connected, connection.connectionId])
+
+
+  useEffect(() => {
+    if (active !== 'Финансы' || !connection.connected || !connection.connectionId) return undefined
+    const timer = window.setTimeout(() => {
+      loadFinanceLedger(connection.connectionId).catch(() => {})
+    }, 280)
+    return () => window.clearTimeout(timer)
+  }, [active, connection.connected, connection.connectionId, financeTab, financeQuery, financePage,
+      (connection.syncStates || []).find(item => ['finance','acquiring','paidStorage','acceptance'].includes(item.stage))?.lastSuccessAt])
 
   const nav = [
     ['Главная', Home], ['Аналитика', BarChart3], ['Товары', PackageSearch], ['Остатки', Boxes],
@@ -728,7 +803,81 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     </>)}</section>
   }
 
-  const renderFinance = () => <section className="app-page glass-panel"><div className="page-title"><span>Финансы / P&L</span><h1>Чистая экономика бизнеса</h1><p>Комиссия, логистика, хранение, приёмка, эквайринг, штрафы и удержания загружаются из WB API. Ручные значения используются только как резерв, если поток ещё не получен.</p></div><div className="finance-layout"><div className="settings-card"><h3><Calculator size={19}/> Резервные параметры и себестоимость</h3><p className="settings-hint">WB-расходы подставляются автоматически. Здесь остаются себестоимость, налог, постоянные расходы и fallback на случай недоступности отчёта.</p><div className="settings-grid"><label>Комиссия WB, %<input type="number" min="0" max="100" value={settingsDraft.commissionPercent ?? 0} onChange={e => updateSetting('commissionPercent',e.target.value)}/></label><label>Логистика за продажу, ₽<input type="number" min="0" value={settingsDraft.logisticsPerSale ?? 0} onChange={e => updateSetting('logisticsPerSale',e.target.value)}/></label><label>Реклама, ₽/мес.<input type="number" min="0" value={settingsDraft.advertisingMonthly ?? 0} onChange={e => updateSetting('advertisingMonthly',e.target.value)}/></label><label>Хранение, ₽/мес.<input type="number" min="0" value={settingsDraft.storageMonthly ?? 0} onChange={e => updateSetting('storageMonthly',e.target.value)}/></label><label>Постоянные расходы, ₽/мес.<input type="number" min="0" value={settingsDraft.fixedMonthly ?? 0} onChange={e => updateSetting('fixedMonthly',e.target.value)}/></label><label>Налог с выручки, %<input type="number" min="0" max="100" value={settingsDraft.taxPercent ?? 0} onChange={e => updateSetting('taxPercent',e.target.value)}/></label><label>Себестоимость по умолчанию, % цены<input type="number" min="0" max="100" value={settingsDraft.defaultCostPercent ?? 0} onChange={e => updateSetting('defaultCostPercent',e.target.value)}/></label><label>Целевая маржа, %<input type="number" min="0" max="90" value={settingsDraft.targetMarginPercent ?? 20} onChange={e => updateSetting('targetMarginPercent',e.target.value)}/></label></div><button className="primary-btn" disabled={savingSettings} onClick={saveSettings}>{savingSettings ? <RefreshCw className="spin" size={17}/> : <Save size={17}/>} Сохранить и пересчитать</button></div><div className="pnl-card"><h3>P&L за 30 дней</h3>{[['Выручка',summary.revenue],['Себестоимость',summary.cogs],['Комиссия WB',summary.commission],['Логистика',summary.logistics],['Хранение',summary.storage],['Платная приёмка',summary.acceptance],['Эквайринг',summary.acquiring],['Штрафы',summary.penalties],['Удержания',summary.deductions],['Корректировки / доплаты',summary.additionalPayment],['Реклама',summary.advertising],['Постоянные расходы',summary.fixed],['Налог',summary.tax]].map(([label,value]) => <div className="pnl-line" key={label}><span>{label}</span><strong>{formatMoney(value)}</strong></div>)}<div className={`pnl-line total ${summary.operatingProfit != null && summary.operatingProfit < 0 ? 'negative' : ''}`}><span>Операционная прибыль</span><strong>{formatMoney(summary.operatingProfit)}</strong></div><div className="pnl-margin"><span>Операционная маржа</span><strong>{formatPercent(summary.margin)}</strong></div><div className="finance-source-note"><ShieldCheck size={16}/><span>Логистика: {summary.logisticsSource === 'wb_api' ? 'WB API' : 'ручной fallback'} · хранение: {summary.storageSource === 'finance_report' ? 'финансовый отчёт' : summary.storageSource === 'paid_storage_report' ? 'отчёт хранения' : 'ручной fallback'}</span></div></div></div><div className="section-title-row"><div><span>Себестоимость</span><h2>По товарам</h2></div><button className="secondary-btn" onClick={saveSettings}><Save size={16}/> Сохранить</button></div><div className="data-table cost-table"><div className="data-row head cost-row"><span>Товар</span><span>Средняя цена</span><span>Себестоимость за единицу</span><span>Цена в ноль</span><span>Прибыль</span><span>Маржа</span></div>{productRows.slice(0,100).map(p => { const costKey=String(p.key || p.nmID || p.vendorCode); const cost=settingsDraft.productCosts?.[costKey] ?? p.unitCost ?? 0; return <div className="data-row cost-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatMoney(p.averagePrice)}</span><span><input className="inline-cost" type="number" min="0" value={cost} onChange={e => updateProductCost(p,e.target.value)} /></span><span>{formatMoney(p.breakevenPrice)}</span><span className={p.profit != null && p.profit < 0 ? 'negative' : 'positive'}>{formatMoney(p.profit)}</span><span>{formatPercent(p.margin)}</span></div>})}</div></section>
+  const renderFinance = () => {
+    const ledger = financeLedger || { rows:[],summary:{},products:[],groups:[],sources:[],coverage:{} }
+    const ledgerRows = Array.isArray(ledger.rows) ? ledger.rows : []
+    const ledgerSummary = ledger.summary || {}
+    const financeReady = Boolean(ledger.coverage?.financeReady || coreData?.availability?.finance)
+    const tabs = [
+      ['overview','Обзор'],['all','Все операции'],['products','По товарам'],['fbs','FBS'],['fbo','FBO'],
+      ['penalties','Удержания и штрафы'],['compensations','Компенсации'],['reconciliation','Сверка с WB'],
+    ]
+    const groupNames = {
+      sales:'Продажи',settlement:'К перечислению',commission:'Комиссия WB',logistics:'Логистика',storage:'Хранение',
+      acceptance:'Приёмка',acquiring:'Эквайринг',penalties:'Штрафы',deductions:'Удержания',compensations:'Компенсации',adjustments:'Корректировки',
+    }
+    const sourceNames = { finance:'Финансовая детализация',acquiring:'Отчёт эквайринга',paidStorage:'Отчёт хранения',acceptance:'Отчёт приёмки' }
+    const productMap = new Map()
+    productRows.forEach(item => {
+      if (item.nmID) productMap.set(`nm:${item.nmID}`,item)
+      if (item.vendorCode) productMap.set(`vendor:${item.vendorCode}`,item)
+    })
+    const titleForLedger = row => productMap.get(`nm:${row.nmId}`)?.title || productMap.get(`vendor:${row.vendorCode}`)?.title || 'Финансовая операция'
+    const statusText = financeReady
+      ? `Финансовая детализация WB загружена. ${formatNumber(ledgerSummary.movements || 0)} движений в выбранном периоде.`
+      : 'Финансовый отчёт WB ещё не завершён. Нули не считаются подтверждёнными — показываем статус ожидания и уже сохранённые операции.'
+    const financeValue = value => financeReady || Number(value || 0) !== 0 ? formatMoney(value) : 'Ожидает WB'
+
+    const renderLedgerTable = () => <>
+      <div className="finance-ledger-tools">
+        <label className="finance-ledger-search"><Search size={16}/><input value={financeQuery} onChange={event => { setFinanceQuery(event.target.value); setFinancePage(1) }} placeholder="Операция, артикул, nmID, srid, заказ"/></label>
+        <button className="secondary-btn" onClick={exportFinanceLedger}><Download size={16}/> Выгрузить показанные</button>
+      </div>
+      {financeLedgerLoading ? <div className="finance-ledger-empty"><RefreshCw className="spin" size={22}/> Загружаю движения денег…</div>
+        : ledgerRows.length ? <div className="data-table finance-ledger-table">
+          <div className="data-row head finance-ledger-row"><span>Дата</span><span>Операция</span><span>Приход / расход</span><span>Сумма</span><span>FBS/FBO</span><span>Товар</span><span>Заказ</span><span>Источник</span></div>
+          {ledgerRows.map(row => <div className="data-row finance-ledger-row" key={row.movementKey}>
+            <span>{formatDate(row.operationDate)}</span>
+            <span><strong>{row.operationName}</strong><small>{groupNames[row.operationGroup] || row.operationGroup}{row.detailOnly ? ' · детализация без повторного счёта' : ''}</small></span>
+            <span><b className={`money-direction ${row.direction}`}>{row.direction === 'income' ? 'Приход' : row.direction === 'expense' ? 'Расход' : 'Информация'}</b></span>
+            <span className={row.amount < 0 ? 'negative' : row.amount > 0 ? 'positive' : ''}>{row.amount > 0 ? '+' : ''}{formatMoney(row.amount)}</span>
+            <span><b className="mode-pill">{row.fulfillmentMode || '—'}</b></span>
+            <span><strong>{titleForLedger(row)}</strong><small>{row.vendorCode || '—'} · nmID {row.nmId || '—'}</small></span>
+            <span><strong>{row.orderId || '—'}</strong><small>{row.srid || row.warehouse || '—'}</small></span>
+            <span><strong>{sourceNames[row.sourceStream] || row.sourceStream}</strong><small>{row.note || row.sourceField || 'WB API'}</small></span>
+          </div>)}
+        </div> : <div className="finance-ledger-empty"><WalletCards size={24}/><strong>{financeReady ? 'В выбранном фильтре операций нет' : 'Ожидает финансовые данные WB'}</strong><span>{statusText}</span></div>}
+      {ledger.pagination?.pages > 1 && <div className="finance-pagination"><button disabled={financePage <= 1} onClick={() => setFinancePage(page => Math.max(1,page-1))}>Назад</button><span>Страница {ledger.pagination.page} из {ledger.pagination.pages}</span><button disabled={financePage >= ledger.pagination.pages} onClick={() => setFinancePage(page => page+1)}>Далее</button></div>}
+    </>
+
+    return <section className="app-page glass-panel">
+      <div className="page-title"><span>Финансы / P&amp;L</span><h1>Все движения денег WB</h1><p>Продажи, перечисления, FBS/FBO-логистика, хранение, приёмка, эквайринг, штрафы, удержания, компенсации и корректировки — с привязкой к товару и источнику.</p></div>
+      <div className={`notice ${financeReady ? 'success' : 'warning'}`}><ShieldCheck size={20}/><div><strong>{financeReady ? 'Финансовые данные подтверждены WB' : 'Ожидает завершения «Финансы WB»'}</strong><p>{statusText}</p></div><button onClick={() => setActive('Синхронизации')}>Открыть статусы</button></div>
+      <div className="finance-tabs">{tabs.map(([key,label]) => <button className={financeTab === key ? 'active' : ''} key={key} onClick={() => { setFinanceTab(key); setFinancePage(1) }}>{label}</button>)}</div>
+
+      <div className="metrics-grid four finance-movement-metrics">
+        <MetricCard label="К перечислению" value={financeValue(ledgerSummary.sellerPayable)} delta="поле forPay из отчёта WB" icon={WalletCards}/>
+        <MetricCard label="Расходы WB" value={financeValue(ledgerSummary.expenses)} delta={`логистика ${financeValue(ledgerSummary.logistics)}`} icon={CircleDollarSign}/>
+        <MetricCard label="Удержания и штрафы" value={financeValue(Number(ledgerSummary.penalties || 0)+Number(ledgerSummary.deductions || 0))} delta={`${formatNumber(ledgerSummary.movements || 0)} движений`} icon={AlertTriangle}/>
+        <MetricCard label="Компенсации" value={financeValue(ledgerSummary.compensations)} delta={`FBS-логистика ${financeValue(ledgerSummary.fbsLogistics)}`} icon={TrendingUp}/>
+      </div>
+
+      {financeTab === 'overview' && <>
+        <div className="finance-layout">
+          <div className="settings-card"><h3><Calculator size={19}/> Резервные параметры и себестоимость</h3><p className="settings-hint">WB-расходы подставляются автоматически. Здесь остаются себестоимость, налог, постоянные расходы и fallback на случай недоступности отчёта.</p><div className="settings-grid"><label>Комиссия WB, %<input type="number" min="0" max="100" value={settingsDraft.commissionPercent ?? 0} onChange={e => updateSetting('commissionPercent',e.target.value)}/></label><label>Логистика за продажу, ₽<input type="number" min="0" value={settingsDraft.logisticsPerSale ?? 0} onChange={e => updateSetting('logisticsPerSale',e.target.value)}/></label><label>Реклама, ₽/мес.<input type="number" min="0" value={settingsDraft.advertisingMonthly ?? 0} onChange={e => updateSetting('advertisingMonthly',e.target.value)}/></label><label>Хранение, ₽/мес.<input type="number" min="0" value={settingsDraft.storageMonthly ?? 0} onChange={e => updateSetting('storageMonthly',e.target.value)}/></label><label>Постоянные расходы, ₽/мес.<input type="number" min="0" value={settingsDraft.fixedMonthly ?? 0} onChange={e => updateSetting('fixedMonthly',e.target.value)}/></label><label>Налог с выручки, %<input type="number" min="0" max="100" value={settingsDraft.taxPercent ?? 0} onChange={e => updateSetting('taxPercent',e.target.value)}/></label><label>Себестоимость по умолчанию, % цены<input type="number" min="0" max="100" value={settingsDraft.defaultCostPercent ?? 0} onChange={e => updateSetting('defaultCostPercent',e.target.value)}/></label><label>Целевая маржа, %<input type="number" min="0" max="90" value={settingsDraft.targetMarginPercent ?? 20} onChange={e => updateSetting('targetMarginPercent',e.target.value)}/></label></div><button className="primary-btn" disabled={savingSettings} onClick={saveSettings}>{savingSettings ? <RefreshCw className="spin" size={17}/> : <Save size={17}/>} Сохранить и пересчитать</button></div>
+          <div className="pnl-card"><h3>P&amp;L за выбранный период</h3>{[['Выручка',summary.revenue],['Себестоимость',summary.cogs],['Комиссия WB',summary.commission],['Логистика',summary.logistics],['Хранение',summary.storage],['Платная приёмка',summary.acceptance],['Эквайринг',summary.acquiring],['Штрафы',summary.penalties],['Удержания',summary.deductions],['Корректировки / доплаты',summary.additionalPayment],['Реклама',summary.advertising],['Постоянные расходы',summary.fixed],['Налог',summary.tax]].map(([label,value]) => <div className="pnl-line" key={label}><span>{label}</span><strong>{formatMoney(value)}</strong></div>)}<div className={`pnl-line total ${summary.operatingProfit != null && summary.operatingProfit < 0 ? 'negative' : ''}`}><span>Операционная прибыль</span><strong>{formatMoney(summary.operatingProfit)}</strong></div><div className="pnl-margin"><span>Операционная маржа</span><strong>{formatPercent(summary.margin)}</strong></div><div className="finance-source-note"><ShieldCheck size={16}/><span>«К перечислению» не уменьшается повторно на компоненты отчёта. Отдельные отчёты хранения, приёмки и эквайринга используются для детализации без двойного счёта.</span></div></div>
+        </div>
+        <div className="finance-breakdown-grid">{(ledger.groups || []).map(item => <div key={item.group}><span>{groupNames[item.group] || item.group}</span><strong>{formatMoney(item.expense || item.income)}</strong><small>{formatNumber(item.movements)} операций</small></div>)}</div>
+        <div className="section-title-row"><div><span>Себестоимость</span><h2>По товарам</h2></div><button className="secondary-btn" onClick={saveSettings}><Save size={16}/> Сохранить</button></div><div className="data-table cost-table"><div className="data-row head cost-row"><span>Товар</span><span>Средняя цена</span><span>Себестоимость за единицу</span><span>Цена в ноль</span><span>Прибыль</span><span>Маржа</span></div>{productRows.slice(0,100).map(p => { const costKey=String(p.key || p.nmID || p.vendorCode); const cost=settingsDraft.productCosts?.[costKey] ?? p.unitCost ?? 0; return <div className="data-row cost-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatMoney(p.averagePrice)}</span><span><input className="inline-cost" type="number" min="0" value={cost} onChange={e => updateProductCost(p,e.target.value)} /></span><span>{formatMoney(p.breakevenPrice)}</span><span className={p.profit != null && p.profit < 0 ? 'negative' : 'positive'}>{formatMoney(p.profit)}</span><span>{formatPercent(p.margin)}</span></div>})}</div>
+      </>}
+
+      {financeTab === 'products' && <div className="data-table finance-products-table"><div className="data-row head finance-products-row"><span>Товар</span><span>Схема</span><span>К перечислению</span><span>Расходы WB</span><span>Логистика</span><span>Штрафы</span><span>Удержания</span><span>Компенсации</span></div>{(ledger.products || []).map(row => <div className="data-row finance-products-row" key={`${row.nmId}-${row.vendorCode}-${row.fulfillmentMode}`}><span><strong>{titleForLedger(row)}</strong><small>{row.vendorCode || '—'} · nmID {row.nmId || '—'}</small></span><span><b className="mode-pill">{row.fulfillmentMode || '—'}</b></span><span>{formatMoney(row.sellerPayable)}</span><span>{formatMoney(row.expenses)}</span><span>{formatMoney(row.logistics)}</span><span>{formatMoney(row.penalties)}</span><span>{formatMoney(row.deductions)}</span><span>{formatMoney(row.compensations)}</span></div>)}</div>}
+
+      {financeTab === 'reconciliation' && <div className="reconciliation-layout"><div className="pnl-card"><h3>Сверка с отчётом WB</h3><div className="pnl-line"><span>Розничная сумма операций</span><strong>{financeValue(ledgerSummary.grossRevenue)}</strong></div><div className="pnl-line"><span>Расходные компоненты</span><strong>{financeValue(ledgerSummary.expenses)}</strong></div><div className="pnl-line"><span>Компенсации и доплаты</span><strong>{financeValue(ledgerSummary.compensations)}</strong></div><div className="pnl-line"><span>Расчёт по компонентам</span><strong>{financeValue(ledgerSummary.componentNet)}</strong></div><div className="pnl-line total"><span>WB: к перечислению продавцу</span><strong>{financeValue(ledgerSummary.sellerPayable)}</strong></div><div className={`pnl-margin ${Math.abs(Number(ledgerSummary.reconciliationDifference || 0)) > 1 ? 'warning' : ''}`}><span>Контрольная разница</span><strong>{financeValue(ledgerSummary.reconciliationDifference)}</strong></div><p className="settings-hint">Разница может включать специальные операции WB, скидочные механики и поля, которые не являются отдельным денежным удержанием. Все исходные операции остаются в реестре.</p></div><div className="settings-card"><h3>Покрытие источников</h3><div className="finance-sources-list">{(ledger.sources || []).map(item => <div key={item.stream}><span>{sourceNames[item.stream] || item.stream}</span><strong>{formatNumber(item.movements)} движений</strong><small>{item.updatedAt ? new Date(item.updatedAt).toLocaleString('ru-RU') : 'не загружено'}</small></div>)}</div></div></div>}
+
+      {!['overview','products','reconciliation'].includes(financeTab) && renderLedgerTable()}
+    </section>
+  }
 
   const renderPricing = () => <section className="app-page glass-panel"><div className="page-title"><span>Ценообразование</span><h1>Цены и акции</h1><p>Цена в ноль, целевая цена, цена пика и безопасные сценарии скидок.</p></div>{summary.cogs == null && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Добавьте себестоимость</strong><p>Без неё невозможно честно определить убыточные скидки.</p></div><button onClick={() => setActive('Финансы')}>Открыть финансы</button></div>}<div className="data-table pricing-table"><div className="data-row head pricing-row"><span>Товар</span><span>Текущая/средняя</span><span>Цена в 0</span><span>Целевая</span><span>Пик</span><span>−20%</span><span>−40%</span><span>Решение</span></div>{productRows.map(p => { const base=p.averagePrice || p.targetPrice || 0; const discount20=base*.8; const discount40=base*.6; return <div className="data-row pricing-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatMoney(base)}</span><span>{formatMoney(p.breakevenPrice)}</span><span>{formatMoney(p.targetPrice)}</span><span>{formatMoney(p.peakPrice)}</span><span className={p.breakevenPrice && discount20 < p.breakevenPrice ? 'negative' : 'positive'}>{formatMoney(discount20)}</span><span className={p.breakevenPrice && discount40 < p.breakevenPrice ? 'negative' : 'positive'}>{formatMoney(discount40)}</span><span>{p.profit != null && p.profit < 0 ? 'Повысить цену / снизить расходы' : p.status === 'Избыток' ? 'Допустима контролируемая акция' : 'Сохранять цену'}</span></div>})}</div></section>
 

@@ -1,2 +1,7 @@
 backend/src/server.js
-README_5_4_7A.md
+backend/src/wb/finance-ledger.js
+src/pages/DashboardPage.jsx
+src/styles/app.css
+README_5_4_8.md
+FILES.txt
+SHA256SUMS.txt
