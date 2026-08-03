@@ -11,9 +11,16 @@ export const WB_STREAMS = Object.freeze([
   'paidStorage',
   'acceptance',
   'acquiring',
+  'fbsArchive',
+  'measurementPenalties',
+  'deductionsReport',
+  'goodsReturns',
+  'tariffs',
+  'funnel',
+  'documents',
 ])
 
-const OBJECT_STREAMS = new Set(['advertising', 'finance', 'acquiring'])
+const OBJECT_STREAMS = new Set(['advertising', 'finance', 'acquiring', 'fbsArchive', 'measurementPenalties', 'deductionsReport', 'goodsReturns', 'tariffs', 'funnel', 'documents'])
 
 function checksum(payload) {
   return crypto.createHash('sha256').update(JSON.stringify(payload ?? null)).digest('hex')
@@ -21,7 +28,7 @@ function checksum(payload) {
 
 export function streamCount(stream, payload) {
   if (stream === 'advertising') return Array.isArray(payload?.campaigns) ? payload.campaigns.length : 0
-  if (OBJECT_STREAMS.has(stream)) return Array.isArray(payload?.rows) ? payload.rows.length : 0
+  if (OBJECT_STREAMS.has(stream)) return Number(payload?.totalRows ?? (Array.isArray(payload?.rows) ? payload.rows.length : 0)) || 0
   return Array.isArray(payload) ? payload.length : 0
 }
 
@@ -41,6 +48,11 @@ export function normalizeStreamPayload(stream, payload) {
       ? { rows: [], totals: {}, period: null, complete: true, ...payload }
       : { rows: [], totals: {}, period: null, complete: true }
   }
+  if (OBJECT_STREAMS.has(stream)) {
+    return payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? { rows: [], totalRows: 0, complete: true, ...payload }
+      : { rows: [], totalRows: 0, complete: true }
+  }
   return Array.isArray(payload) ? payload : []
 }
 
@@ -59,7 +71,7 @@ export async function ensureStreamSchema(db) {
     );
     ALTER TABLE wb_stream_data DROP CONSTRAINT IF EXISTS wb_stream_data_stream_check;
     ALTER TABLE wb_stream_data ADD CONSTRAINT wb_stream_data_stream_check
-      CHECK (stream IN ('products','orders','sales','stocks','sellerStocks','advertising','finance','paidStorage','acceptance','acquiring'));
+      CHECK (stream IN ('products','orders','sales','stocks','sellerStocks','advertising','finance','paidStorage','acceptance','acquiring','fbsArchive','measurementPenalties','deductionsReport','goodsReturns','tariffs','funnel','documents'));
     CREATE INDEX IF NOT EXISTS wb_stream_data_updated_idx
       ON wb_stream_data(connection_id, updated_at DESC);
     CREATE TABLE IF NOT EXISTS wb_stream_items (

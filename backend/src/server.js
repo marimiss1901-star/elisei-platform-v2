@@ -377,15 +377,24 @@ const WB_SYNC_STAGES = Object.freeze({
   paidStorage: { label: 'Платное хранение', scope: 'analytics' },
   acceptance: { label: 'Платная приёмка', scope: 'analytics' },
   acquiring: { label: 'Эквайринг', scope: 'finance' },
+  fbsArchive: { label: 'Архив заказов FBS', scope: 'marketplace' },
+  measurementPenalties: { label: 'Штрафы за габариты', scope: 'analytics' },
+  deductionsReport: { label: 'Подмены и неверные вложения', scope: 'analytics' },
+  goodsReturns: { label: 'Возвраты и перемещения', scope: 'analytics' },
+  tariffs: { label: 'Тарифы и комиссии', scope: 'content' },
+  funnel: { label: 'Воронка карточек', scope: 'analytics' },
+  documents: { label: 'Документы WB', scope: 'documents' },
 })
 const CORE_SYNC_SCOPES = [...new Set(Object.values(WB_SYNC_STAGES).map(item => item.scope))]
 const STOCK_DATA_SCHEMA_VERSION = 5
 const STOCK_DATA_SOURCE = 'wb_warehouse_remains'
 const STOCK_REPORT_PROFILE = 'article_barcode_size_v1'
-const HEAVY_SYNC_STAGES = Object.freeze(['finance','paidStorage','acceptance','acquiring'])
+const HEAVY_SYNC_STAGES = Object.freeze(['finance','paidStorage','acceptance','acquiring','fbsArchive','measurementPenalties','deductionsReport'])
 const HEAVY_PAGE_LIMIT = Math.max(500, Math.min(5000, Number(process.env.WB_HEAVY_PAGE_LIMIT || 2500)))
 const HEAVY_DB_BATCH_SIZE = Math.max(100, Math.min(500, Number(process.env.WB_HEAVY_DB_BATCH_SIZE || 250)))
 const HEAVY_STAGE_COOLDOWN_MS = Math.max(5000, Number(process.env.WB_HEAVY_STAGE_COOLDOWN_MS || 65000))
+const FBS_ARCHIVE_MONTHS = Math.max(1, Math.min(60, Number(process.env.WB_FBS_ARCHIVE_MONTHS || 24)))
+const EXTENDED_OBJECT_STAGES = new Set(['fbsArchive','measurementPenalties','deductionsReport','goodsReturns','tariffs','funnel','documents'])
 
 function decodeJwtPayload(value, invalidMessage) {
   try {
@@ -626,6 +635,7 @@ function publicWbToken(row) {
     coversAllCoreFlows: coversAllCoreFlows(row),
     stageCoverage,
     stageCoverageCount: stageCoverage.length,
+    stageTotal: Object.keys(WB_SYNC_STAGES).length,
     expiresAt: row.expires_at || null,
     status: row.status,
     lastCheckedAt: row.last_checked_at || null,
@@ -807,6 +817,7 @@ function publicConnection(row, tokens = [], syncStates = []) {
     primaryTokenId: primaryToken?.id || null,
     tokenMode: universal ? 'universal' : allCoreCovered ? 'combined' : tokens.length ? 'partial' : 'none',
     coverageByStage,
+    stageTotal:Object.keys(WB_SYNC_STAGES).length,
     syncStates: syncStates.map(publicSyncState),
     status: row?.status || 'disconnected',
     connectedAt: row?.created_at || null,
@@ -2321,12 +2332,14 @@ function previousStageValue(data, stage) {
   if (stage === 'advertising') return value && typeof value === 'object' ? value : { campaigns: [], totals: {}, period: null }
   if (stage === 'finance') return value && typeof value === 'object' ? value : { rows:[], totals:{}, period:null, balance:null, complete:true }
   if (stage === 'acquiring') return value && typeof value === 'object' ? value : { rows:[], totals:{}, period:null, complete:true }
+  if (EXTENDED_OBJECT_STAGES.has(stage)) return value && typeof value === 'object' && !Array.isArray(value) ? value : { rows:[], totalRows:0, complete:true }
   return Array.isArray(value) ? value : []
 }
 
 function stageCount(stage, value) {
   if (stage === 'advertising') return Array.isArray(value?.campaigns) ? value.campaigns.length : 0
   if (stage === 'finance' || stage === 'acquiring') return Array.isArray(value?.rows) ? value.rows.length : 0
+  if (EXTENDED_OBJECT_STAGES.has(stage)) return Number(value?.totalRows ?? (Array.isArray(value?.rows) ? value.rows.length : 0)) || 0
   return Array.isArray(value) ? value.length : 0
 }
 
@@ -2990,6 +3003,243 @@ async function advanceWarehouseRemainsTask(token, state, { deadlineAt = 0 } = {}
   return { pending: true, taskId, taskStatus: taskStatus || 'processing', reportProfile:STOCK_REPORT_PROFILE, nextAllowedAt: new Date(Date.now() + 30000).toISOString() }
 }
 
+function extractExtendedRows(payload, preferredKeys = []) {
+  if (Array.isArray(payload)) return payload
+  if (!payload || typeof payload !== 'object') return []
+  const keys = [...preferredKeys, 'rows', 'orders', 'reports', 'report', 'documents', 'products', 'items']
+  for (const key of keys) {
+    if (Array.isArray(payload?.[key])) return payload[key]
+    if (Array.isArray(payload?.data?.[key])) return payload.data[key]
+    if (Array.isArray(payload?.result?.[key])) return payload.result[key]
+  }
+  if (Array.isArray(payload.data)) return payload.data
+  if (Array.isArray(payload.result)) return payload.result
+  return []
+}
+
+function extendedRowKey(stage, row = {}, index = 0) {
+  const explicit = row.id ?? row.orderId ?? row.order_id ?? row.rrdId ?? row.rrd_id ?? row.serviceName ?? row.srid ?? row.rid
+  if (explicit != null && String(explicit).trim()) return `${stage}:id:${String(explicit).trim()}`
+  const identity = [
+    row.nmId ?? row.nmID ?? row.nm_id ?? '',
+    row.vendorCode ?? row.vendor_code ?? row.oldVendorCode ?? '',
+    row.barcode ?? row.sku ?? row.oldSku ?? '',
+    row.date ?? row.dtBonus ?? row.creationTime ?? row.orderDt ?? '',
+    row.amount ?? row.sum ?? row.bonusSumm ?? '',
+    index,
+  ].join('|')
+  return `${stage}:sha:${crypto.createHash('sha1').update(identity).digest('hex')}`
+}
+
+function compactExtendedValue({ rows = [], totalRows = 0, syncId = null, period = null, extra = {} } = {}) {
+  return {
+    rows: Array.isArray(rows) ? rows.slice(0, 100) : [],
+    totalRows: Math.max(0, Number(totalRows || 0)),
+    complete: true,
+    storage: syncId ? 'wb_stream_items' : 'wb_stream_data',
+    syncId: syncId || null,
+    period: period || null,
+    ...extra,
+  }
+}
+
+function fbsArchiveMonthSequence(totalMonths = FBS_ARCHIVE_MONTHS) {
+  const months = []
+  const cursor = new Date()
+  cursor.setUTCDate(1)
+  cursor.setUTCHours(0,0,0,0)
+  cursor.setUTCMonth(cursor.getUTCMonth() - 3)
+  for (let index = 0; index < totalMonths; index += 1) {
+    months.push({ year:cursor.getUTCFullYear(),month:cursor.getUTCMonth()+1 })
+    cursor.setUTCMonth(cursor.getUTCMonth() - 1)
+  }
+  return months
+}
+
+async function advanceFbsArchiveTask(connectionId, token, state, { deadlineAt = 0 } = {}) {
+  const syncId = String(state?.metadata?.syncId || crypto.randomUUID())
+  const months = fbsArchiveMonthSequence()
+  const monthIndex = Math.max(0, Math.min(months.length - 1, Number(state?.metadata?.monthIndex || 0)))
+  const selectedMonth = months[monthIndex]
+  const cursor = Math.max(0, Number(state?.metadata?.next || 0))
+  const pageNumber = Math.max(0, Number(state?.metadata?.pageNumber || 0))
+  const limit = 1000
+  const params = new URLSearchParams({
+    year:String(selectedMonth.year),month:String(selectedMonth.month),next:String(cursor),limit:String(limit),
+  })
+  const endpoint = `https://marketplace-api.wildberries.ru/api/marketplace/v3/fbs/orders/archive?${params.toString()}`
+  const payload = await wbFetch(endpoint, token, {
+    label:`Архив заказов FBS · ${String(selectedMonth.month).padStart(2,'0')}.${selectedMonth.year}`,
+    timeoutMs:45000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+  })
+  const rows = extractExtendedRows(payload, ['orders'])
+  await saveStreamItemBatch(pool, {
+    connectionId,stream:'fbsArchive',syncId,rows,
+    keyOf:(row,index)=>extendedRowKey('fbsArchive',row,index),batchSize:HEAVY_DB_BATCH_SIZE,
+  })
+  const persistedCount = await countStreamItems(pool,{connectionId,stream:'fbsArchive',syncId})
+  const next = Math.max(0, Number(payload?.next ?? payload?.data?.next ?? 0))
+  if (rows.length > 0 && next > 0 && next !== cursor) {
+    return {
+      pending:true,
+      nextAllowedAt:new Date(Date.now()+500).toISOString(),
+      metadata:{ syncId,next,monthIndex,pageNumber:pageNumber+1,persistedCount,lastPageRows:rows.length,currentMonth:selectedMonth },
+    }
+  }
+  if (monthIndex + 1 < months.length) {
+    return {
+      pending:true,
+      nextAllowedAt:new Date(Date.now()+500).toISOString(),
+      metadata:{ syncId,next:0,monthIndex:monthIndex+1,pageNumber:pageNumber+1,persistedCount,lastPageRows:rows.length,currentMonth:months[monthIndex+1] },
+    }
+  }
+  await finalizeStreamItems(pool,{connectionId,stream:'fbsArchive',syncId})
+  return {
+    pending:false,
+    value:compactExtendedValue({rows,totalRows:persistedCount,syncId,extra:{next:null,pages:pageNumber+1,monthsScanned:months.length}}),
+    validation:{ incomingRows:rows.length,persistedRows:persistedCount,pages:pageNumber+1,monthsScanned:months.length,memorySafe:true },
+    endpoint,
+  }
+}
+
+const OFFSET_REPORTS = Object.freeze({
+  measurementPenalties:{
+    endpoint:'https://seller-analytics-api.wildberries.ru/api/analytics/v1/measurement-penalties',
+    label:'Штрафы за занижение габаритов', preferredKeys:['reports','items'], pageSize:1000,
+  },
+  deductionsReport:{
+    endpoint:'https://seller-analytics-api.wildberries.ru/api/analytics/v1/deductions',
+    label:'Подмены и неверные вложения', preferredKeys:['reports','items'], pageSize:1000,
+  },
+  documents:{
+    endpoint:'https://documents-api.wildberries.ru/api/v1/documents/list',
+    label:'Список документов WB', preferredKeys:['documents'], pageSize:50,
+  },
+})
+
+async function advanceOffsetReportTask(stage, connectionId, token, state, { deadlineAt = 0 } = {}) {
+  const definition = OFFSET_REPORTS[stage]
+  if (!definition) throw new Error(`Неизвестный постраничный поток WB: ${stage}`)
+  const period = state?.metadata?.period || reportPeriod(stage === 'documents' ? 365 : 30)
+  const syncId = String(state?.metadata?.syncId || crypto.randomUUID())
+  const offset = Math.max(0, Number(state?.metadata?.offset || 0))
+  const pageNumber = Math.max(0, Number(state?.metadata?.pageNumber || 0))
+  const params = new URLSearchParams()
+  if (stage === 'documents') {
+    params.set('locale','ru')
+    params.set('beginTime',period.dateFrom)
+    params.set('endTime',period.dateTo)
+    params.set('sort','date')
+    params.set('order','desc')
+  } else {
+    params.set('dateFrom',`${period.dateFrom}T00:00:00Z`)
+    params.set('dateTo',`${period.dateTo}T23:59:59Z`)
+    if (stage === 'deductionsReport') {
+      params.set('sort','dtBonus')
+      params.set('order','desc')
+    }
+  }
+  params.set('limit',String(definition.pageSize))
+  params.set('offset',String(offset))
+  const endpoint = `${definition.endpoint}?${params.toString()}`
+  const payload = await wbFetch(endpoint, token, {
+    label:definition.label, timeoutMs:45000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
+  })
+  const rows = extractExtendedRows(payload, definition.preferredKeys)
+  await saveStreamItemBatch(pool, {
+    connectionId,stream:stage,syncId,rows,
+    keyOf:(row,index)=>extendedRowKey(stage,row,offset+index),batchSize:HEAVY_DB_BATCH_SIZE,
+  })
+  if (stage === 'measurementPenalties' || stage === 'deductionsReport') {
+    await persistFinanceLedgerBatch(pool, {
+      connectionId,stream:stage,rows,
+      keyOf:(row,index)=>extendedRowKey(stage,row,offset+index),batchSize:HEAVY_DB_BATCH_SIZE,
+    })
+  }
+  const persistedCount = await countStreamItems(pool,{connectionId,stream:stage,syncId})
+  const declaredTotal = Number(payload?.data?.total ?? payload?.total ?? 0)
+  const hasMore = declaredTotal > 0 ? offset + rows.length < declaredTotal : rows.length >= definition.pageSize
+  if (hasMore && rows.length) {
+    const waitMs = stage === 'documents' ? 11000 : 65000
+    return {
+      pending:true,
+      nextAllowedAt:new Date(Date.now()+waitMs).toISOString(),
+      metadata:{ period,syncId,offset:offset+rows.length,pageNumber:pageNumber+1,persistedCount,lastPageRows:rows.length,declaredTotal:declaredTotal||null },
+    }
+  }
+  await finalizeStreamItems(pool,{connectionId,stream:stage,syncId})
+  return {
+    pending:false,
+    value:compactExtendedValue({rows,totalRows:persistedCount,syncId,period,extra:{pages:pageNumber+1}}),
+    validation:{ incomingRows:rows.length,persistedRows:persistedCount,pages:pageNumber+1,period,memorySafe:true },
+    endpoint,
+  }
+}
+
+async function loadGoodsReturns(token, { deadlineAt = 0 } = {}) {
+  const period = reportPeriod(30)
+  const endpoint = `https://seller-analytics-api.wildberries.ru/api/v1/analytics/goods-return?dateFrom=${period.dateFrom}&dateTo=${period.dateTo}`
+  const payload = await wbFetch(endpoint, token, {
+    label:'Возвраты и перемещения товаров',timeoutMs:45000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+  })
+  const rows = extractExtendedRows(payload,['report'])
+  return { value:compactExtendedValue({rows,totalRows:rows.length,period}),rawPayload:payload,validation:{rows:rows.length,period},endpoint }
+}
+
+function deepArrayCount(value) {
+  if (Array.isArray(value)) return value.length
+  if (!value || typeof value !== 'object') return 0
+  return Object.values(value).reduce((sum,item)=>sum+deepArrayCount(item),0)
+}
+
+async function loadTariffs(token, { deadlineAt = 0 } = {}) {
+  const date = new Date().toISOString().slice(0,10)
+  const endpoints = {
+    commission:'https://common-api.wildberries.ru/api/v1/tariffs/commission?locale=ru',
+    box:`https://common-api.wildberries.ru/api/v1/tariffs/box?date=${date}`,
+    pallet:`https://common-api.wildberries.ru/api/v1/tariffs/pallet?date=${date}`,
+    returns:`https://common-api.wildberries.ru/api/v1/tariffs/return?date=${date}`,
+  }
+  const result = {}
+  for (const [key,endpoint] of Object.entries(endpoints)) {
+    result[key] = await wbFetch(endpoint, token, {
+      label:`Тарифы WB · ${key}`,timeoutMs:30000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+    })
+    if (key !== 'returns') await sleep(1100)
+  }
+  const commissionRows = extractExtendedRows(result.commission,['report','data'])
+  const totalRows = Math.max(commissionRows.length,deepArrayCount(result))
+  return {
+    value:compactExtendedValue({rows:commissionRows,totalRows,extra:{date,commission:result.commission,box:result.box,pallet:result.pallet,returns:result.returns}}),
+    rawPayload:result,validation:{date,totalRows,commissionRows:commissionRows.length},endpoint:Object.values(endpoints).join(' + '),
+  }
+}
+
+async function loadFunnel(token, { deadlineAt = 0 } = {}) {
+  const period = reportPeriod(30)
+  const endpoint = 'https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/products'
+  const payload = await wbFetch(endpoint, token, {
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ selectedPeriod:{start:period.dateFrom,end:period.dateTo},nmIds:[],brandNames:[],subjectIds:[],tagIds:[],skipDeletedNm:true,orderBy:{field:'openCard',mode:'desc'},limit:1000,offset:0 }),
+    label:'Воронка карточек WB',timeoutMs:60000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+  })
+  const rows = extractExtendedRows(payload,['products','items'])
+  return { value:compactExtendedValue({rows,totalRows:rows.length,period}),rawPayload:payload,validation:{rows:rows.length,period},endpoint }
+}
+
+async function latestExtendedRows(connectionId, stream, { afterKey = '', limit = 100 } = {}) {
+  const latest = await pool.query(`
+    SELECT sync_id FROM wb_stream_items
+    WHERE connection_id=$1 AND stream=$2
+    ORDER BY updated_at DESC LIMIT 1
+  `,[connectionId,stream])
+  const syncId = latest.rows[0]?.sync_id
+  if (!syncId) return { rows:[],syncId:null,next:null }
+  const page = await loadStreamItemPage(pool,{connectionId,stream,syncId,afterKey,limit})
+  return { rows:page.map(item=>({rowKey:item.row_key,...item.payload})),syncId,next:page.length ? page.at(-1).row_key : null }
+}
+
+
 async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
   const definition = WB_SYNC_STAGES[stage]
   const fallback = previousStageValue(data, stage)
@@ -3052,6 +3302,39 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       value = result.value
       meta = { ...result.validation,totals:value.totals,balance:value.balance,memorySafe:true }
       snapshot = { endpoint:result.endpoint,validation:result.validation }
+    } else if (stage === 'fbsArchive') {
+      const result = await advanceFbsArchiveTask(connection.id,selected.token,state,{deadlineAt})
+      if (result.pending) {
+        state = await updateSyncState(connection.id,stage,{
+          status:'queued',lastAttemptAt:new Date().toISOString(),nextAllowedAt:result.nextAllowedAt,lastError:null,taskId:null,
+          metadata:{...result.metadata,tokenId:selected.row.id,tokenLabel:selected.row.label,memorySafe:true},
+        })
+        return {stage,status:'queued',value:fallback,warning:`${definition.label}: сохранено ${Number(result.metadata.persistedCount||0)} заказов, продолжение в очереди.`,state}
+      }
+      value=result.value
+      meta=result.validation
+      snapshot={endpoint:result.endpoint,validation:result.validation}
+    } else if (stage === 'measurementPenalties' || stage === 'deductionsReport' || stage === 'documents') {
+      const result = await advanceOffsetReportTask(stage,connection.id,selected.token,state,{deadlineAt})
+      if (result.pending) {
+        state = await updateSyncState(connection.id,stage,{
+          status:'queued',lastAttemptAt:new Date().toISOString(),nextAllowedAt:result.nextAllowedAt,lastError:null,taskId:null,
+          metadata:{...result.metadata,tokenId:selected.row.id,tokenLabel:selected.row.label,memorySafe:true},
+        })
+        return {stage,status:'queued',value:fallback,warning:`${definition.label}: сохранено ${Number(result.metadata.persistedCount||0)} строк, продолжение в очереди.`,state}
+      }
+      value=result.value
+      meta=result.validation
+      snapshot={endpoint:result.endpoint,validation:result.validation}
+    } else if (stage === 'goodsReturns') {
+      const loaded=await loadGoodsReturns(selected.token,{deadlineAt})
+      value=loaded.value; meta=loaded.validation; snapshot=loaded
+    } else if (stage === 'tariffs') {
+      const loaded=await loadTariffs(selected.token,{deadlineAt})
+      value=loaded.value; meta=loaded.validation; snapshot=loaded
+    } else if (stage === 'funnel') {
+      const loaded=await loadFunnel(selected.token,{deadlineAt})
+      value=loaded.value; meta=loaded.validation; snapshot=loaded
     } else if (stage === 'paidStorage' || stage === 'acceptance') {
       const result = await advanceGeneratedReportTask(stage, selected.token, state, { deadlineAt })
       if (result.pending) {
@@ -3105,7 +3388,7 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
         endpoint:snapshot.endpoint || stage,
         requestKey:['stocks','paidStorage','acceptance'].includes(stage) ? String(state?.task_id || meta?.taskId || '') : '',
         rawPayload:snapshot.rawPayload,
-        normalizedPayload:['products','stocks','sellerStocks','advertising','finance','paidStorage','acceptance','acquiring'].includes(stage) ? value : null,
+        normalizedPayload:['products','stocks','sellerStocks','advertising','finance','paidStorage','acceptance','acquiring','goodsReturns','tariffs','funnel'].includes(stage) ? value : null,
         validation:snapshot.validation || meta || {},
         keep:['orders','sales','finance','acquiring'].includes(stage) ? 2 : 4,
       })
@@ -3361,6 +3644,30 @@ app.get('/api/wb/status/:id', authRequired, async (req, res) => {
   connection = await getConnection(req.auth.sub, connection.id)
   const [tokens, states] = await Promise.all([getWbTokens(req.auth.sub, connection.id), getSyncStates(connection.id)])
   res.json(publicConnection(connection, tokens, states))
+})
+
+
+app.get('/api/wb/extended/:stream', authRequired, async (req, res) => {
+  try {
+    const stream=String(req.params.stream||'')
+    if (!EXTENDED_OBJECT_STAGES.has(stream)) return res.status(404).json({error:'Неизвестный расширенный поток WB'})
+    const connection=await getConnection(req.auth.sub,String(req.query.connectionId||'')||null)
+    if (!connection) return res.status(404).json({error:'Подключение не найдено'})
+    const limit=Math.max(20,Math.min(500,Number(req.query.limit)||100))
+    const afterKey=String(req.query.afterKey||'')
+    if (['fbsArchive','measurementPenalties','deductionsReport','documents'].includes(stream)) {
+      const page=await latestExtendedRows(connection.id,stream,{afterKey,limit})
+      const state=(await pool.query('SELECT * FROM wb_sync_states WHERE connection_id=$1 AND stage=$2',[connection.id,stream])).rows[0]||null
+      return res.json({stream,rows:page.rows,next:page.rows.length>=limit?page.next:null,syncId:page.syncId,total:Number(state?.last_count||0),status:state?.status||'idle'})
+    }
+    const stored=await pool.query('SELECT payload,row_count,metadata,updated_at FROM wb_stream_data WHERE connection_id=$1 AND stream=$2',[connection.id,stream])
+    const row=stored.rows[0]
+    const payload=row?.payload&&typeof row.payload==='object'?row.payload:{rows:[],totalRows:0}
+    const rows=Array.isArray(payload.rows)?payload.rows.slice(0,limit):[]
+    return res.json({stream,rows,total:Number(payload.totalRows??row?.row_count??rows.length),payload,updatedAt:row?.updated_at||null})
+  } catch (error) {
+    res.status(error.status||500).json({error:error.message})
+  }
 })
 
 app.post('/api/wb/sync', authRequired, async (req, res) => {

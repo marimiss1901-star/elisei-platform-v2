@@ -1,4 +1,4 @@
-const STREAMS = ['finance','acquiring','paidStorage','acceptance']
+const STREAMS = ['finance','acquiring','paidStorage','acceptance','measurementPenalties','deductionsReport']
 
 const money = (row, aliases, fallback = 0) => {
   for (const key of aliases) {
@@ -40,8 +40,8 @@ export function financeFulfillmentMode(row = {}) {
 
 const identity = (row = {}) => ({
   nmId:text(row,['nmId','nm_id','nmID']),
-  vendorCode:text(row,['vendorCode','vendor_code','saName','sa_name','supplierArticle']),
-  barcode:text(row,['sku','barcode']),
+  vendorCode:text(row,['vendorCode','vendor_code','saName','sa_name','supplierArticle','oldVendorCode','newVendorCode']),
+  barcode:text(row,['sku','barcode','oldSku','newSku']),
   srid:text(row,['srid','rid']),
   orderId:text(row,['orderId','order_id']),
   warehouse:text(row,['officeName','office_name','warehouse','warehouseName']),
@@ -52,7 +52,7 @@ const identity = (row = {}) => ({
   currency:text(row,['currency'],'RUB'),
   reportId:text(row,['reportId','report_id','realizationreport_id']),
   rrdId:text(row,['rrdId','rrd_id']),
-  operationDate:compactDate(text(row,['rrDate','rr_dt','saleDt','sale_dt','orderDt','order_dt','date','originalDate','shkCreateDate','giCreateDate'])),
+  operationDate:compactDate(text(row,['rrDate','rr_dt','saleDt','sale_dt','orderDt','order_dt','date','dtBonus','originalDate','shkCreateDate','giCreateDate'])),
   fulfillmentMode:financeFulfillmentMode(row),
 })
 
@@ -157,6 +157,18 @@ export function normalizeFinanceLedgerRows(stream, row = {}, sourceRowKey = '', 
   if (stream === 'acceptance') {
     const amount = Math.abs(money(row,['total','amount'],0))
     addMovement(result,{...base,fulfillmentMode:'FBO'},{ code:'paid_acceptance_detail',group:'acceptance',name:'Платная приёмка FBO — детализация',amount:-amount,metricRole:'detail',detailOnly:true,includedInPnl:false,sourceField:'total',note:'Отдельный отчёт приёмки; не суммируется повторно, если сумма уже есть в финансовой детализации.',index })
+  }
+
+  if (stream === 'measurementPenalties') {
+    const amount = Math.abs(money(row,['penaltyAmount','penalty_amount','penaltySum','penalty_sum','fine','penalty','amount','sum','deduction'],0))
+    const reversal = Math.abs(money(row,['reversalAmount','reversal_amount','compensationAmount','compensation_amount'],0))
+    addMovement(result,base,{ code:'measurement_penalty_detail',group:'penalties',name:text(row,['reason','penaltyReason','penalty_reason','type'],'Штраф за занижение габаритов'),amount:-amount,metricRole:'detail',detailOnly:true,includedInPnl:false,sourceField:'penaltyAmount',note:'Детализация отчёта об удержаниях. В P&L повторно не суммируется, если удержание уже входит в финансовую детализацию.',index })
+    addMovement(result,base,{ code:'measurement_penalty_reversal',group:'compensations',name:'Возврат удержания за габариты',amount:reversal,metricRole:'detail',detailOnly:true,includedInPnl:false,sourceField:'reversalAmount',note:'Компенсационная строка отчёта о габаритах. В P&L повторно не суммируется, если возврат уже отражён в финансовой детализации.',index })
+  }
+
+  if (stream === 'deductionsReport') {
+    const amount = Math.abs(money(row,['bonusSumm','bonus_summ','amount','sum','deduction'],0))
+    addMovement(result,base,{ code:'substitution_deduction_detail',group:'deductions',name:text(row,['bonusType','bonus_type','reason'],'Подмена или неверное вложение'),amount:-amount,metricRole:'detail',detailOnly:true,includedInPnl:false,sourceField:'bonusSumm',note:'Детализация удержания за подмену/вложение. В P&L повторно не суммируется, если сумма уже есть в финансовой детализации.',index })
   }
 
   return result
