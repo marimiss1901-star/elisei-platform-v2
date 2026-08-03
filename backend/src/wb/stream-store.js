@@ -62,6 +62,19 @@ export async function ensureStreamSchema(db) {
       CHECK (stream IN ('products','orders','sales','stocks','sellerStocks','advertising','finance','paidStorage','acceptance','acquiring'));
     CREATE INDEX IF NOT EXISTS wb_stream_data_updated_idx
       ON wb_stream_data(connection_id, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS wb_stream_items (
+      connection_id UUID NOT NULL REFERENCES marketplace_connections(id) ON DELETE CASCADE,
+      stream TEXT NOT NULL,
+      sync_id UUID NOT NULL,
+      row_key TEXT NOT NULL,
+      payload JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY(connection_id, stream, sync_id, row_key)
+    );
+    CREATE INDEX IF NOT EXISTS wb_stream_items_scan_idx
+      ON wb_stream_items(connection_id, stream, sync_id, row_key);
+    CREATE INDEX IF NOT EXISTS wb_stream_items_updated_idx
+      ON wb_stream_items(connection_id, stream, updated_at DESC);
   `)
 }
 
@@ -182,4 +195,68 @@ export async function hydrateStreamData(db, connectionId, legacyData = {}, { rep
   }
 
   return { data, sources, recovered }
+}
+
+
+export async function saveStreamItemBatch(db, {
+  connectionId,
+  stream,
+  syncId,
+  rows,
+  keyOf,
+  batchSize = 250,
+}) {
+  if (!connectionId || !stream || !syncId) throw new Error('Недостаточно параметров пакетного сохранения WB')
+  const sourceRows = Array.isArray(rows) ? rows : []
+  let saved = 0
+  for (let offset = 0; offset < sourceRows.length; offset += batchSize) {
+    const chunk = sourceRows.slice(offset, offset + batchSize).map((payload, index) => ({
+      rowKey: String(keyOf(payload, offset + index)),
+      payload,
+    }))
+    if (!chunk.length) continue
+    await db.query(`
+      INSERT INTO wb_stream_items (connection_id,stream,sync_id,row_key,payload,updated_at)
+      SELECT $1,$2,$3::uuid,item->>'rowKey',item->'payload',NOW()
+      FROM jsonb_array_elements($4::jsonb) AS item
+      ON CONFLICT (connection_id,stream,sync_id,row_key) DO UPDATE SET
+        payload=EXCLUDED.payload,
+        updated_at=NOW()
+    `, [connectionId, stream, syncId, JSON.stringify(chunk)])
+    saved += chunk.length
+  }
+  return saved
+}
+
+export async function loadStreamItemPage(db, {
+  connectionId,
+  stream,
+  syncId,
+  afterKey = '',
+  limit = 1000,
+}) {
+  const result = await db.query(`
+    SELECT row_key,payload
+    FROM wb_stream_items
+    WHERE connection_id=$1 AND stream=$2 AND sync_id=$3::uuid AND row_key>$4
+    ORDER BY row_key
+    LIMIT $5
+  `, [connectionId, stream, syncId, afterKey, Math.max(1, Math.min(5000, Number(limit) || 1000))])
+  return result.rows
+}
+
+export async function countStreamItems(db, { connectionId, stream, syncId }) {
+  const result = await db.query(`
+    SELECT COUNT(*)::int AS count
+    FROM wb_stream_items
+    WHERE connection_id=$1 AND stream=$2 AND sync_id=$3::uuid
+  `, [connectionId, stream, syncId])
+  return Number(result.rows[0]?.count || 0)
+}
+
+export async function finalizeStreamItems(db, { connectionId, stream, syncId }) {
+  await db.query(`
+    DELETE FROM wb_stream_items
+    WHERE connection_id=$1 AND stream=$2 AND sync_id<>$3::uuid
+  `, [connectionId, stream, syncId])
 }

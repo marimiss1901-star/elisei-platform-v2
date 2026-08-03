@@ -1,10 +1,8 @@
 FILES.txt
-README_5_4_6.md
-RELEASE_NOTES_V5_4_6.txt
-SHA256SUMS.txt
+README_5_4_7.md
+RELEASE_NOTES_V5_4_7.txt
 backend/package.json
 backend/src/server.js
 backend/src/wb/stream-store.js
 backend/tests/wb-finance-fbs-fbo.test.mjs
-src/pages/DashboardPage.jsx
-src/styles/app.css
+backend/tests/wb-memory-safe-sync.test.mjs

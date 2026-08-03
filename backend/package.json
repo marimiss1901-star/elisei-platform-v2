@@ -1,13 +1,13 @@
 {
   "name": "elisei-wb-backend",
-  "version": "2.10.0",
+  "version": "2.10.1",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test:stocks": "node tests/wb-integration-core.test.mjs",
-    "test": "node tests/wb-integration-core.test.mjs && node tests/wb-stream-store.test.mjs && node tests/wb-stream-recovery.test.mjs && node tests/wb-self-heal.test.mjs && node tests/wb-finance-fbs-fbo.test.mjs"
+    "test": "node tests/wb-integration-core.test.mjs && node tests/wb-stream-store.test.mjs && node tests/wb-stream-recovery.test.mjs && node tests/wb-self-heal.test.mjs && node tests/wb-finance-fbs-fbo.test.mjs && node tests/wb-memory-safe-sync.test.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",

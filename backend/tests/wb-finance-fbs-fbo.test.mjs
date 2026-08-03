@@ -42,6 +42,7 @@ vm.runInContext([
   extractFunction('fieldNumber'),
   extractFunction('financeSign'),
   extractFunction('financeCommissionAmount'),
+  extractFunction('financeRowAmounts'),
   extractFunction('summarizeFinanceRows'),
   'globalThis.result = summarizeFinanceRows([{docTypeName:"Продажа",retailPriceWithDiscRub:"1000",forPay:"700",ppvzSalesCommission:"180",vw:"180",vwNds:"36",deliveryService:"50",rebillLogisticCost:"5",paidStorage:"10",paidAcceptance:"7",acquiringFee:"12",penalty:"3",deduction:"4",additionalPayment:"2"}])',
 ].join('\n'), sandbox)

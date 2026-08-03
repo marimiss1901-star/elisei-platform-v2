@@ -20,7 +20,10 @@ import {
 } from './wb/adapters/promotion.js'
 import { buildProductMaster } from './wb/product-master.js'
 import { ensureSnapshotSchema, saveSnapshot, latestSnapshot } from './wb/snapshot-store.js'
-import { ensureStreamSchema, saveStreamData, hydrateStreamData, streamCount as persistedStreamCount, WB_STREAMS } from './wb/stream-store.js'
+import {
+  ensureStreamSchema, saveStreamData, hydrateStreamData, streamCount as persistedStreamCount, WB_STREAMS,
+  saveStreamItemBatch, loadStreamItemPage, countStreamItems, finalizeStreamItems,
+} from './wb/stream-store.js'
 import elRouter from './routes/el.js'
 
 const { Pool } = pg
@@ -241,6 +244,10 @@ const CORE_SYNC_SCOPES = [...new Set(Object.values(WB_SYNC_STAGES).map(item => i
 const STOCK_DATA_SCHEMA_VERSION = 5
 const STOCK_DATA_SOURCE = 'wb_warehouse_remains'
 const STOCK_REPORT_PROFILE = 'article_barcode_size_v1'
+const HEAVY_SYNC_STAGES = Object.freeze(['finance','paidStorage','acceptance','acquiring'])
+const HEAVY_PAGE_LIMIT = Math.max(500, Math.min(5000, Number(process.env.WB_HEAVY_PAGE_LIMIT || 2500)))
+const HEAVY_DB_BATCH_SIZE = Math.max(100, Math.min(500, Number(process.env.WB_HEAVY_DB_BATCH_SIZE || 250)))
+const HEAVY_STAGE_COOLDOWN_MS = Math.max(5000, Number(process.env.WB_HEAVY_STAGE_COOLDOWN_MS || 65000))
 
 function decodeJwtPayload(value, invalidMessage) {
   try {
@@ -1342,16 +1349,16 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     const item = ensure(row)
     const srid = String(row.srid || '').trim()
     const mode = modeBySrid.get(srid) || fulfillmentMode(row)
-    const sign = financeSign(row)
-    const commission = financeCommissionAmount(row)
-    const logistics = Math.abs(fieldNumber(row,['deliveryRub','delivery_rub','deliveryService','delivery_service'],0)) + Math.abs(fieldNumber(row,['rebillLogisticCost','rebill_logistic_cost'],0))
-    const storage = Math.abs(fieldNumber(row,['paidStorage','paid_storage','storageFee','storage_fee'],0))
-    const acceptance = Math.abs(fieldNumber(row,['paidAcceptance','paid_acceptance','acceptance'],0))
-    const acquiring = Math.abs(fieldNumber(row,['acquiringFee','acquiring_fee'],0))
-    const penalties = Math.abs(fieldNumber(row,['penalty'],0))
-    const deductions = Math.abs(fieldNumber(row,['deduction'],0))
-    const additionalPayment = fieldNumber(row,['additionalPayment','additional_payment'],0)
-    const sellerPayable = sign * Math.abs(fieldNumber(row,['forPay','for_pay','ppvzForPay','ppvz_for_pay'],0))
+    const amounts = financeRowAmounts(row)
+    const commission = amounts.commission
+    const logistics = amounts.logistics + amounts.logisticsRebill
+    const storage = amounts.storage
+    const acceptance = amounts.acceptance
+    const acquiring = amounts.acquiring
+    const penalties = amounts.penalties
+    const deductions = amounts.deductions
+    const additionalPayment = amounts.additionalPayment
+    const sellerPayable = amounts.sellerPayable
     if (item) {
       item.financeCommission += commission
       item.financeLogistics += logistics
@@ -2486,11 +2493,13 @@ function fieldNumber(row = {}, aliases = [], fallback = 0) {
 }
 
 function financeSign(row = {}) {
+  if (row?.__aggregated) return 1
   const text = String(row.docTypeName || row.doc_type_name || row.sellerOperName || row.supplier_oper_name || '').toLowerCase()
   return text.includes('возврат') || text.includes('сторно') ? -1 : 1
 }
 
 function financeCommissionAmount(row = {}) {
+  if (row?.__aggregated) return Math.abs(fieldNumber(row,['commissionAmount'],0))
   // В новом Finance API фактическое вознаграждение WB — vw + НДС (vwNds).
   // ppvzSalesCommission оставляем fallback для старых/неполных ответов, чтобы не удваивать комиссию.
   const vw = fieldNumber(row,['vw','ppvzVw','ppvz_vw'],Number.NaN)
@@ -2499,93 +2508,208 @@ function financeCommissionAmount(row = {}) {
   return Math.abs(fieldNumber(row,['ppvzSalesCommission','ppvz_sales_commission'],0)) + vat
 }
 
+function financeRowAmounts(row = {}) {
+  if (row?.__aggregated) {
+    return {
+      grossRevenue: fieldNumber(row,['grossRevenueAmount'],0),
+      sellerPayable: fieldNumber(row,['sellerPayableAmount'],0),
+      commission: Math.abs(fieldNumber(row,['commissionAmount'],0)),
+      logistics: Math.abs(fieldNumber(row,['logisticsAmount'],0)),
+      logisticsRebill: Math.abs(fieldNumber(row,['logisticsRebillAmount'],0)),
+      storage: Math.abs(fieldNumber(row,['storageAmount'],0)),
+      acceptance: Math.abs(fieldNumber(row,['acceptanceAmount'],0)),
+      acquiring: Math.abs(fieldNumber(row,['acquiringAmount'],0)),
+      penalties: Math.abs(fieldNumber(row,['penaltiesAmount'],0)),
+      deductions: Math.abs(fieldNumber(row,['deductionsAmount'],0)),
+      additionalPayment: fieldNumber(row,['additionalPaymentAmount'],0),
+    }
+  }
+  const sign = financeSign(row)
+  return {
+    grossRevenue: sign * Math.abs(fieldNumber(row,['retailPriceWithDiscRub','retail_price_withdisc_rub','retailAmount','retail_amount'],0)),
+    sellerPayable: sign * Math.abs(fieldNumber(row,['forPay','for_pay','ppvzForPay','ppvz_for_pay'],0)),
+    commission: financeCommissionAmount(row),
+    logistics: Math.abs(fieldNumber(row,['deliveryRub','delivery_rub','deliveryService','delivery_service'],0)),
+    logisticsRebill: Math.abs(fieldNumber(row,['rebillLogisticCost','rebill_logistic_cost'],0)),
+    storage: Math.abs(fieldNumber(row,['paidStorage','paid_storage','storageFee','storage_fee'],0)),
+    acceptance: Math.abs(fieldNumber(row,['paidAcceptance','paid_acceptance','acceptance'],0)),
+    acquiring: Math.abs(fieldNumber(row,['acquiringFee','acquiring_fee'],0)),
+    penalties: Math.abs(fieldNumber(row,['penalty'],0)),
+    deductions: Math.abs(fieldNumber(row,['deduction'],0)),
+    additionalPayment: fieldNumber(row,['additionalPayment','additional_payment'],0),
+  }
+}
+
 function summarizeFinanceRows(rows = []) {
   const totals = {
     grossRevenue:0, sellerPayable:0, commission:0, logistics:0, storage:0, acceptance:0,
     acquiring:0, penalties:0, deductions:0, additionalPayment:0, logisticsRebill:0,
   }
   for (const row of Array.isArray(rows) ? rows : []) {
-    const sign = financeSign(row)
-    totals.grossRevenue += sign * Math.abs(fieldNumber(row,['retailPriceWithDiscRub','retail_price_withdisc_rub','retailAmount','retail_amount'],0))
-    totals.sellerPayable += sign * Math.abs(fieldNumber(row,['forPay','for_pay','ppvzForPay','ppvz_for_pay'],0))
-    totals.commission += financeCommissionAmount(row)
-    totals.logistics += Math.abs(fieldNumber(row,['deliveryRub','delivery_rub','deliveryService','delivery_service'],0))
-    totals.logisticsRebill += Math.abs(fieldNumber(row,['rebillLogisticCost','rebill_logistic_cost'],0))
-    totals.storage += Math.abs(fieldNumber(row,['paidStorage','paid_storage','storageFee','storage_fee'],0))
-    totals.acceptance += Math.abs(fieldNumber(row,['paidAcceptance','paid_acceptance','acceptance'],0))
-    totals.acquiring += Math.abs(fieldNumber(row,['acquiringFee','acquiring_fee'],0))
-    totals.penalties += Math.abs(fieldNumber(row,['penalty'],0))
-    totals.deductions += Math.abs(fieldNumber(row,['deduction'],0))
-    totals.additionalPayment += fieldNumber(row,['additionalPayment','additional_payment'],0)
+    const amounts = financeRowAmounts(row)
+    for (const key of Object.keys(totals)) totals[key] += Number(amounts[key] || 0)
   }
   return Object.fromEntries(Object.entries(totals).map(([key,value]) => [key,Math.round(value*100)/100]))
 }
 
-async function loadFinanceReports(token, { deadlineAt = 0, previous = null } = {}) {
-  const period = reportPeriod(30)
-  const endpoint = 'https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed'
-  const rows = []
-  let rrdId = 0
-  let complete = true
-  const limit = 100000
-  for (let page = 0; page < 3; page += 1) {
-    const payload = await wbFetch(endpoint, token, {
-      method:'POST',
-      body:JSON.stringify({ dateFrom:period.dateFrom, dateTo:period.dateTo, limit, rrdId, period:'daily' }),
-      headers:{ 'Content-Type':'application/json' },
-      label:'Финансовая детализация WB', timeoutMs:60000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
-    })
-    const pageRows = Array.isArray(payload) ? payload : []
-    if (!pageRows.length) break
-    rows.push(...pageRows)
-    if (pageRows.length < limit) break
-    const nextRrdId = Number(pageRows.at(-1)?.rrdId ?? pageRows.at(-1)?.rrd_id ?? 0)
-    if (!nextRrdId || nextRrdId === rrdId) { complete = false; break }
-    rrdId = nextRrdId
-    if (deadlineAt && Date.now() + 61000 > deadlineAt) { complete = false; break }
-    await sleep(61000)
+function rawFinanceRowKey(stream, row = {}, index = 0) {
+  const rrd = row.rrdId ?? row.rrd_id
+  if (rrd != null && String(rrd).trim()) return `${stream}:rrd:${rrd}`
+  const stable = [
+    stream,
+    row.srid || row.rid || '',
+    row.nmId ?? row.nm_id ?? row.nmID ?? '',
+    row.saName || row.sa_name || row.supplierArticle || row.vendorCode || '',
+    row.docTypeName || row.doc_type_name || row.sellerOperName || '',
+    row.rrDate || row.rr_dt || row.saleDate || row.sale_dt || row.date || '',
+    row.barcode || '',
+  ].join(':')
+  return `${stable}:${crypto.createHash('sha1').update(JSON.stringify(row)).digest('hex').slice(0,16)}:${index}`
+}
+
+function rawGeneratedReportKey(stream, row = {}, index = 0) {
+  if (stream === 'paidStorage') {
+    return [stream,row.date || '',row.originalDate || '',row.nmId ?? row.nmID ?? '',row.chrtId ?? '',row.barcode || '',row.warehouse || '',index].join(':')
   }
-  let balance = previous?.balance || null
-  try {
-    balance = await wbFetch('https://finance-api.wildberries.ru/api/v1/account/balance', token, {
-      label:'Баланс WB', timeoutMs:20000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
-    })
-  } catch (error) {
-    // Баланс — дополнительный виджет. Не обнуляем финансовую детализацию из-за его отдельного лимита.
-    console.warn('WB balance skipped:', error.message)
+  if (stream === 'acceptance') {
+    return [stream,row.incomeId ?? '',row.nmID ?? row.nmId ?? '',row.shkCreateDate || row.date || '',row.barcode || '',index].join(':')
   }
-  const mergedRows = mergeReportRows('finance', previous?.rows, rows)
+  return rawFinanceRowKey(stream,row,index)
+}
+
+function compactIdentity(row = {}) {
   return {
-    value:{ rows:mergedRows, totals:summarizeFinanceRows(mergedRows), period, balance, complete, lastRrdId:rrdId || null },
-    rawPayload:rows,
-    validation:{ incomingRows:rows.length, mergedRows:mergedRows.length, complete, period },
-    endpoint,
+    nmId: row.nmId ?? row.nm_id ?? row.nmID ?? null,
+    vendorCode: String(row.saName || row.sa_name || row.supplierArticle || row.vendorCode || row.vendor_code || ''),
+    barcode: String(row.barcode || row.sku || ''),
+    srid: String(row.srid || row.rid || ''),
+    fulfillmentMode: String(row.fulfillmentMode || row.deliveryMethod || row.delivery_method || row.warehouseType || row.warehouse_type || '').toUpperCase(),
   }
 }
 
-async function loadAcquiringReports(token, { deadlineAt = 0, previous = null } = {}) {
-  const period = reportPeriod(30)
-  const endpoint = 'https://finance-api.wildberries.ru/api/finance/v1/acquiring/detailed'
+function compactAggregateKey(stream, row = {}) {
+  const id = compactIdentity(row)
+  const mode = id.fulfillmentMode.includes('FBS') || id.fulfillmentMode.includes('ПРОДАВ') ? 'FBS'
+    : id.fulfillmentMode.includes('FBO') || id.fulfillmentMode.includes('FBW') || id.fulfillmentMode.includes('WB') ? 'FBO'
+    : ''
+  return [stream,id.nmId || '',id.vendorCode,id.barcode,mode].join('|')
+}
+
+async function aggregatePersistedHeavyRows(connectionId, stream, syncId) {
+  const aggregates = new Map()
+  let afterKey = ''
+  while (true) {
+    const page = await loadStreamItemPage(pool, { connectionId, stream, syncId, afterKey, limit:1000 })
+    if (!page.length) break
+    for (const record of page) {
+      const row = record.payload || {}
+      const key = compactAggregateKey(stream,row)
+      const id = compactIdentity(row)
+      let target = aggregates.get(key)
+      if (!target) {
+        target = {
+          __aggregated:true,
+          nmId:id.nmId,
+          vendorCode:id.vendorCode,
+          barcode:id.barcode,
+          fulfillmentMode:id.fulfillmentMode,
+          rowCount:0,
+        }
+        if (stream === 'finance') Object.assign(target, {
+          grossRevenueAmount:0,sellerPayableAmount:0,commissionAmount:0,logisticsAmount:0,
+          logisticsRebillAmount:0,storageAmount:0,acceptanceAmount:0,acquiringAmount:0,
+          penaltiesAmount:0,deductionsAmount:0,additionalPaymentAmount:0,
+        })
+        if (stream === 'acquiring') target.acquiringFee = 0
+        if (stream === 'paidStorage') target.warehousePrice = 0
+        if (stream === 'acceptance') target.total = 0
+        aggregates.set(key,target)
+      }
+      target.rowCount += 1
+      if (stream === 'finance') {
+        const amounts = financeRowAmounts(row)
+        target.grossRevenueAmount += amounts.grossRevenue
+        target.sellerPayableAmount += amounts.sellerPayable
+        target.commissionAmount += amounts.commission
+        target.logisticsAmount += amounts.logistics
+        target.logisticsRebillAmount += amounts.logisticsRebill
+        target.storageAmount += amounts.storage
+        target.acceptanceAmount += amounts.acceptance
+        target.acquiringAmount += amounts.acquiring
+        target.penaltiesAmount += amounts.penalties
+        target.deductionsAmount += amounts.deductions
+        target.additionalPaymentAmount += amounts.additionalPayment
+      } else if (stream === 'acquiring') {
+        target.acquiringFee += Math.abs(fieldNumber(row,['acquiringFee','acquiring_fee'],0))
+      } else if (stream === 'paidStorage') {
+        target.warehousePrice += Math.abs(fieldNumber(row,['warehousePrice','warehouse_price'],0))
+        target.fulfillmentMode = 'FBO'
+      } else if (stream === 'acceptance') {
+        target.total += Math.abs(fieldNumber(row,['total'],0))
+        target.fulfillmentMode = 'FBO'
+      }
+    }
+    afterKey = page.at(-1).row_key
+    if (page.length < 1000) break
+  }
+  return [...aggregates.values()]
+}
+
+async function advancePagedFinanceTask(stage, connectionId, token, state, { deadlineAt = 0 } = {}) {
+  const isFinance = stage === 'finance'
+  const period = state?.metadata?.period || reportPeriod(30)
+  const syncId = String(state?.metadata?.syncId || crypto.randomUUID())
+  const rrdId = Number(state?.metadata?.rrdId || 0)
+  const pageNumber = Number(state?.metadata?.pageNumber || 0)
+  const endpoint = isFinance
+    ? 'https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed'
+    : 'https://finance-api.wildberries.ru/api/finance/v1/acquiring/detailed'
   const payload = await wbFetch(endpoint, token, {
     method:'POST',
-    body:JSON.stringify({ dateFrom:period.dateFrom, dateTo:period.dateTo, limit:100000, rrdId:0 }),
+    body:JSON.stringify({ dateFrom:period.dateFrom, dateTo:period.dateTo, limit:HEAVY_PAGE_LIMIT, rrdId, period:'daily' }),
     headers:{ 'Content-Type':'application/json' },
-    label:'Эквайринг WB', timeoutMs:60000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
+    label:isFinance ? 'Финансовая детализация WB' : 'Эквайринг WB',
+    timeoutMs:60000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
   })
   const incoming = Array.isArray(payload) ? payload : []
-  const rows = mergeReportRows('acquiring', previous?.rows, incoming)
-  const total = rows.reduce((sum,row) => sum + Math.abs(fieldNumber(row,['acquiringFee','acquiring_fee'],0)),0)
+  await saveStreamItemBatch(pool, {
+    connectionId,stream:stage,syncId,rows:incoming,
+    keyOf:(row,index)=>rawFinanceRowKey(stage,row,index),batchSize:HEAVY_DB_BATCH_SIZE,
+  })
+  const nextRrdId = Number(incoming.at(-1)?.rrdId ?? incoming.at(-1)?.rrd_id ?? 0)
+  const hasMore = incoming.length >= HEAVY_PAGE_LIMIT && nextRrdId && nextRrdId !== rrdId
+  const persistedCount = await countStreamItems(pool,{connectionId,stream:stage,syncId})
+  if (hasMore) {
+    return {
+      pending:true,
+      nextAllowedAt:new Date(Date.now()+HEAVY_STAGE_COOLDOWN_MS).toISOString(),
+      metadata:{ period,syncId,rrdId:nextRrdId,pageNumber:pageNumber+1,persistedCount,lastPageRows:incoming.length },
+    }
+  }
+  const compactRows = await aggregatePersistedHeavyRows(connectionId,stage,syncId)
+  await finalizeStreamItems(pool,{connectionId,stream:stage,syncId})
+  let balance = state?.metadata?.balance || null
+  if (isFinance) {
+    try {
+      balance = await wbFetch('https://finance-api.wildberries.ru/api/v1/account/balance', token, {
+        label:'Баланс WB',timeoutMs:20000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+      })
+    } catch (error) { console.warn('WB balance skipped:',error.message) }
+  }
+  const totals = isFinance
+    ? summarizeFinanceRows(compactRows)
+    : { acquiring:Math.round(compactRows.reduce((sum,row)=>sum+Math.abs(fieldNumber(row,['acquiringFee'],0)),0)*100)/100 }
   return {
-    value:{ rows, totals:{ acquiring:Math.round(total*100)/100 }, period, complete:incoming.length < 100000 },
-    rawPayload:payload,
-    validation:{ incomingRows:incoming.length, mergedRows:rows.length, period },
+    pending:false,
+    value:{ rows:compactRows,totals,period,balance:isFinance?balance:null,complete:true,lastRrdId:nextRrdId||rrdId||null,rawRowCount:persistedCount,storage:'wb_stream_items' },
+    validation:{ incomingRows:incoming.length,persistedRows:persistedCount,compactRows:compactRows.length,period,pages:pageNumber+1,memorySafe:true },
     endpoint,
   }
 }
 
 const GENERATED_REPORTS = Object.freeze({
-  paidStorage:{ base:'https://seller-analytics-api.wildberries.ru/api/v1/paid_storage', chunkDays:8, totalDays:30, label:'Платное хранение WB' },
-  acceptance:{ base:'https://seller-analytics-api.wildberries.ru/api/v1/acceptance_report', chunkDays:31, totalDays:30, label:'Платная приёмка WB' },
+  paidStorage:{ base:'https://seller-analytics-api.wildberries.ru/api/v1/paid_storage', chunkDays:2, totalDays:30, label:'Платное хранение WB' },
+  acceptance:{ base:'https://seller-analytics-api.wildberries.ru/api/v1/acceptance_report', chunkDays:7, totalDays:30, label:'Платная приёмка WB' },
 })
 
 function generatedReportChunks(definition) {
@@ -2604,7 +2728,8 @@ function generatedReportChunks(definition) {
 async function advanceGeneratedReportTask(stage, token, state, { deadlineAt = 0 } = {}) {
   const definition = GENERATED_REPORTS[stage]
   if (!definition) throw new Error(`Неизвестный отчёт WB: ${stage}`)
-  const metadata = state?.metadata && typeof state.metadata === 'object' ? state.metadata : {}
+  const previousMetadata = state?.metadata && typeof state.metadata === 'object' ? state.metadata : {}
+  const metadata = { ...previousMetadata, syncId:String(previousMetadata.syncId || crypto.randomUUID()) }
   const chunks = Array.isArray(metadata.chunks) && metadata.chunks.length ? metadata.chunks : generatedReportChunks(definition)
   const chunkIndex = Math.max(0, Math.min(chunks.length - 1, Number(metadata.chunkIndex || 0)))
   const chunk = chunks[chunkIndex]
@@ -2703,6 +2828,18 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
   if (state?.next_allowed_at && new Date(state.next_allowed_at).getTime() > now) {
     return { stage, status:state.status || 'cooldown', value:fallback, warning:`${definition.label}: следующий запрос разрешён ${new Date(state.next_allowed_at).toLocaleString('ru-RU')}.`, state }
   }
+  if (HEAVY_SYNC_STAGES.includes(stage)) {
+    const activeHeavy = await pool.query(`
+      SELECT stage FROM wb_sync_states
+      WHERE connection_id=$1 AND stage=ANY($2::text[]) AND stage<>$3
+        AND status='running' AND updated_at>NOW()-INTERVAL '10 minutes'
+      LIMIT 1
+    `,[connection.id,HEAVY_SYNC_STAGES,stage])
+    if (activeHeavy.rows[0]) {
+      state = await updateSyncState(connection.id,stage,{ status:'queued',nextAllowedAt:new Date(Date.now()+15000).toISOString(),lastError:`Ожидает завершения этапа «${WB_SYNC_STAGES[activeHeavy.rows[0].stage]?.label || activeHeavy.rows[0].stage}»` })
+      return { stage,status:'queued',value:fallback,warning:`${definition.label}: поставлено в очередь, чтобы не перегружать память сервера.`,state }
+    }
+  }
   const selected = chooseToken(tokens, definition.scope)
   if (!selected) {
     state = await updateSyncState(connection.id, stage, { status:'missing_token', lastAttemptAt:new Date().toISOString(), lastError:`Нужен токен с категорией «${WB_SCOPE_BITS[definition.scope].label}»`, nextAllowedAt:null })
@@ -2733,29 +2870,46 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       value = loaded.value
       meta = value.meta || null
       snapshot = loaded
-    } else if (stage === 'finance') {
-      const loaded = await loadFinanceReports(selected.token, { deadlineAt, previous:fallback })
-      value = loaded.value
-      meta = { ...loaded.validation, totals:value.totals, balance:value.balance }
-      snapshot = loaded
-    } else if (stage === 'acquiring') {
-      const loaded = await loadAcquiringReports(selected.token, { deadlineAt, previous:fallback })
-      value = loaded.value
-      meta = { ...loaded.validation, totals:value.totals }
-      snapshot = loaded
+    } else if (stage === 'finance' || stage === 'acquiring') {
+      const result = await advancePagedFinanceTask(stage,connection.id,selected.token,state,{ deadlineAt })
+      if (result.pending) {
+        state = await updateSyncState(connection.id,stage,{
+          status:'queued',lastAttemptAt:new Date().toISOString(),nextAllowedAt:result.nextAllowedAt,lastError:null,taskId:null,
+          metadata:{ ...result.metadata,tokenId:selected.row.id,tokenLabel:selected.row.label,primary:Boolean(selected.row.is_primary),memorySafe:true },
+        })
+        return { stage,status:'queued',value:fallback,warning:`${definition.label}: сохранена страница ${Number(result.metadata.pageNumber || 0)} (${Number(result.metadata.persistedCount || 0)} строк). Продолжение поставлено в очередь.`,state }
+      }
+      value = result.value
+      meta = { ...result.validation,totals:value.totals,balance:value.balance,memorySafe:true }
+      snapshot = { endpoint:result.endpoint,validation:result.validation }
     } else if (stage === 'paidStorage' || stage === 'acceptance') {
       const result = await advanceGeneratedReportTask(stage, selected.token, state, { deadlineAt })
       if (result.pending) {
         state = await updateSyncState(connection.id, stage, {
           status:'pending', lastAttemptAt:new Date().toISOString(), nextAllowedAt:result.nextAllowedAt,
           lastError:null, taskId:result.taskId,
-          metadata:{ ...result.metadata, taskStatus:result.taskStatus, tokenId:selected.row.id, tokenLabel:selected.row.label, primary:Boolean(selected.row.is_primary) },
+          metadata:{ ...result.metadata, taskStatus:result.taskStatus, tokenId:selected.row.id, tokenLabel:selected.row.label, primary:Boolean(selected.row.is_primary), memorySafe:true },
         })
         return { stage, status:'pending', value:fallback, warning:`${definition.label}: отчёт WB формируется в фоне. ELISEI загрузит его автоматически.`, state }
       }
-      value = mergeReportRows(stage, fallback, result.rows)
-      meta = { ...result.validation, moreChunks:result.moreChunks, nextChunkIndex:result.nextChunkIndex }
-      snapshot = result
+      const syncId = String(result.metadata?.syncId || state?.metadata?.syncId || crypto.randomUUID())
+      await saveStreamItemBatch(pool,{
+        connectionId:connection.id,stream:stage,syncId,rows:result.rows,
+        keyOf:(row,index)=>rawGeneratedReportKey(stage,row,index),batchSize:HEAVY_DB_BATCH_SIZE,
+      })
+      const persistedCount = await countStreamItems(pool,{connectionId:connection.id,stream:stage,syncId})
+      if (result.moreChunks) {
+        state = await updateSyncState(connection.id,stage,{
+          status:'queued',lastAttemptAt:new Date().toISOString(),lastSuccessAt:new Date().toISOString(),
+          nextAllowedAt:new Date(Date.now()+HEAVY_STAGE_COOLDOWN_MS).toISOString(),lastError:null,lastCount:persistedCount,taskId:null,
+          metadata:{ ...result.metadata,syncId,chunkIndex:result.nextChunkIndex,completedChunks:Number(result.nextChunkIndex || 0),persistedCount,tokenId:selected.row.id,tokenLabel:selected.row.label,memorySafe:true },
+        })
+        return { stage,status:'queued',value:fallback,warning:`${definition.label}: часть периода сохранена в PostgreSQL (${persistedCount} строк), продолжение в очереди.`,state }
+      }
+      value = await aggregatePersistedHeavyRows(connection.id,stage,syncId)
+      await finalizeStreamItems(pool,{connectionId:connection.id,stream:stage,syncId})
+      meta = { ...result.validation,rawRowCount:persistedCount,compactRows:value.length,memorySafe:true }
+      snapshot = { endpoint:result.endpoint,validation:meta }
     } else if (stage === 'stocks') {
       const result = await advanceWarehouseRemainsTask(selected.token, state, { deadlineAt })
       if (result.pending) {
@@ -2797,14 +2951,6 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
     })
 
     const count = stageCount(stage, value)
-    if ((stage === 'paidStorage' || stage === 'acceptance') && meta?.moreChunks) {
-      state = await updateSyncState(connection.id, stage, {
-        status:'queued', lastAttemptAt:new Date().toISOString(), lastSuccessAt:new Date().toISOString(),
-        nextAllowedAt:new Date(Date.now()+61000).toISOString(), lastError:null, lastCount:count, taskId:null,
-        metadata:{ ...(state?.metadata || {}), chunkIndex:meta.nextChunkIndex, completedChunks:Number(meta.nextChunkIndex || 0), tokenId:selected.row.id, tokenLabel:selected.row.label },
-      })
-      return { stage, status:'queued', value, meta, warning:`${definition.label}: загружена часть периода, остальные интервалы поставлены в очередь.`, state }
-    }
     const stateMetadata = {
       tokenId:selected.row.id,
       tokenLabel:selected.row.label,
@@ -2888,7 +3034,7 @@ app.get('/health', async (_req, res) => {
   res.json({
     ok: true,
     service: 'elisei-api',
-    version: '2.10.0',
+    version: '2.10.1',
     database,
     backgroundWorker: {
       running: backgroundWorkerState.running,

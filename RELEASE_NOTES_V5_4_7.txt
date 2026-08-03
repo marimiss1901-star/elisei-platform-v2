@@ -1,0 +1,7 @@
+ELISEI 5.4.7
+- Memory-safe pagination for WB finance and acquiring reports.
+- PostgreSQL batch persistence in wb_stream_items.
+- Resumable cursors after Render restart.
+- Compact per-product FBS/FBO financial aggregates.
+- Smaller generated-report date chunks.
+- Sequential heavy-stage execution.
