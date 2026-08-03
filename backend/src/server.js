@@ -2850,9 +2850,16 @@ async function advancePagedFinanceTask(stage, connectionId, token, state, { dead
 }
 
 const GENERATED_REPORTS = Object.freeze({
-  paidStorage:{ base:'https://seller-analytics-api.wildberries.ru/api/v1/paid_storage', chunkDays:2, totalDays:30, label:'Платное хранение WB' },
-  acceptance:{ base:'https://seller-analytics-api.wildberries.ru/api/v1/acceptance_report', chunkDays:7, totalDays:30, label:'Платная приёмка WB' },
+  // Используем максимально допустимые интервалы WB, чтобы не создавать лишние задания
+  // и не упираться в глобальный лимитер: хранение — до 8 дней, приёмка — до 31 дня.
+  paidStorage:{ base:'https://seller-analytics-api.wildberries.ru/api/v1/paid_storage', chunkDays:8, totalDays:30, label:'Платное хранение WB' },
+  acceptance:{ base:'https://seller-analytics-api.wildberries.ru/api/v1/acceptance_report', chunkDays:31, totalDays:30, label:'Платная приёмка WB' },
 })
+
+function generatedReportPollDelayMs(metadata = {}) {
+  const attempt = Math.max(0, Number(metadata.pollAttempts || 0))
+  return [7000, 10000, 15000, 20000, 30000][Math.min(attempt, 4)]
+}
 
 function generatedReportChunks(definition) {
   const end = new Date()
@@ -2884,13 +2891,26 @@ async function advanceGeneratedReportTask(stage, token, state, { deadlineAt = 0 
     if (!createdTaskId) throw Object.assign(new Error(`${definition.label}: не получен taskId`), { status:502 })
     return {
       pending:true, taskId:createdTaskId, taskStatus:'new',
-      nextAllowedAt:new Date(Date.now()+10000).toISOString(),
-      metadata:{ ...metadata, chunks, chunkIndex, reportFrom:chunk.dateFrom, reportTo:chunk.dateTo },
+      nextAllowedAt:new Date(Date.now()+generatedReportPollDelayMs({ pollAttempts:0 })).toISOString(),
+      metadata:{
+        ...metadata, chunks, chunkIndex, reportFrom:chunk.dateFrom, reportTo:chunk.dateTo,
+        taskCreatedAt:new Date().toISOString(), pollAttempts:0,
+      },
     }
   }
-  const statusPayload = await wbFetch(`${definition.base}/tasks/${encodeURIComponent(taskId)}/status`, token, {
-    label:`Проверка отчёта «${definition.label}»`, timeoutMs:20000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
-  })
+  let statusPayload
+  try {
+    statusPayload = await wbFetch(`${definition.base}/tasks/${encodeURIComponent(taskId)}/status`, token, {
+      label:`Проверка отчёта «${definition.label}»`, timeoutMs:20000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
+    })
+  } catch (error) {
+    // 404 означает, что taskId уже удалён/истёк. С тем же ID повторять бессмысленно.
+    if (Number(error?.status) === 404) {
+      error.resetTask = true
+      error.message = `${definition.label}: сохранённый taskId больше не существует. ELISEI создаст новый отчёт.`
+    }
+    throw error
+  }
   const taskStatus = String(statusPayload?.data?.status || '').toLowerCase()
   if (taskStatus === 'done') {
     const payload = await wbFetch(`${definition.base}/tasks/${encodeURIComponent(taskId)}/download`, token, {
@@ -2903,16 +2923,24 @@ async function advanceGeneratedReportTask(stage, token, state, { deadlineAt = 0 
       validation:{ rows:rows.length, chunkIndex, chunks:chunks.length, ...chunk },
       moreChunks:chunkIndex + 1 < chunks.length,
       nextChunkIndex:chunkIndex + 1,
-      metadata:{ ...metadata, chunks, chunkIndex, reportFrom:chunk.dateFrom, reportTo:chunk.dateTo },
+      metadata:{
+        ...metadata, chunks, chunkIndex, reportFrom:chunk.dateFrom, reportTo:chunk.dateTo,
+        taskCompletedAt:new Date().toISOString(), pollAttempts:0,
+      },
     }
   }
   if (taskStatus === 'canceled' || taskStatus === 'purged') {
     throw Object.assign(new Error(`${definition.label}: отчёт завершён со статусом ${taskStatus}. Будет создан заново.`), { status:502, resetTask:true })
   }
+  const pollAttempts = Math.max(0, Number(metadata.pollAttempts || 0)) + 1
   return {
     pending:true, taskId, taskStatus:taskStatus || 'processing',
-    nextAllowedAt:new Date(Date.now()+10000).toISOString(),
-    metadata:{ ...metadata, chunks, chunkIndex, reportFrom:chunk.dateFrom, reportTo:chunk.dateTo },
+    nextAllowedAt:new Date(Date.now()+generatedReportPollDelayMs({ pollAttempts })).toISOString(),
+    metadata:{
+      ...metadata, chunks, chunkIndex, reportFrom:chunk.dateFrom, reportTo:chunk.dateTo,
+      taskCreatedAt:metadata.taskCreatedAt || new Date().toISOString(),
+      lastStatusAt:new Date().toISOString(), pollAttempts,
+    },
   }
 }
 
@@ -4238,7 +4266,7 @@ async function processPendingGeneratedReports() {
       WHERE s.stage IN ('paidStorage','acceptance')
         AND s.status IN ('pending','queued','rate_limited')
         AND (s.next_allowed_at IS NULL OR s.next_allowed_at <= NOW())
-      ORDER BY s.updated_at
+      ORDER BY (s.task_id IS NOT NULL) DESC, s.next_allowed_at NULLS FIRST, s.updated_at
       LIMIT 6
     `)
     due = result.rows

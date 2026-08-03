@@ -107,6 +107,8 @@ const syncDataRevision = (value = {}) => JSON.stringify(
       lastSuccessAt:item.lastSuccessAt || null,
       lastCount:Number(item.lastCount || 0),
       nextAllowedAt:item.nextAllowedAt || null,
+      taskId:item.taskId || null,
+      taskStatus:item.metadata?.taskStatus || null,
       rows:Number(item.metadata?.rows || 0),
       totalQuantity:Number(item.metadata?.totalQuantity || 0),
       receivedAt:item.metadata?.receivedAt || null,
@@ -1001,6 +1003,13 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     const statusCopy = (state, stage) => {
       if (!state) return { tone:'idle', title:'Не запускалось', text:'Данные этого раздела ещё не запрашивались.' }
       if (state.status === 'success') {
+        if (stage === 'acquiring' && Number(state.lastCount || 0) === 0) {
+          const financeState = stateFor('finance')
+          if (!financeState || financeState.status !== 'success') return {
+            tone:'pending', title:'Ожидает финансы WB',
+            text:'Эквайринг будет рассчитан после загрузки финансовой детализации. Ноль пока не подтверждён.',
+          }
+        }
         if (stage === 'stocks') {
           const schemaValid = Number(state.metadata?.schemaVersion || 0) === 5
           if (!schemaValid) return { tone:'warning', title:'Нужен новый отчёт', text:'Старые остатки скрыты как неподтверждённые. Запустите или дождитесь нового отчёта WB.' }
@@ -1008,10 +1017,24 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         }
         return { tone:'success', title:`Загружено: ${formatNumber(state.lastCount)}`, text:state.lastSuccessAt ? `Обновлено ${new Date(state.lastSuccessAt).toLocaleString('ru-RU')}` : 'Этап завершён.' }
       }
-      if (state.status === 'pending') return { tone:'pending', title:'Формируется в фоне', text:state.nextAllowedAt ? `Автопроверка после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : 'ELISEI проверит готовность автоматически.' }
-      if (state.status === 'queued') return { tone:'pending', title:'В фоновой очереди', text:'Этап запустится автоматически после освобождения очереди.' }
+      if (state.status === 'pending') {
+        const generated = ['paidStorage','acceptance'].includes(stage) && state.taskId
+        return generated
+          ? { tone:'pending', title:'WB формирует отчёт', text:state.nextAllowedAt ? `Задание сохранено. Проверка статуса после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : 'Задание сохранено. ELISEI проверит готовность автоматически.' }
+          : { tone:'pending', title:'Формируется в фоне', text:state.nextAllowedAt ? `Автопроверка после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : 'ELISEI проверит готовность автоматически.' }
+      }
+      if (state.status === 'queued') {
+        const completed = Number(state.metadata?.completedChunks || 0)
+        return completed > 0
+          ? { tone:'pending', title:'Период загружается частями', text:`Сохранено частей: ${completed}. Следующая часть запустится автоматически.` }
+          : { tone:'pending', title:'В фоновой очереди', text:'Этап запустится автоматически после освобождения очереди.' }
+      }
       if (state.status === 'rate_limited') {
         const due = state.nextAllowedAt && new Date(state.nextAllowedAt).getTime() <= Date.now()
+        const generatedTask = ['paidStorage','acceptance'].includes(stage) && state.taskId
+        if (generatedTask) return due
+          ? { tone:'pending', title:'Проверяем готовность отчёта', text:'taskId сохранён. Срок паузы закончился, фоновая очередь продолжает тот же отчёт.' }
+          : { tone:'warning', title:'Отчёт создан · ждём WB', text:state.nextAllowedAt ? `taskId сохранён. Следующая проверка после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : (state.lastError || 'ELISEI продолжит тот же отчёт автоматически.') }
         return due
           ? { tone:'pending', title:'Автоповтор запускается', text:'Срок паузы закончился. Интерфейс разбудил фоновую очередь; статус обновится автоматически.' }
           : { tone:'warning', title:'Пауза Wildberries', text:state.nextAllowedAt ? `Автоповтор после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : state.lastError }
