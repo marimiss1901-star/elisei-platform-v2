@@ -48,7 +48,13 @@ export const wbApi = {
   sync: (connectionId, stages = null) => request('/api/wb/sync', { method: 'POST', body: JSON.stringify({ connectionId, ...(Array.isArray(stages) ? { stages } : {}) }), signal: AbortSignal.timeout(110000) }),
   dashboard: (connectionId) => request(`/api/wb/dashboard/${encodeURIComponent(connectionId)}`),
   products: (connectionId) => request(`/api/wb/products/${encodeURIComponent(connectionId)}`),
-  core: (connectionId) => request(`/api/wb/core/${encodeURIComponent(connectionId)}`),
+  core: (connectionId, params = {}) => {
+    const query = new URLSearchParams()
+    if (params?.from) query.set('from', String(params.from).slice(0,10))
+    if (params?.to) query.set('to', String(params.to).slice(0,10))
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return request(`/api/wb/core/${encodeURIComponent(connectionId)}${suffix}`)
+  },
   advertising: (connectionId) => request(`/api/wb/advertising/${encodeURIComponent(connectionId)}`),
   diagnostics: (connectionId) => request(`/api/wb/diagnostics/${encodeURIComponent(connectionId)}`),
   extended: (stream, connectionId, afterKey = '', limit = 150) => request(`/api/wb/extended/${encodeURIComponent(stream)}?connectionId=${encodeURIComponent(connectionId)}&limit=${encodeURIComponent(limit)}${afterKey ? `&afterKey=${encodeURIComponent(afterKey)}` : ''}`),

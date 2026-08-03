@@ -72,6 +72,139 @@ const formatDate = value => {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString('ru-RU')
 }
 
+const ANALYTICS_PERIOD_KEY = 'elisei.analytics.period.v1'
+const ANALYTICS_COMPARE_KEY = 'elisei.analytics.compare.v1'
+
+const isoLocalDate = date => {
+  const value = date instanceof Date ? date : new Date(date)
+  if (Number.isNaN(value.getTime())) return ''
+  const year = value.getFullYear()
+  const month = String(value.getMonth()+1).padStart(2,'0')
+  const day = String(value.getDate()).padStart(2,'0')
+  return `${year}-${month}-${day}`
+}
+
+const addDays = (value, amount) => {
+  const date = new Date(`${String(value).slice(0,10)}T12:00:00`)
+  date.setDate(date.getDate()+amount)
+  return isoLocalDate(date)
+}
+
+const earlierIsoDate = (left, right) => !left ? right : !right ? left : String(left) < String(right) ? left : right
+
+const periodDaysBetween = period => {
+  const from = new Date(`${period?.from}T00:00:00`)
+  const to = new Date(`${period?.to}T00:00:00`)
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) return 0
+  return Math.round((to-from)/86400000)+1
+}
+
+const periodPresetValue = preset => {
+  const today = new Date()
+  const to = isoLocalDate(today)
+  if (preset === '7') return { preset, from:addDays(to,-6), to }
+  if (preset === '90') return { preset, from:addDays(to,-89), to }
+  if (preset === 'month') return { preset, from:isoLocalDate(new Date(today.getFullYear(),today.getMonth(),1)), to }
+  if (preset === 'prevMonth') {
+    const start = new Date(today.getFullYear(),today.getMonth()-1,1)
+    const end = new Date(today.getFullYear(),today.getMonth(),0)
+    return { preset, from:isoLocalDate(start), to:isoLocalDate(end) }
+  }
+  if (preset === 'year') return { preset, from:isoLocalDate(new Date(today.getFullYear(),0,1)), to }
+  return { preset:'30', from:addDays(to,-29), to }
+}
+
+const normalizeAnalyticsPeriod = value => {
+  const fallback = periodPresetValue('30')
+  const from = String(value?.from || '').slice(0,10)
+  const to = String(value?.to || '').slice(0,10)
+  const days = periodDaysBetween({from,to})
+  return days > 0 && days <= 366 ? { preset:value?.preset || 'custom', from, to } : fallback
+}
+
+const previousPeriodFor = period => {
+  const days = periodDaysBetween(period)
+  const to = addDays(period.from,-1)
+  return { from:addDays(to,-days+1), to, days }
+}
+
+const percentChange = (current, previous) => {
+  const currentValue = Number(current)
+  const previousValue = Number(previous)
+  if (!Number.isFinite(currentValue) || !Number.isFinite(previousValue)) return null
+  if (previousValue === 0) return currentValue === 0 ? 0 : null
+  return (currentValue-previousValue)/Math.abs(previousValue)*100
+}
+
+const comparisonLabel = (current, previous, enabled) => {
+  if (!enabled) return null
+  const change = percentChange(current,previous)
+  if (change == null) return 'нет базы для сравнения'
+  const prefix = change > 0 ? '+' : ''
+  return `${prefix}${new Intl.NumberFormat('ru-RU',{maximumFractionDigits:1}).format(change)}% к прошлому периоду`
+}
+
+const comparisonTone = (current, previous, enabled) => {
+  if (!enabled) return ''
+  const change = percentChange(current,previous)
+  return change == null || change === 0 ? '' : change > 0 ? 'positive' : 'negative'
+}
+
+const aggregateAnalyticsRows = (rows = [], baseSummary = {}, periodDays = 30, filtered = false) => {
+  if (!filtered) return baseSummary || {}
+  const sum = key => rows.reduce((total,row) => total + Number(row?.[key] || 0),0)
+  const salesAvailable = baseSummary?.sales != null
+  const ordersAvailable = baseSummary?.orders != null
+  const stockAvailable = baseSummary?.stockUnits != null
+  const revenueAvailable = baseSummary?.revenue != null
+  const profitAvailable = baseSummary?.operatingProfit != null
+  const revenue = revenueAvailable ? sum('revenue') : null
+  const sales = salesAvailable ? sum('salesCount') : null
+  const returns = salesAvailable ? sum('returnsCount') : null
+  const orders = ordersAvailable ? sum('ordersCount') : null
+  const stockRows = stockAvailable ? rows.filter(row => row?.stock != null) : []
+  const stockUnits = stockAvailable ? stockRows.reduce((total,row) => total + Number(row.stock || 0),0) : null
+  const profitRows = profitAvailable ? rows.filter(row => row?.profit != null) : []
+  const operatingProfit = profitAvailable ? profitRows.reduce((total,row) => total + Number(row.profit || 0),0) : null
+  return {
+    ...baseSummary,
+    revenue:revenue == null ? null : Math.round(revenue),
+    orders:orders == null ? null : Math.round(orders),
+    sales:sales == null ? null : Math.round(sales),
+    returns:returns == null ? null : Math.round(returns),
+    returnRate:sales == null ? null : sales > 0 ? Math.round(returns/sales*1000)/10 : 0,
+    stockUnits:stockUnits == null ? null : Math.round(stockUnits),
+    activeProducts:rows.length,
+    zeroStock:stockAvailable ? rows.filter(row => Number(row.stock || 0) <= 0).length : null,
+    lowStock:stockAvailable ? rows.filter(row => row.stockStatus === 'Заканчивается').length : null,
+    slowStock:stockAvailable ? rows.filter(row => ['Избыток','Без движения'].includes(row.stockStatus)).length : null,
+    stockCoverDays:stockUnits != null && sales != null && sales > 0 ? Math.round(stockUnits/(sales/Math.max(1,periodDays))) : null,
+    operatingProfit:operatingProfit == null ? null : Math.round(operatingProfit),
+    margin:operatingProfit != null && revenue != null && revenue > 0 ? Math.round(operatingProfit/revenue*1000)/10 : null,
+  }
+}
+
+const aggregateAnalyticsTrend = (core = {}, rows = [], filtered = false) => {
+  const base = Array.isArray(core?.dailyTrend) ? core.dailyTrend : []
+  if (!filtered) return base
+  const map = new Map(base.map(item => [item.date,{ date:item.date,revenue:0,orders:0,sales:0,returns:0 }]))
+  rows.forEach(row => {
+    const keys = new Set([
+      ...Object.keys(row?.dailyRevenue || {}), ...Object.keys(row?.dailyOrders || {}),
+      ...Object.keys(row?.dailySales || {}), ...Object.keys(row?.dailyReturns || {}),
+    ])
+    keys.forEach(date => {
+      const bucket = map.get(date) || { date,revenue:0,orders:0,sales:0,returns:0 }
+      bucket.revenue += Number(row?.dailyRevenue?.[date] || 0)
+      bucket.orders += Number(row?.dailyOrders?.[date] || 0)
+      bucket.sales += Number(row?.dailySales?.[date] || 0)
+      bucket.returns += Number(row?.dailyReturns?.[date] || 0)
+      map.set(date,bucket)
+    })
+  })
+  return [...map.values()].sort((a,b) => String(a.date).localeCompare(String(b.date))).map(row => ({ ...row,revenue:Math.round(row.revenue) }))
+}
+
 const elModuleNames = {
   overview:'Обзор', sales:'Продажи', advertising:'Реклама', stocks:'Остатки', finance:'Финансы',
   products:'Товары', returns:'Возвраты', reviews:'Отзывы', pricing:'Цены', seasonality:'Сезонность',
@@ -168,6 +301,17 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [savingSettings, setSavingSettings] = useState(false)
   const [dashboardData, setDashboardData] = useState(null)
   const [coreData, setCoreData] = useState(null)
+  const [analyticsCore, setAnalyticsCore] = useState(null)
+  const [analyticsCompareCore, setAnalyticsCompareCore] = useState(null)
+  const [analyticsLoading, setAnalyticsLoading] = useState(false)
+  const [analyticsError, setAnalyticsError] = useState('')
+  const [analyticsPeriod, setAnalyticsPeriod] = useState(() => normalizeAnalyticsPeriod(readStoredJson(ANALYTICS_PERIOD_KEY, null)))
+  const [analyticsCompare, setAnalyticsCompare] = useState(() => localStorage.getItem(ANALYTICS_COMPARE_KEY) !== 'false')
+  const [analyticsBrand, setAnalyticsBrand] = useState('Все')
+  const [analyticsCategory, setAnalyticsCategory] = useState('Все')
+  const [analyticsAbc, setAnalyticsAbc] = useState('Все')
+  const [analyticsXyz, setAnalyticsXyz] = useState('Все')
+  const [analyticsStock, setAnalyticsStock] = useState('Все')
   const [advertisingSnapshot, setAdvertisingSnapshot] = useState(null)
   const [integrationDiagnostics, setIntegrationDiagnostics] = useState(null)
   const [financeLedger, setFinanceLedger] = useState(null)
@@ -188,6 +332,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [importResult, setImportResult] = useState(null)
   const connectionRef = useRef(emptyConnection)
   const syncRevisionRef = useRef('')
+  const analyticsRequestRef = useRef(0)
   const lastBusinessSectionRef = useRef('Главная')
 
   const notify = (text, duration = 4200) => {
@@ -251,6 +396,30 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     setAdvertisingSnapshot(advertisingResult.advertising || coreResult.core?.advertising || null)
     setIntegrationDiagnostics(diagnosticsResult || null)
     if (coreResult.core?.settings) setSettingsDraft(coreResult.core.settings)
+  }
+
+  const loadAnalyticsData = async (connectionId, period = analyticsPeriod, compare = analyticsCompare) => {
+    if (!connectionId || !period?.from || !period?.to) return
+    const requestId = ++analyticsRequestRef.current
+    setAnalyticsLoading(true)
+    setAnalyticsError('')
+    setAnalyticsCore(null)
+    setAnalyticsCompareCore(null)
+    try {
+      const previous = previousPeriodFor(period)
+      const [currentResult, previousResult] = await Promise.all([
+        wbApi.core(connectionId,{ from:period.from,to:period.to }),
+        compare ? wbApi.core(connectionId,{ from:previous.from,to:previous.to }) : Promise.resolve(null),
+      ])
+      if (requestId !== analyticsRequestRef.current) return
+      setAnalyticsCore(currentResult?.core || null)
+      setAnalyticsCompareCore(previousResult?.core || null)
+    } catch (error) {
+      if (requestId !== analyticsRequestRef.current) return
+      setAnalyticsError(error.message || 'Не удалось пересчитать аналитику за выбранный период.')
+    } finally {
+      if (requestId === analyticsRequestRef.current) setAnalyticsLoading(false)
+    }
   }
 
   useEffect(() => {
@@ -336,6 +505,25 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
 
   useEffect(() => {
+    localStorage.setItem(ANALYTICS_PERIOD_KEY, JSON.stringify(analyticsPeriod))
+    localStorage.setItem('elisei.globalPeriod.v3', JSON.stringify(analyticsPeriod))
+    window.__ELISEI_PERIOD__ = analyticsPeriod
+    window.dispatchEvent(new CustomEvent('elisei:period-change',{ detail:analyticsPeriod }))
+  }, [analyticsPeriod])
+
+  useEffect(() => {
+    localStorage.setItem(ANALYTICS_COMPARE_KEY, analyticsCompare ? 'true' : 'false')
+  }, [analyticsCompare])
+
+  useEffect(() => {
+    if (active !== 'Аналитика' || !connection.connected || !connection.connectionId) return undefined
+    const timer = window.setTimeout(() => {
+      loadAnalyticsData(connection.connectionId,analyticsPeriod,analyticsCompare)
+    }, 320)
+    return () => window.clearTimeout(timer)
+  }, [active, connection.connected, connection.connectionId, connection.lastSync, analyticsPeriod.from, analyticsPeriod.to, analyticsCompare])
+
+  useEffect(() => {
     if (active !== 'Финансы' || !connection.connected || !connection.connectionId) return undefined
     const timer = window.setTimeout(() => {
       loadFinanceLedger(connection.connectionId).catch(() => {})
@@ -401,6 +589,69 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       return productSort.direction === 'asc' ? result : -result
     })
   }, [productRows, query, productFilter, productSort])
+
+  const analyticsBaseProducts = useMemo(() => {
+    const source = analyticsCore?.products || (!connection.connected ? coreData?.products : []) || []
+    return source.map((p,index) => ({
+      ...p,
+      id:String(p.key || p.nmID || p.vendorCode || index),
+      article:String(p.vendorCode || p.nmID || '—'),
+      category:String(p.category || p.subjectName || p.subject || 'Без категории'),
+      brand:String(p.brand || 'Без бренда'),
+      status:p.stockStatus || (p.stock == null ? 'Не загружено' : Number(p.stock || 0) <= 0 ? 'Нет остатка' : Number(p.stock || 0) < 10 ? 'Заканчивается' : 'В наличии'),
+    }))
+  }, [analyticsCore,coreData,connection.connected])
+
+  const analyticsFilterOptions = useMemo(() => ({
+    brands:[...new Set(analyticsBaseProducts.map(row => row.brand).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ru')),
+    categories:[...new Set(analyticsBaseProducts.map(row => row.category).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ru')),
+  }), [analyticsBaseProducts])
+
+  const filterAnalyticsRows = rows => {
+    const needle = query.trim().toLowerCase()
+    return rows.filter(row => {
+      const matchesQuery = !needle || [row.article,row.vendorCode,row.barcode,row.title,row.brand,row.category,row.nmID,row.key].join(' ').toLowerCase().includes(needle)
+      const matchesBrand = analyticsBrand === 'Все' || row.brand === analyticsBrand
+      const matchesCategory = analyticsCategory === 'Все' || row.category === analyticsCategory
+      const matchesAbc = analyticsAbc === 'Все' || row.abc === analyticsAbc
+      const matchesXyz = analyticsXyz === 'Все' || row.xyz === analyticsXyz
+      const matchesStock = analyticsStock === 'Все' ||
+        (analyticsStock === 'В наличии' && row.status === 'В наличии') ||
+        (analyticsStock === 'Заканчиваются' && row.status === 'Заканчивается') ||
+        (analyticsStock === 'Нет остатка' && row.status === 'Нет остатка') ||
+        (analyticsStock === 'Без движения' && ['Избыток','Без движения'].includes(row.status))
+      return matchesQuery && matchesBrand && matchesCategory && matchesAbc && matchesXyz && matchesStock
+    })
+  }
+
+  const analyticsFilteredProducts = useMemo(() => filterAnalyticsRows(analyticsBaseProducts), [analyticsBaseProducts,query,analyticsBrand,analyticsCategory,analyticsAbc,analyticsXyz,analyticsStock])
+  const analyticsFiltersActive = Boolean(query.trim() || analyticsBrand !== 'Все' || analyticsCategory !== 'Все' || analyticsAbc !== 'Все' || analyticsXyz !== 'Все' || analyticsStock !== 'Все')
+  const analyticsSummary = useMemo(() => aggregateAnalyticsRows(analyticsFilteredProducts,analyticsCore?.summary || (!connection.connected ? summary : {}),periodDaysBetween(analyticsPeriod),analyticsFiltersActive), [analyticsFilteredProducts,analyticsCore,summary,analyticsPeriod,analyticsFiltersActive,connection.connected])
+  const analyticsTrend = useMemo(() => aggregateAnalyticsTrend(analyticsCore || (!connection.connected ? coreData : {}) || {},analyticsFilteredProducts,analyticsFiltersActive), [analyticsCore,coreData,analyticsFilteredProducts,analyticsFiltersActive,connection.connected])
+
+  const analyticsCompareProducts = useMemo(() => {
+    const source = analyticsCompareCore?.products || []
+    const rows = source.map((p,index) => ({
+      ...p,
+      id:String(p.key || p.nmID || p.vendorCode || index), article:String(p.vendorCode || p.nmID || '—'),
+      category:String(p.category || p.subjectName || p.subject || 'Без категории'), brand:String(p.brand || 'Без бренда'),
+      status:p.stockStatus || (p.stock == null ? 'Не загружено' : Number(p.stock || 0) <= 0 ? 'Нет остатка' : Number(p.stock || 0) < 10 ? 'Заканчивается' : 'В наличии'),
+    }))
+    return filterAnalyticsRows(rows)
+  }, [analyticsCompareCore,query,analyticsBrand,analyticsCategory,analyticsAbc,analyticsXyz,analyticsStock])
+  const analyticsCompareSummary = useMemo(() => aggregateAnalyticsRows(analyticsCompareProducts,analyticsCompareCore?.summary || {},periodDaysBetween(analyticsPeriod),analyticsFiltersActive), [analyticsCompareProducts,analyticsCompareCore,analyticsPeriod,analyticsFiltersActive])
+  const analyticsCompareTrend = useMemo(() => aggregateAnalyticsTrend(analyticsCompareCore || {},analyticsCompareProducts,analyticsFiltersActive), [analyticsCompareCore,analyticsCompareProducts,analyticsFiltersActive])
+
+  const resetAnalyticsFilters = () => {
+    setQuery('')
+    setAnalyticsBrand('Все')
+    setAnalyticsCategory('Все')
+    setAnalyticsAbc('Все')
+    setAnalyticsXyz('Все')
+    setAnalyticsStock('Все')
+  }
+
+  const setAnalyticsPreset = preset => setAnalyticsPeriod(periodPresetValue(preset))
 
   const changeProductSort = key => setProductSort(current => current.key === key
     ? { key, direction:current.direction === 'asc' ? 'desc' : 'asc' }
@@ -522,6 +773,15 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     const link = document.createElement('a')
     link.href = href; link.download = `${name}_${new Date().toISOString().slice(0,10)}.csv`; link.click()
     URL.revokeObjectURL(href)
+  }
+
+  const exportAnalytics = () => {
+    if (!analyticsFilteredProducts.length) return notify('По выбранному периоду и фильтрам нет товаров для выгрузки.')
+    downloadCsv(
+      `elisei_analytics_${analyticsPeriod.from}_${analyticsPeriod.to}`,
+      ['Период с','Период по','Артикул WB','Артикул продавца','Товар','Бренд','Категория','ABC','XYZ','Выручка','Заказы','Продажи','Возвраты','Доля возвратов','Остаток сейчас','Дней запаса','Операционная прибыль','Маржа'],
+      analyticsFilteredProducts.map(row => [analyticsPeriod.from,analyticsPeriod.to,row.nmID,row.vendorCode,row.title,row.brand,row.category,row.abc,row.xyz,row.revenue,row.ordersCount,row.salesCount,row.returnsCount,row.returnRate,row.stock,row.stockCoverDays,row.profit,row.margin]),
+    )
   }
 
   const importCostsCsv = event => {
@@ -679,7 +939,90 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     </section>
   </>
 
-  const renderAnalytics = () => <section className="app-page glass-panel"><div className="page-title"><span>Аналитика</span><h1>Центр показателей</h1><p>Реальная динамика за 30 дней, ABC/XYZ-классификация, возвраты и здоровье ассортимента.</p></div>{requireConnection(<>{coreData && (!coreData.availability?.orders || !coreData.availability?.sales || !coreData.availability?.stocks) && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Не все потоки WB загружены</strong><p>{!coreData.availability?.orders ? 'Заказы — ожидают разрешённого окна. ' : ''}{!coreData.availability?.sales ? 'Продажи — ожидают разрешённого окна. ' : ''}{!coreData.availability?.stocks ? 'Остатки — отчёт формируется отдельно. ' : ''}Финансовые потоки могут догружаться в фоне. Показатели без данных отмечены как «Не загружено», а не заменены нулями.</p></div><button onClick={() => setActive('Синхронизации')}>Открыть статусы</button></div>}<div className="metrics-grid four"><MetricCard label="Выручка" value={formatMoney(summary.revenue)} delta={`${formatNumber(summary.sales)} продаж`} icon={TrendingUp}/><MetricCard label="Заказы" value={formatNumber(summary.orders)} delta={`${formatNumber(summary.returns)} возвратов`} icon={PackageSearch}/><MetricCard label="Остатки" value={formatNumber(summary.stockUnits)} delta={`${summary.stockCoverDays ?? '—'} дней покрытия`} icon={Boxes}/><MetricCard label="Опер. прибыль" value={formatMoney(summary.operatingProfit)} delta={summary.operatingProfit == null ? 'Нужна себестоимость' : `Маржа ${formatPercent(summary.margin)}`} icon={CircleDollarSign}/></div><div className="analytics-layout"><div className="chart-card inner-chart"><div className="card-head"><div><span>Последние 30 дней</span><h3>Динамика выручки</h3></div></div><TrendChart data={coreData?.dailyTrend || []}/></div><div className="analytics-side"><h3>Ассортимент</h3><div className="insight-list"><div><span>ABC A</span><strong>{productRows.filter(p => p.abc === 'A').length}</strong><small>основная выручка</small></div><div><span>XYZ X</span><strong>{productRows.filter(p => p.xyz === 'X').length}</strong><small>стабильный спрос</small></div><div><span>Без движения</span><strong>{summary.slowStock || 0}</strong><small>нужно решение</small></div><div><span>Возвраты</span><strong>{formatPercent(summary.returnRate)}</strong><small>{formatNumber(summary.returns)} шт.</small></div></div></div></div><div className="section-title-row"><div><span>ABC/XYZ</span><h2>Приоритет товаров</h2></div></div><div className="data-table compact-table"><div className="data-row head analytics-row"><span>Товар</span><span>ABC</span><span>XYZ</span><span>Выручка</span><span>Продажи</span><span>Возвраты</span><span>Дней запаса</span></div>{productRows.slice(0,30).map(p => <div className="data-row analytics-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span><b className={`class-pill class-${String(p.abc || 'C').toLowerCase()}`}>{p.abc}</b></span><span><b className="class-pill">{p.xyz}</b></span><span>{formatMoney(p.revenue)}</span><span>{formatNumber(p.salesCount)}</span><span>{formatPercent(p.returnRate)}</span><span>{p.stockCoverDays ?? '—'}</span></div>)}</div></>)}</section>
+  const renderAnalytics = () => {
+    const analyticsAvailability = analyticsCore?.availability || (!connection.connected ? coreData?.availability : {}) || {}
+    const previousPeriod = previousPeriodFor(analyticsPeriod)
+    const selectedDays = periodDaysBetween(analyticsPeriod)
+    const selectedPeriodLabel = `${formatDate(analyticsPeriod.from)} — ${formatDate(analyticsPeriod.to)}`
+    const comparisonPeriodLabel = `${formatDate(previousPeriod.from)} — ${formatDate(previousPeriod.to)}`
+    const filteredCount = analyticsFilteredProducts.length
+    const currentCoreReady = Boolean(analyticsCore || (!connection.connected && coreData))
+    const periodCoverage = analyticsCore?.periodCoverage || null
+    const salesCoverage = periodCoverage?.sales || null
+    const advertisingCoverage = periodCoverage?.advertising || null
+    const salesCoverageLimited = Boolean(salesCoverage?.totalRows && salesCoverage?.from && salesCoverage?.to && (analyticsPeriod.from < salesCoverage.from || analyticsPeriod.to > salesCoverage.to))
+    const advertisingCoverageLimited = Boolean(advertisingCoverage?.from && advertisingCoverage?.to && (analyticsPeriod.from < advertisingCoverage.from || analyticsPeriod.to > advertisingCoverage.to))
+    const metricDelta = (current,previous,fallback) => analyticsCompare
+      ? (analyticsCompareCore ? comparisonLabel(current,previous,true) : 'сравнение загружается')
+      : fallback
+
+    return <section className="app-page glass-panel">
+      <div className="page-title analytics-title-row">
+        <div><span>Аналитика</span><h1>Центр показателей</h1><p>Показатели пересчитываются по реальному выбранному периоду и активным фильтрам.</p></div>
+        <div className="analytics-title-actions"><button className="secondary-btn" onClick={exportAnalytics}><Download size={16}/> Выгрузить</button><button className="secondary-btn" disabled={analyticsLoading || !connection.connectionId} onClick={() => loadAnalyticsData(connection.connectionId,analyticsPeriod,analyticsCompare)}><RefreshCw className={analyticsLoading?'spin':''} size={16}/> Пересчитать</button></div>
+      </div>
+
+      {requireConnection(<>
+        <div className="analytics-control-panel">
+          <div className="analytics-period-head">
+            <div><CalendarDays size={18}/><span>Период</span><strong>{selectedPeriodLabel}</strong><small>{selectedDays} дн.</small></div>
+            <label className="analytics-compare-toggle"><input type="checkbox" checked={analyticsCompare} onChange={event => setAnalyticsCompare(event.target.checked)}/><span>Сравнить</span><small>{analyticsCompare ? comparisonPeriodLabel : 'выключено'}</small></label>
+          </div>
+          <div className="analytics-presets">
+            {[['7','7 дней'],['30','30 дней'],['90','90 дней'],['month','Этот месяц'],['prevMonth','Прошлый месяц'],['year','Этот год']].map(([key,label]) => <button key={key} className={analyticsPeriod.preset===key?'active':''} onClick={() => setAnalyticsPreset(key)}>{label}</button>)}
+          </div>
+          <div className="analytics-date-range">
+            <label><span>С</span><input type="date" value={analyticsPeriod.from} min={addDays(analyticsPeriod.to,-365)} max={analyticsPeriod.to} onChange={event => setAnalyticsPeriod(current => ({ ...current,preset:'custom',from:event.target.value }))}/></label>
+            <span className="analytics-date-arrow">→</span>
+            <label><span>По</span><input type="date" value={analyticsPeriod.to} min={analyticsPeriod.from} max={earlierIsoDate(isoLocalDate(new Date()),addDays(analyticsPeriod.from,365))} onChange={event => setAnalyticsPeriod(current => ({ ...current,preset:'custom',to:event.target.value }))}/></label>
+          </div>
+        </div>
+
+        <div className="analytics-filter-panel">
+          <label className="analytics-filter-search"><Search size={16}/><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Товар, артикул, nmID, бренд или категория"/></label>
+          <select value={analyticsCategory} onChange={event => setAnalyticsCategory(event.target.value)}><option value="Все">Категория: все</option>{analyticsFilterOptions.categories.map(value => <option key={value}>{value}</option>)}</select>
+          <select value={analyticsBrand} onChange={event => setAnalyticsBrand(event.target.value)}><option value="Все">Бренд: все</option>{analyticsFilterOptions.brands.map(value => <option key={value}>{value}</option>)}</select>
+          <select value={analyticsAbc} onChange={event => setAnalyticsAbc(event.target.value)}><option value="Все">ABC: все</option><option value="A">ABC A</option><option value="B">ABC B</option><option value="C">ABC C</option></select>
+          <select value={analyticsXyz} onChange={event => setAnalyticsXyz(event.target.value)}><option value="Все">XYZ: все</option><option value="X">XYZ X</option><option value="Y">XYZ Y</option><option value="Z">XYZ Z</option></select>
+          <select value={analyticsStock} onChange={event => setAnalyticsStock(event.target.value)}><option value="Все">Остаток: все</option><option value="В наличии">В наличии</option><option value="Заканчиваются">Заканчиваются</option><option value="Нет остатка">Нет остатка</option><option value="Без движения">Избыток / без движения</option></select>
+          <div className="analytics-filter-result"><span>{formatNumber(filteredCount)} товаров</span>{analyticsFiltersActive && <button onClick={resetAnalyticsFilters}><X size={14}/> Сбросить</button>}</div>
+        </div>
+
+        {analyticsLoading && <div className="notice info"><RefreshCw className="spin" size={20}/><div><strong>Пересчитываю выбранный период</strong><p>Выручка, продажи, возвраты, прибыль, ABC/XYZ и график загружаются заново из сохранённых данных WB.</p></div></div>}
+        {analyticsError && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Период не пересчитан</strong><p>{analyticsError}</p></div><button onClick={() => loadAnalyticsData(connection.connectionId,analyticsPeriod,analyticsCompare)}>Повторить</button></div>}
+        {currentCoreReady && (!analyticsAvailability.orders || !analyticsAvailability.sales || !analyticsAvailability.stocks) && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Не все потоки WB загружены</strong><p>{!analyticsAvailability.orders ? 'Заказы — ожидают разрешённого окна. ' : ''}{!analyticsAvailability.sales ? 'Продажи — ожидают разрешённого окна. ' : ''}{!analyticsAvailability.stocks ? 'Остатки — отчёт формируется отдельно. ' : ''}Неполученные значения не подменяются ложными нулями.</p></div><button onClick={() => setActive('Синхронизации')}>Открыть статусы</button></div>}
+        {salesCoverageLimited && <div className="notice info"><AlertTriangle size={20}/><div><strong>Выбранный период шире сохранённой истории продаж</strong><p>В базе сейчас есть продажи с {formatDate(salesCoverage.from)} по {formatDate(salesCoverage.to)}. Показатели рассчитаны только по фактически сохранённым строкам; дни вне покрытия не считаются подтверждённым нулём.</p></div><button onClick={() => setActive('Синхронизации')}>Проверить загрузку</button></div>}
+        {advertisingCoverageLimited && <div className="notice warning"><Megaphone size={20}/><div><strong>Реклама покрывает не весь выбранный период</strong><p>Снимок рекламы WB доступен с {formatDate(advertisingCoverage.from)} по {formatDate(advertisingCoverage.to)}. Прибыль за более широкий период считается предварительной до загрузки рекламной истории.</p></div><button onClick={() => setActive('Реклама')}>Открыть рекламу</button></div>}
+
+        <div className="analytics-period-caption"><span>Текущий период: <strong>{selectedPeriodLabel}</strong></span>{analyticsCompare && <span>Сравнение: <strong>{comparisonPeriodLabel}</strong></span>}{analyticsFiltersActive && <span>Фильтры применены к карточкам и итогам</span>}</div>
+
+        <div className="metrics-grid four">
+          <MetricCard label="Выручка" value={formatMoney(analyticsSummary.revenue)} delta={metricDelta(analyticsSummary.revenue,analyticsCompareSummary.revenue,`${formatNumber(analyticsSummary.sales)} продаж`)} deltaTone={comparisonTone(analyticsSummary.revenue,analyticsCompareSummary.revenue,analyticsCompare && Boolean(analyticsCompareCore))} icon={TrendingUp}/>
+          <MetricCard label="Заказы" value={formatNumber(analyticsSummary.orders)} delta={metricDelta(analyticsSummary.orders,analyticsCompareSummary.orders,`${formatNumber(analyticsSummary.returns)} возвратов`)} deltaTone={comparisonTone(analyticsSummary.orders,analyticsCompareSummary.orders,analyticsCompare && Boolean(analyticsCompareCore))} icon={PackageSearch}/>
+          <MetricCard label="Остатки сейчас" value={formatNumber(analyticsSummary.stockUnits)} delta={`${analyticsSummary.stockCoverDays ?? '—'} дней покрытия по темпу периода`} icon={Boxes}/>
+          <MetricCard label="Опер. прибыль" value={formatMoney(analyticsSummary.operatingProfit)} delta={analyticsSummary.operatingProfit == null ? 'Нужна себестоимость' : metricDelta(analyticsSummary.operatingProfit,analyticsCompareSummary.operatingProfit,`Маржа ${formatPercent(analyticsSummary.margin)}`)} deltaTone={comparisonTone(analyticsSummary.operatingProfit,analyticsCompareSummary.operatingProfit,analyticsCompare && Boolean(analyticsCompareCore))} icon={CircleDollarSign}/>
+        </div>
+
+        <div className="analytics-layout">
+          <div className="chart-card inner-chart">
+            <div className="card-head"><div><span>{selectedDays} дней · {selectedPeriodLabel}</span><h3>Динамика выручки</h3></div>{analyticsCompare && <div className="analytics-chart-legend"><i/><span>выбранный</span><i className="compare"/><span>предыдущий</span></div>}</div>
+            <TrendChart data={analyticsTrend} comparisonData={analyticsCompare ? analyticsCompareTrend : []}/>
+          </div>
+          <div className="analytics-side"><h3>Ассортимент</h3><div className="insight-list">
+            <div><span>ABC A</span><strong>{analyticsFilteredProducts.filter(p => p.abc === 'A').length}</strong><small>основная выручка</small></div>
+            <div><span>XYZ X</span><strong>{analyticsFilteredProducts.filter(p => p.xyz === 'X').length}</strong><small>стабильный спрос</small></div>
+            <div><span>Без движения</span><strong>{analyticsSummary.slowStock ?? '—'}</strong><small>нужно решение</small></div>
+            <div><span>Возвраты</span><strong>{formatPercent(analyticsSummary.returnRate)}</strong><small>{formatNumber(analyticsSummary.returns)} шт.</small></div>
+          </div></div>
+        </div>
+
+        <div className="section-title-row"><div><span>ABC/XYZ</span><h2>Приоритет товаров</h2></div><small>{formatNumber(filteredCount)} из {formatNumber(analyticsBaseProducts.length)}</small></div>
+        <div className="data-table compact-table"><div className="data-row head analytics-row"><span>Товар</span><span>ABC</span><span>XYZ</span><span>Выручка</span><span>Продажи</span><span>Возвраты</span><span>Дней запаса</span></div>
+          {analyticsFilteredProducts.length ? analyticsFilteredProducts.slice(0,100).map(p => <div className="data-row analytics-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article} · {p.brand}{p.category ? ` · ${p.category}` : ''}</small></span><span><b className={`class-pill class-${String(p.abc || 'C').toLowerCase()}`}>{p.abc}</b></span><span><b className="class-pill">{p.xyz}</b></span><span>{formatMoney(p.revenue)}</span><span>{formatNumber(p.salesCount)}</span><span>{formatPercent(p.returnRate)}</span><span>{p.stockCoverDays ?? '—'}</span></div>) : <div className="product-empty">По выбранным фильтрам товаров нет.</div>}
+        </div>
+      </>)}
+    </section>
+  }
 
   const renderProducts = () => (
     <section className="app-page glass-panel products-page">

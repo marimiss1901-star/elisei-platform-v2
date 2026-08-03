@@ -1469,6 +1469,7 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
         sizes: Array.isArray(row?.sizes) ? row.sizes : [],
         title: row.title || row.subject || row.subjectName || 'Товар',
         brand: row.brand || '',
+        category: row.subjectName || row.subject || row.category || row.objectName || row.object || '',
         photo: row.photo || '',
         stock: 0,
         stockRows: 0,
@@ -1476,7 +1477,10 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
         salesCount: 0,
         returnsCount: 0,
         revenue: 0,
+        dailyOrders: {},
         dailySales: {},
+        dailyReturns: {},
+        dailyRevenue: {},
         adSpend: 0,
         adViews: 0,
         adClicks: 0,
@@ -1512,6 +1516,7 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     if ((!item.sizes || !item.sizes.length) && Array.isArray(row?.sizes)) item.sizes = row.sizes
     if ((!item.title || item.title === 'Товар') && (row.title || row.subjectName)) item.title = row.title || row.subjectName
     if (!item.brand && row.brand) item.brand = row.brand
+    if (!item.category && (row.subjectName || row.subject || row.category || row.objectName || row.object)) item.category = row.subjectName || row.subject || row.category || row.objectName || row.object
     if (!item.photo && row.photo) item.photo = row.photo
     registerAliases(item, row)
     return item
@@ -1582,8 +1587,14 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     : 0
 
   const dailyMap = new Map()
-  for (let offset = periodDays - 1; offset >= 0; offset -= 1) {
-    const date = new Date(Date.now() - offset * 86400000).toISOString().slice(0, 10)
+  const explicitPeriodTo = dateKey(data?.__periodTo)
+  const explicitPeriodFrom = dateKey(data?.__periodFrom)
+  const periodEnd = explicitPeriodTo ? new Date(`${explicitPeriodTo}T00:00:00.000Z`) : new Date()
+  const periodStart = explicitPeriodFrom
+    ? new Date(`${explicitPeriodFrom}T00:00:00.000Z`)
+    : new Date(periodEnd.getTime() - (periodDays - 1) * 86400000)
+  for (let cursor = new Date(periodStart); cursor <= periodEnd; cursor = new Date(cursor.getTime() + 86400000)) {
+    const date = cursor.toISOString().slice(0, 10)
     dailyMap.set(date, { date, revenue: 0, orders: 0, sales: 0, returns: 0 })
   }
 
@@ -1592,12 +1603,13 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     const mode = fulfillmentMode(row)
     const srid = String(row.srid || row.rid || '').trim()
     if (srid && mode !== 'UNKNOWN') modeBySrid.set(srid, mode)
+    const day = dateKey(row.date || row.lastChangeDate || row.createdAt)
     if (item) {
       item.ordersCount += 1
       const bucket = touchMode(item, mode)
       if (bucket) bucket.orders += 1
+      if (day) item.dailyOrders[day] = (item.dailyOrders[day] || 0) + 1
     }
-    const day = dateKey(row.date || row.lastChangeDate || row.createdAt)
     if (dailyMap.has(day)) dailyMap.get(day).orders += 1
   }
 
@@ -1621,7 +1633,11 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
         if (modeBucket) modeBucket.sales += 1
       }
       if (modeBucket) modeBucket.revenue += amount
-      if (day) item.dailySales[day] = (item.dailySales[day] || 0) + (isReturn ? -1 : 1)
+      if (day) {
+        item.dailyRevenue[day] = (item.dailyRevenue[day] || 0) + amount
+        if (isReturn) item.dailyReturns[day] = (item.dailyReturns[day] || 0) + 1
+        else item.dailySales[day] = (item.dailySales[day] || 0) + 1
+      }
     }
     if (dailyMap.has(day)) {
       const bucket = dailyMap.get(day)
@@ -2037,9 +2053,9 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     recommendations.push({ id: `${type}:${product?.key || recommendations.length}`, priority, type, productKey: product?.key || null, title, text, effect })
   }
   for (const item of products) {
-    if (availability.stockDetails && item.stock <= 0 && item.salesCount > 0) pushRecommendation(1, 'stock', item, `Пополнить «${item.title}»`, `За 30 дней было ${item.salesCount} продаж, но текущий остаток равен нулю.`, `Риск потерять продажи`)
+    if (availability.stockDetails && item.stock <= 0 && item.salesCount > 0) pushRecommendation(1, 'stock', item, `Пополнить «${item.title}»`, `За выбранные ${periodDays} дн. было ${item.salesCount} продаж, но текущий остаток равен нулю.`, `Риск потерять продажи`)
     else if (availability.stockDetails && item.stockCoverDays != null && item.stockCoverDays < 14) pushRecommendation(2, 'stock', item, `Запланировать поставку «${item.title}»`, `Запаса примерно на ${item.stockCoverDays} дней.`, `${item.stock} шт. на складах`)
-    if (availability.stockDetails && item.salesCount === 0 && item.stock > 20) pushRecommendation(3, 'slow', item, `Разобрать неликвид «${item.title}»`, `Нет продаж за 30 дней при остатке ${item.stock} шт.`, item.frozenMoney ? `Заморожено ≈ ${item.frozenMoney} ₽` : '')
+    if (availability.stockDetails && item.salesCount === 0 && item.stock > 20) pushRecommendation(3, 'slow', item, `Разобрать неликвид «${item.title}»`, `Нет продаж за выбранные ${periodDays} дн. при остатке ${item.stock} шт.`, item.frozenMoney ? `Заморожено ≈ ${item.frozenMoney} ₽` : '')
     if (item.returnRate >= 20 && item.salesCount >= 3) pushRecommendation(2, 'quality', item, `Проверить качество «${item.title}»`, `Возвраты составляют ${item.returnRate}% от продаж.`, `${item.returnsCount} возвратов`)
     if (item.profit != null && item.profit < 0) pushRecommendation(1, 'price', item, `Исправить экономику «${item.title}»`, `Расчётная прибыль отрицательная: ${item.profit} ₽.`, item.breakevenPrice ? `Цена в 0: ${item.breakevenPrice} ₽` : '')
   }
@@ -2079,6 +2095,8 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
 
   return {
     periodDays,
+    period: explicitPeriodFrom && explicitPeriodTo ? { from:explicitPeriodFrom, to:explicitPeriodTo, days:periodDays } : null,
+    periodCoverage:data?.__periodCoverage || null,
     generatedAt: new Date().toISOString(),
     summary: {
       revenue: availability.sales ? Math.round(totalRevenue) : null,
@@ -4549,6 +4567,156 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
   }
 })
 
+
+function analyticsPeriodRange(input = {}) {
+  const from = dateKey(input?.from || input?.dateFrom || input?.start)
+  const to = dateKey(input?.to || input?.dateTo || input?.end)
+  if (!from || !to) return null
+  const fromDate = new Date(`${from}T00:00:00.000Z`)
+  const toDate = new Date(`${to}T00:00:00.000Z`)
+  if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime()) || fromDate > toDate) return null
+  const days = Math.max(1, Math.floor((toDate - fromDate) / 86400000) + 1)
+  if (days > 366) {
+    const error = new Error('Для интерактивной аналитики выберите период не более 366 дней.')
+    error.status = 400
+    throw error
+  }
+  return { from, to, fromDate, toDate, days }
+}
+
+function analyticsDateForRow(row = {}, keys = []) {
+  for (const key of keys) {
+    const value = row?.[key]
+    const date = dateKey(value)
+    if (date) return date
+  }
+  return ''
+}
+
+function analyticsFilterRows(rows, range, keys) {
+  if (!Array.isArray(rows)) return []
+  if (!range) return rows
+  return rows.filter(row => {
+    const date = analyticsDateForRow(row, keys)
+    return date && date >= range.from && date <= range.to
+  })
+}
+
+function analyticsAvailableRange(rows = [], keys = []) {
+  const dates = (Array.isArray(rows) ? rows : []).map(row => analyticsDateForRow(row, keys)).filter(Boolean).sort()
+  return { from:dates[0] || null, to:dates.at(-1) || null, totalRows:dates.length }
+}
+
+function analyticsMetrics(rows = []) {
+  const totals = rows.reduce((acc, row) => {
+    acc.views += Number(row?.views || 0)
+    acc.clicks += Number(row?.clicks || 0)
+    acc.spend += Number(row?.spend || 0)
+    acc.orders += Number(row?.orders || 0)
+    acc.revenue += Number(row?.revenue || 0)
+    return acc
+  }, { views:0, clicks:0, spend:0, orders:0, revenue:0 })
+  totals.ctr = totals.views > 0 ? totals.clicks / totals.views * 100 : null
+  totals.cpc = totals.clicks > 0 ? totals.spend / totals.clicks : null
+  totals.crr = totals.revenue > 0 ? totals.spend / totals.revenue * 100 : null
+  totals.romi = totals.spend > 0 ? (totals.revenue - totals.spend) / totals.spend * 100 : null
+  totals.orderConversion = totals.clicks > 0 ? totals.orders / totals.clicks * 100 : null
+  return totals
+}
+
+function analyticsFilterAdvertising(advertising = {}, range = null) {
+  if (!range || !advertising || typeof advertising !== 'object') return advertising
+  const campaigns = (Array.isArray(advertising.campaigns) ? advertising.campaigns : []).map(campaign => {
+    const dailyStats = analyticsFilterRows(campaign?.dailyStats, range, ['date','day','dt'])
+    const snapshotFrom = dateKey(advertising?.period?.from || advertising?.period?.beginDate || advertising?.period?.dateFrom)
+    const snapshotTo = dateKey(advertising?.period?.to || advertising?.period?.endDate || advertising?.period?.dateTo)
+    const exactSnapshot = snapshotFrom === range.from && snapshotTo === range.to
+    if (!dailyStats.length) {
+      return {
+        ...campaign,
+        dailyStats:[], nmStats:[], views:null, clicks:null, spend:null, orders:null, revenue:null,
+        ctr:null, cpc:null, crr:null, romi:null, orderConversion:null,
+        statsStatus:'period_not_loaded', statsAvailable:false,
+      }
+    }
+    const metrics = analyticsMetrics(dailyStats)
+    return {
+      ...campaign,
+      ...metrics,
+      dailyStats,
+      // Детализация по nmID в сохранённом fullstats агрегирована за весь снимок.
+      // Для другого диапазона не переносим её как точный факт: расход распределится по выручке.
+      nmStats:exactSnapshot ? (Array.isArray(campaign.nmStats) ? campaign.nmStats : []) : [],
+      statsStatus:'loaded', statsAvailable:true,
+    }
+  })
+  const loaded = campaigns.filter(item => item.statsStatus === 'loaded')
+  const dailyMap = new Map()
+  loaded.forEach(campaign => (campaign.dailyStats || []).forEach(row => {
+    const current = dailyMap.get(row.date) || { date:row.date, views:0, clicks:0, spend:0, orders:0, revenue:0 }
+    for (const key of ['views','clicks','spend','orders','revenue']) current[key] += Number(row?.[key] || 0)
+    dailyMap.set(row.date,current)
+  }))
+  const daily = [...dailyMap.values()].sort((a,b) => a.date.localeCompare(b.date)).map(row => ({ ...row, ...analyticsMetrics([row]) }))
+  return {
+    ...advertising,
+    campaigns,
+    daily,
+    totals:analyticsMetrics(loaded),
+    period:{ from:range.from, to:range.to },
+    statsLoadedCampaigns:loaded.length,
+    statsPendingCampaigns:campaigns.length - loaded.length,
+    periodFiltered:true,
+  }
+}
+
+function analyticsFilterConnectionData(rawData = {}, range = null) {
+  if (!range) return { ...rawData }
+  const orderKeys = ['date','orderDate','lastChangeDate','createdAt','updatedAt']
+  const saleKeys = ['sale_dt','saleDt','date','lastChangeDate','createdAt','updatedAt']
+  const financeKeys = ['rrDate','rr_dt','saleDt','sale_dt','orderDt','order_dt','date','operationDate','createDate']
+  const storageKeys = ['date','warehouseCalcDate','calcDate','rrDate','createDate']
+  const acceptanceKeys = ['date','acceptanceDate','createDate']
+  const acquiringKeys = ['date','transactionDate','rrDate','rr_dt','createDate']
+  const orders = analyticsFilterRows(rawData.orders, range, orderKeys)
+  const sales = analyticsFilterRows(rawData.sales, range, saleKeys)
+  const financeRows = analyticsFilterRows(rawData?.finance?.rows, range, financeKeys)
+  const paidStorage = analyticsFilterRows(rawData.paidStorage, range, storageKeys)
+  const acceptance = analyticsFilterRows(rawData.acceptance, range, acceptanceKeys)
+  const acquiringRows = analyticsFilterRows(rawData?.acquiring?.rows, range, acquiringKeys)
+  const finance = rawData?.finance && typeof rawData.finance === 'object' && !Array.isArray(rawData.finance)
+    ? { ...rawData.finance, rows:financeRows, totals:summarizeFinanceRows(financeRows), period:{ from:range.from,to:range.to } }
+    : rawData.finance
+  const acquiring = rawData?.acquiring && typeof rawData.acquiring === 'object' && !Array.isArray(rawData.acquiring)
+    ? { ...rawData.acquiring, rows:acquiringRows, period:{ from:range.from,to:range.to } }
+    : rawData.acquiring
+  return {
+    ...rawData,
+    orders,
+    sales,
+    finance,
+    paidStorage,
+    acceptance,
+    acquiring,
+    advertising:analyticsFilterAdvertising(rawData.advertising, range),
+    __periodDays:range.days,
+    __periodFrom:range.from,
+    __periodTo:range.to,
+    __periodFiltered:true,
+    __periodCoverage:{
+      requested:{ from:range.from,to:range.to,days:range.days },
+      orders:{ ...analyticsAvailableRange(rawData.orders,orderKeys),selectedRows:orders.length },
+      sales:{ ...analyticsAvailableRange(rawData.sales,saleKeys),selectedRows:sales.length },
+      finance:{ ...analyticsAvailableRange(rawData?.finance?.rows,financeKeys),selectedRows:financeRows.length },
+      advertising:{
+        from:dateKey(rawData?.advertising?.period?.from || rawData?.advertising?.period?.beginDate || rawData?.advertising?.period?.dateFrom) || null,
+        to:dateKey(rawData?.advertising?.period?.to || rawData?.advertising?.period?.endDate || rawData?.advertising?.period?.dateTo) || null,
+        selectedRows:Array.isArray(rawData?.advertising?.daily) ? analyticsFilterRows(rawData.advertising.daily,range,['date']).length : 0,
+      },
+    },
+  }
+}
+
 app.get('/api/wb/dashboard/:id', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, req.params.id)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
@@ -4566,7 +4734,13 @@ app.get('/api/wb/core/:id', authRequired, async (req, res) => {
     canonicalConnectionData(connection),
     getBusinessSettings(req.auth.sub),
   ])
-  res.json({ core: buildCoreAnalytics(data, settings), dataSources:sources, recovered, recoveryQueued, lastSync: connection.last_sync_at || null })
+  const range = analyticsPeriodRange(req.query)
+  const selectedData = analyticsFilterConnectionData(data, range)
+  res.json({
+    core: buildCoreAnalytics(selectedData, settings),
+    period:range ? { from:range.from, to:range.to, days:range.days } : null,
+    dataSources:sources, recovered, recoveryQueued, lastSync: connection.last_sync_at || null,
+  })
 })
 
 app.get('/api/wb/advertising/:id', authRequired, async (req, res) => {
@@ -4834,9 +5008,9 @@ function elPeriodRange(period = {}) {
   const to = dateKey(toRaw)
   if (!from || !to) return null
   const fromDate = new Date(`${from}T00:00:00.000Z`)
-  const toDate = new Date(`${to}T23:59:59.999Z`)
+  const toDate = new Date(`${to}T00:00:00.000Z`)
   if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime()) || fromDate > toDate) return null
-  return { from, to, fromDate, toDate, days: Math.max(1, Math.round((toDate - fromDate) / 86400000) + 1) }
+  return { from, to, fromDate, toDate, days: Math.max(1, Math.floor((toDate - fromDate) / 86400000) + 1) }
 }
 
 function elRowDate(row = {}) {
@@ -4846,19 +5020,7 @@ function elRowDate(row = {}) {
 function elFilterDataByPeriod(rawData = {}, period = {}) {
   const range = elPeriodRange(period)
   if (!range) return { data: { ...rawData }, range: null }
-  const inside = row => {
-    const key = elRowDate(row)
-    return key && key >= range.from && key <= range.to
-  }
-  return {
-    range,
-    data: {
-      ...rawData,
-      orders: Array.isArray(rawData.orders) ? rawData.orders.filter(inside) : [],
-      sales: Array.isArray(rawData.sales) ? rawData.sales.filter(inside) : [],
-      __periodDays: range.days,
-    },
-  }
+  return { range, data:analyticsFilterConnectionData(rawData, range) }
 }
 
 function elCompactProduct(item = {}) {
