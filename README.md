@@ -1,11 +1,11 @@
-# ELISEI 5.4.0
+# ELISEI 5.5.0
 
 ELISEI — отдельная SaaS-платформа для продавцов маркетплейсов. MAXADORRE не входит в этот репозиторий: базы, токены, окружения и клиентские данные проектов не смешиваются.
 
 ## Версии
 
-- Frontend: `5.4.0`
-- Backend: `2.8.0`
+- Frontend: `5.5.0`
+- Backend: `2.12.0`
 
 ## Архитектура интеграции WB
 
@@ -82,7 +82,7 @@ PostgreSQL
 
 1. Загрузить файлы релиза в репозиторий ELISEI с заменой.
 2. Backend: **Manual Deploy → Clear build cache & deploy**.
-3. Проверить `/health`: `version` должна быть `2.8.0`, `database` — `ok`.
+3. Проверить `/health`: backend должен запуститься, `database` — `ok`.
 4. Frontend: **Manual Deploy → Clear build cache & deploy**.
 5. Обновить страницу через `Ctrl + F5`.
 6. В «Синхронизациях» один раз запустить **Товары**, затем **Остатки**.
@@ -105,4 +105,4 @@ npm install
 npm run build
 ```
 
-Подробный список изменений: `RELEASE_NOTES_V5_4_0.txt`.
+Подробный список изменений: `RELEASE_NOTES_V5_5_0.txt`.

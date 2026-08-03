@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { WB_STREAMS, normalizeStreamPayload, streamCount } from '../src/wb/stream-store.js'
 import { normalizeFinanceLedgerRows } from '../src/wb/finance-ledger.js'
 
-for (const stream of ['fbsArchive','measurementPenalties','deductionsReport','goodsReturns','tariffs','funnel','documents']) {
+for (const stream of ['fbsArchive','measurementPenalties','deductionsReport','goodsReturns','tariffs','funnel','documents','searchQueries','stockHistory','reviews','questions','chats']) {
   assert.ok(WB_STREAMS.includes(stream), `${stream} is registered`)
   const payload=normalizeStreamPayload(stream,{rows:[{id:1}],totalRows:12})
   assert.equal(streamCount(stream,payload),12)
@@ -38,9 +38,21 @@ for (const marker of [
   '/api/v1/tariffs/commission',
   '/api/analytics/v3/sales-funnel/products',
   '/api/v1/documents/list',
+  '/api/v2/search-report/report',
+  '/api/v2/search-report/product/search-texts',
+  'STOCK_HISTORY_DAILY_CSV',
+  'feedbacks-api.wildberries.ru/api/v1/${plural}',
+  '/api/v1/questions',
+  'buyer-chat-api.wildberries.ru/api/v1/seller',
+  "phase:'events'",
   "app.get('/api/wb/extended/:stream'",
   'advanceFbsArchiveTask',
   'advanceOffsetReportTask',
+  'advanceQuestionsTask',
+  'advanceChatsTask',
+  'sanitizeChatObject',
+  "currentPeriod:{start:detailPeriod.dateFrom,end:detailPeriod.dateTo}",
+  "const nextPhase = stage === 'reviews' ? 'archive' : 'answered'",
   'year:String(selectedMonth.year)',
   'month:String(selectedMonth.month)',
   '/api/v1/tariffs/return?date=',

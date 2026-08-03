@@ -1,5 +1,7 @@
 README_5_4_9.md
+README_5_5_0.md
 RELEASE_NOTES_V5_4_9.txt
+RELEASE_NOTES_V5_5_0.txt
 backend/package.json
 backend/src/server.js
 backend/src/wb/adapters/catalog.js
@@ -18,4 +20,8 @@ backend/tests/wb-memory-safe-sync.test.mjs
 backend/tests/wb-self-heal.test.mjs
 backend/tests/wb-stream-recovery.test.mjs
 backend/tests/wb-stream-store.test.mjs
+package.json
+src/components/WbExtendedWorkspace.jsx
+src/lib/api.js
 src/pages/DashboardPage.jsx
+src/styles/app.css

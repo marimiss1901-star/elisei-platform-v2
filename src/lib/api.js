@@ -51,6 +51,7 @@ export const wbApi = {
   core: (connectionId) => request(`/api/wb/core/${encodeURIComponent(connectionId)}`),
   advertising: (connectionId) => request(`/api/wb/advertising/${encodeURIComponent(connectionId)}`),
   diagnostics: (connectionId) => request(`/api/wb/diagnostics/${encodeURIComponent(connectionId)}`),
+  extended: (stream, connectionId, afterKey = '', limit = 150) => request(`/api/wb/extended/${encodeURIComponent(stream)}?connectionId=${encodeURIComponent(connectionId)}&limit=${encodeURIComponent(limit)}${afterKey ? `&afterKey=${encodeURIComponent(afterKey)}` : ''}`),
   repairStocks: (connectionId, taskId = '') => request(`/api/wb/stocks/${encodeURIComponent(connectionId)}/repair`, { method: 'POST', body: JSON.stringify({ ...(taskId ? { taskId } : {}) }), signal: AbortSignal.timeout(75000) }),
   syncHistory: (connectionId) => request(`/api/wb/sync-history/${encodeURIComponent(connectionId)}`),
   removeToken: (tokenId) => request(`/api/wb/tokens/${encodeURIComponent(tokenId)}`, { method: 'DELETE' }),

@@ -9,6 +9,7 @@ import {
 import ElMascot from '../components/ElMascot'
 import MetricCard from '../components/MetricCard'
 import TrendChart from '../components/TrendChart'
+import WbExtendedWorkspace from '../components/WbExtendedWorkspace'
 import { businessApi, elApi, wbApi } from '../lib/api'
 
 const formatMoney = value => value == null ? 'Не загружено' : `${new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))} ₽`
@@ -174,6 +175,10 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [financeTab, setFinanceTab] = useState('overview')
   const [financeQuery, setFinanceQuery] = useState('')
   const [financePage, setFinancePage] = useState(1)
+  const [advertisingTab, setAdvertisingTab] = useState('overview')
+  const [advertisingFilter, setAdvertisingFilter] = useState('')
+  const [advertisingStatusFilter, setAdvertisingStatusFilter] = useState('all')
+  const [advertisingTrendMetric, setAdvertisingTrendMetric] = useState('spend')
   const [liveProducts, setLiveProducts] = useState([])
   const [syncHistory, setSyncHistory] = useState([])
   const [settingsDraft, setSettingsDraft] = useState(defaultSettings)
@@ -340,8 +345,8 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       (connection.syncStates || []).find(item => ['finance','acquiring','paidStorage','acceptance'].includes(item.stage))?.lastSuccessAt])
 
   const nav = [
-    ['Главная', Home], ['Аналитика', BarChart3], ['Товары', PackageSearch], ['Остатки', Boxes],
-    ['Финансы', WalletCards], ['Цены и акции', Tag], ['Реклама', Megaphone], ['Отзывы', Star],
+    ['Главная', Home], ['Аналитика', BarChart3], ['Товары', PackageSearch], ['Остатки', Boxes], ['История остатков', Warehouse],
+    ['Финансы', WalletCards], ['Цены и акции', Tag], ['Реклама', Megaphone], ['Поисковые запросы', Search], ['Коммуникации', Star],
     ['Сезонность', CalendarDays], ['Отчёты', FileText], ['Импорт данных', Upload], ['AI CRM', UsersRound], ['Спросить ЭЛа', MessageCircle],
     ['Подключения', PlugZap], ['Синхронизации', RefreshCw], ['Настройки', Settings]
   ]
@@ -884,52 +889,92 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const renderPricing = () => <section className="app-page glass-panel"><div className="page-title"><span>Ценообразование</span><h1>Цены и акции</h1><p>Цена в ноль, целевая цена, цена пика и безопасные сценарии скидок.</p></div>{summary.cogs == null && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Добавьте себестоимость</strong><p>Без неё невозможно честно определить убыточные скидки.</p></div><button onClick={() => setActive('Финансы')}>Открыть финансы</button></div>}<div className="data-table pricing-table"><div className="data-row head pricing-row"><span>Товар</span><span>Текущая/средняя</span><span>Цена в 0</span><span>Целевая</span><span>Пик</span><span>−20%</span><span>−40%</span><span>Решение</span></div>{productRows.map(p => { const base=p.averagePrice || p.targetPrice || 0; const discount20=base*.8; const discount40=base*.6; return <div className="data-row pricing-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatMoney(base)}</span><span>{formatMoney(p.breakevenPrice)}</span><span>{formatMoney(p.targetPrice)}</span><span>{formatMoney(p.peakPrice)}</span><span className={p.breakevenPrice && discount20 < p.breakevenPrice ? 'negative' : 'positive'}>{formatMoney(discount20)}</span><span className={p.breakevenPrice && discount40 < p.breakevenPrice ? 'negative' : 'positive'}>{formatMoney(discount40)}</span><span>{p.profit != null && p.profit < 0 ? 'Повысить цену / снизить расходы' : p.status === 'Избыток' ? 'Допустима контролируемая акция' : 'Сохранять цену'}</span></div>})}</div></section>
 
   const renderAdvertising = () => {
-    const advertising = coreData?.advertising || advertisingSnapshot || { campaigns:[], productRows:[], totals:{}, source:'manual' }
+    const advertising = coreData?.advertising || advertisingSnapshot || { campaigns:[], productRows:[], daily:[], totals:{}, source:'manual' }
     const campaigns = Array.isArray(advertising.campaigns) ? advertising.campaigns : []
     const adProductRows = Array.isArray(advertising.productRows) ? advertising.productRows : []
+    const daily = Array.isArray(advertising.daily) ? advertising.daily : []
     const totals = advertising.totals || {}
     const advertisingState = (connection.syncStates || []).find(item => item.stage === 'advertising')
     const apiAvailable = Boolean(coreData?.availability?.advertising || campaigns.length > 0 || Number(advertisingState?.lastCount || 0) > 0)
     const statsAvailable = Boolean(advertising.statsAvailable)
     const hasPromotionToken = connection.scopes?.includes('promotion')
-    const spend = statsAvailable ? Number(totals.spend || 0) : null
-    const crr = statsAvailable && totals.crr != null ? Number(totals.crr) : null
-    const romi = statsAvailable && Number(spend || 0) > 0 && Number(totals.revenue || 0) > 0 ? (Number(totals.revenue) - Number(spend)) / Number(spend) * 100 : null
     const statusName = status => ({ 4:'Готова', 7:'Завершена', 8:'Отменена', 9:'Активна', 11:'На паузе', '-1':'Удалена' }[String(status)] || 'Неизвестно')
+    const statusTone = status => Number(status) === 9 ? 'success' : Number(status) === 11 ? 'warning' : Number(status) === 8 || Number(status) === -1 ? 'danger' : 'info'
+    const needle = advertisingFilter.trim().toLowerCase()
+    const matchStatus = row => advertisingStatusFilter === 'all' || String(row.status) === advertisingStatusFilter
+    const filteredProducts = adProductRows.filter(row => matchStatus(row) && (!needle || [row.campaignName,row.advertId,row.nmID,row.vendorCode,row.title,row.barcode].some(value => String(value || '').toLowerCase().includes(needle))))
+    const filteredCampaigns = campaigns.filter(row => matchStatus(row) && (!needle || [row.name,row.advertId,...(row.nmIds || [])].some(value => String(value || '').toLowerCase().includes(needle))))
+    const spend = statsAvailable ? Number(totals.spend || 0) : null
+    const exportRows = () => {
+      let headers = []
+      let rows = []
+      let filename = 'elisei-advertising.csv'
+      if (advertisingTab === 'campaigns') {
+        headers = ['ID кампании','Название','Статус','Артикулы WB','Расход','Показы','Клики','Заказы','Выручка','CTR','CPC','CRR','ROMI','Конверсия в заказ']
+        rows = filteredCampaigns.map(row => [row.advertId,row.name,statusName(row.status),(row.nmIds || []).join(', '),row.spend,row.views,row.clicks,row.orders,row.revenue,row.ctr,row.cpc,row.crr,row.romi,row.orderConversion])
+        filename = 'elisei-advertising-campaigns.csv'
+      } else if (advertisingTab === 'dynamics') {
+        headers = ['Дата','Расход','Показы','Клики','Заказы','Выручка','CTR','CPC','CRR','ROMI']
+        rows = daily.map(row => [row.date,row.spend,row.views,row.clicks,row.orders,row.revenue,row.ctr,row.cpc,row.crr,row.romi])
+        filename = 'elisei-advertising-daily.csv'
+      } else {
+        headers = ['Кампания','ID кампании','Статус','nmID','Артикул продавца','Товар','Штрихкод','Расход','Показы','Клики','Заказы','Выручка','CTR','CPC','CRR','ROMI','Конверсия в заказ','Привязан к каталогу']
+        rows = filteredProducts.map(row => [row.campaignName,row.advertId,statusName(row.status),row.nmID,row.vendorCode,row.title,row.barcode,row.spend,row.views,row.clicks,row.orders,row.revenue,row.ctr,row.cpc,row.crr,row.romi,row.orderConversion,row.mapped?'Да':'Нет'])
+        filename = 'elisei-advertising-products.csv'
+      }
+      if (!rows.length) return notify('В выбранном разделе рекламы пока нет строк для выгрузки.')
+      const lines = [headers.map(csvCell).join(';'),...rows.map(row=>row.map(csvCell).join(';'))]
+      const blob = new Blob([`\uFEFF${lines.join('\n')}`],{type:'text/csv;charset=utf-8'})
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = filename
+      anchor.click()
+      URL.revokeObjectURL(url)
+    }
+    const tabs = [['overview','Обзор'],['products','По товарам'],['campaigns','Кампании'],['dynamics','Динамика']]
+    const trendLabels = { spend:'Расход', revenue:'Выручка', clicks:'Клики', orders:'Заказы', romi:'ROMI' }
 
-    return <section className="app-page glass-panel">
-      <div className="page-title"><span>Реклама</span><h1>Эффективность продвижения</h1><p>Кампании связываются с карточками по артикулу WB. В таблице видны nmID, артикул продавца и экономика каждого рекламируемого товара.</p></div>
+    return <section className="app-page glass-panel advertising-workspace">
+      <div className="page-title"><span>WB Продвижение</span><h1>Полная реклама</h1><p>Кампании, товары и дневная динамика в едином блоке. Расходы связываются с nmID и входят в прибыль конкретного товара.</p></div>
       <div className="metrics-grid four">
-        <MetricCard label="Расходы" value={statsAvailable?formatMoney(spend):'Не загружено'} delta={statsAvailable?'по API WB · 30 дней':'список кампаний есть, статистика ожидается'} icon={Megaphone}/>
-        <MetricCard label="Показы" value={statsAvailable?formatNumber(totals.views):'Не загружено'} delta={statsAvailable?`${formatNumber(totals.clicks)} кликов`:'нужно получить fullstats'} icon={Eye}/>
-        <MetricCard label="Заказы из рекламы" value={statsAvailable?formatNumber(totals.orders):'Не загружено'} delta={statsAvailable?`CTR ${formatPercent(totals.ctr)}`:'не показываем ложный ноль'} icon={PackageSearch}/>
-        <MetricCard label="CRR" value={statsAvailable?formatPercent(crr):'—'} delta={romi==null?'ROMI пока недоступен':`ROMI ${formatPercent(romi)}`} icon={Percent}/>
+        <MetricCard label="Расходы" value={statsAvailable?formatMoney(spend):'Не загружено'} delta={statsAvailable?'фактически по API WB':'статистика ожидается'} icon={Megaphone}/>
+        <MetricCard label="Выручка из рекламы" value={statsAvailable?formatMoney(totals.revenue):'Не загружено'} delta={statsAvailable?`${formatNumber(totals.orders)} заказов`:'не показываем ложный ноль'} icon={TrendingUp}/>
+        <MetricCard label="CRR" value={statsAvailable?formatPercent(totals.crr):'—'} delta={statsAvailable?`CPC ${formatMoney(totals.cpc)}`:'ожидает fullstats'} icon={Percent}/>
+        <MetricCard label="ROMI" value={statsAvailable?formatPercent(totals.romi):'—'} delta={statsAvailable?`Конверсия ${formatPercent(totals.orderConversion)}`:'ожидает статистику'} icon={CircleDollarSign}/>
       </div>
 
       {!hasPromotionToken && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Не подключена категория «Продвижение»</strong><p>Добавьте API-токен WB с этой категорией. Новый магазин создавать не нужно.</p></div><button onClick={() => setActive('Подключения')}>Добавить токен</button></div>}
-      {hasPromotionToken && !apiAvailable && <div className="notice"><RefreshCw size={20}/><div><strong>Рекламный токен подключён</strong><p>Запустите отдельный этап «Реклама».</p></div><button onClick={() => syncConnection(connection.connectionId, ['advertising'])}>Синхронизировать рекламу</button></div>}
-      {apiAvailable && campaigns.length > 0 && !statsAvailable && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Список кампаний загружен, статистика ещё не получена</strong><p>ELISEI видит {formatNumber(advertising.totalCampaigns || campaigns.length)} кампаний, но расходы, показы и заказы не подтверждены. Нули не используются в P&amp;L.</p></div><button onClick={() => syncConnection(connection.connectionId, ['advertising'])}>Обновить статистику</button></div>}
+      {hasPromotionToken && !apiAvailable && <div className="notice"><RefreshCw size={20}/><div><strong>Рекламный токен подключён</strong><p>Запустите отдельный этап «Реклама».</p></div><button onClick={() => syncConnection(connection.connectionId, ['advertising'])}>Синхронизировать</button></div>}
+      {apiAvailable && campaigns.length > 0 && !statsAvailable && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Кампании загружены, статистика ещё ожидается</strong><p>ELISEI видит {formatNumber(advertising.totalCampaigns || campaigns.length)} кампаний. Неполученные расходы не заменяются нулями и не входят в P&amp;L.</p></div><button onClick={() => syncConnection(connection.connectionId, ['advertising'])}>Обновить статистику</button></div>}
 
-      {adProductRows.length > 0 ? <>
-        <div className="section-title-row"><div><span>WB Продвижение</span><h2>Кампании по товарам</h2></div><small>{formatNumber(adProductRows.length)} связок кампания–артикул</small></div>
-        <div className="data-table ad-product-table">
-          <div className="data-row head ad-product-row"><span>Кампания</span><span>Артикул WB</span><span>Артикул продавца</span><span>Товар</span><span>Расход</span><span>Показы</span><span>Клики</span><span>Заказы</span><span>Выручка</span><span>CRR</span></div>
-          {[...adProductRows].sort((a,b)=>Number(b.spend||0)-Number(a.spend||0)).map(item => <div className="data-row ad-product-row" key={item.key}>
-            <span><strong>{item.campaignName}</strong><small>ID {item.advertId} · {statusName(item.status)}</small></span>
-            <span className="mono-cell">{item.nmID || '—'}</span>
-            <span className="mono-cell">{item.vendorCode || '—'}</span>
-            <span><strong>{item.title}</strong><small>{item.barcode ? `ШК ${item.barcode}` : item.mapped ? 'Привязано к каталогу' : 'Не найдено в каталоге'}</small></span>
-            <span>{formatMoney(item.spend)}</span><span>{formatNumber(item.views)}</span><span>{formatNumber(item.clicks)}</span><span>{formatNumber(item.orders)}</span><span>{formatMoney(item.revenue)}</span><span>{formatPercent(item.crr)}</span>
-          </div>)}
-        </div>
-      </> : campaigns.length > 0 ? <>
-        <div className="section-title-row"><div><span>WB Продвижение</span><h2>Список кампаний</h2></div><small>{formatNumber(advertising.statsLoadedCampaigns || campaigns.filter(item=>item.statsStatus==='loaded').length)} со статистикой из {formatNumber(advertising.totalCampaigns || campaigns.length)}</small></div>
-        <div className="data-table ad-table"><div className="data-row head ad-row"><span>Кампания</span><span>Статус</span><span>Артикулы WB</span><span>Статистика</span></div>{campaigns.map(item => <div className="data-row ad-row ad-list-row" key={item.advertId}><span><strong>{item.name}</strong><small>ID {item.advertId}</small></span><span><b className={`status-badge ${item.status===9?'success':item.status===11?'warning':'info'}`}>{statusName(item.status)}</b></span><span>{Array.isArray(item.nmIds)&&item.nmIds.length?item.nmIds.slice(0,4).join(', '):'Не получены'}</span><span>{item.statsStatus==='loaded'?`${Array.isArray(item.nmStats)?item.nmStats.length:0} товаров · загружено`:item.statsStatus==='empty_response'?'WB вернул пустой ответ':'В очереди'}</span></div>)}</div>
-      </> : null}
+      <div className="finance-tabs ad-workspace-tabs">{tabs.map(([key,label])=><button key={key} className={advertisingTab===key?'active':''} onClick={()=>setAdvertisingTab(key)}>{label}</button>)}</div>
+      <div className="ad-filter-bar">
+        <div className="ad-search"><Search size={16}/><input value={advertisingFilter} onChange={event=>setAdvertisingFilter(event.target.value)} placeholder="Кампания, nmID, артикул или товар"/></div>
+        <select className="ad-status-filter" value={advertisingStatusFilter} onChange={event=>setAdvertisingStatusFilter(event.target.value)}><option value="all">Все статусы</option><option value="9">Активные</option><option value="11">На паузе</option><option value="7">Завершённые</option><option value="4">Готовые</option><option value="8">Отменённые</option></select>
+        <button className="secondary-btn" disabled={syncing || !hasPromotionToken} onClick={()=>syncConnection(connection.connectionId,['advertising'])}><RefreshCw size={16} className={syncing?'spin':''}/> Обновить</button>
+        <button className="secondary-btn" onClick={exportRows}><Download size={16}/> CSV</button>
+      </div>
 
-      {!apiAvailable && <div className="settings-card ad-input-card"><h3>Резервный ручной расход</h3><p>Используется в P&amp;L только пока WB API рекламы не загрузил фактические расходы.</p><div className="inline-setting"><input type="number" min="0" value={settingsDraft.advertisingMonthly ?? 0} onChange={e => updateSetting('advertisingMonthly',e.target.value)}/><button className="primary-btn" onClick={saveSettings}><Save size={17}/> Сохранить</button></div></div>}
+      {advertisingTab === 'overview' && <div className="ad-overview-grid">
+        <div className="chart-card ad-chart-card"><div className="card-head"><div><span>Последние дни</span><h3>Расход и результат</h3></div><div className="ad-trend-switch">{Object.entries(trendLabels).map(([key,label])=><button key={key} className={advertisingTrendMetric===key?'active':''} onClick={()=>setAdvertisingTrendMetric(key)}>{label}</button>)}</div></div><TrendChart data={daily} valueKey={advertisingTrendMetric} emptyText="Дневная статистика рекламы ещё не загружена"/></div>
+        <div className="ad-breakdown-card"><h3>Воронка рекламы</h3><div className="ad-funnel-list"><div><span>Показы</span><strong>{statsAvailable?formatNumber(totals.views):'—'}</strong></div><div><span>Клики</span><strong>{statsAvailable?formatNumber(totals.clicks):'—'}</strong><small>CTR {formatPercent(totals.ctr)}</small></div><div><span>Заказы</span><strong>{statsAvailable?formatNumber(totals.orders):'—'}</strong><small>{formatPercent(totals.orderConversion)} от кликов</small></div><div><span>Выручка</span><strong>{statsAvailable?formatMoney(totals.revenue):'—'}</strong><small>CRR {formatPercent(totals.crr)}</small></div></div></div>
+        <div className="ad-breakdown-card"><h3>Покрытие данных</h3><div className="ad-funnel-list"><div><span>Всего кампаний</span><strong>{formatNumber(advertising.totalCampaigns || campaigns.length)}</strong></div><div><span>Со статистикой</span><strong>{formatNumber(advertising.statsLoadedCampaigns || 0)}</strong></div><div><span>Ожидают данные</span><strong>{formatNumber(advertising.statsPendingCampaigns || 0)}</strong></div><div><span>Привязано к товарам</span><strong>{formatNumber(advertising.mappedProductRows || adProductRows.filter(row=>row.mapped).length)}</strong></div></div></div>
+      </div>}
+
+      {advertisingTab === 'products' && <div className="data-table ad-product-table"><div className="data-row head ad-full-product-row"><span>Кампания / товар</span><span>Артикулы</span><span>Расход</span><span>Показы</span><span>Клики</span><span>Заказы</span><span>Выручка</span><span>CTR</span><span>CPC</span><span>CRR</span><span>ROMI</span></div>{filteredProducts.length ? [...filteredProducts].sort((a,b)=>Number(b.spend||0)-Number(a.spend||0)).map(item=><div className="data-row ad-full-product-row" key={item.key}><span><strong>{item.title}</strong><small>{item.campaignName} · ID {item.advertId} · {statusName(item.status)}</small></span><span><strong>nmID {item.nmID || '—'}</strong><small>{item.vendorCode || 'артикул не найден'}{item.barcode?` · ШК ${item.barcode}`:''}</small></span><span>{formatMoney(item.spend)}</span><span>{formatNumber(item.views)}</span><span>{formatNumber(item.clicks)}</span><span>{formatNumber(item.orders)}</span><span>{formatMoney(item.revenue)}</span><span>{formatPercent(item.ctr)}</span><span>{formatMoney(item.cpc)}</span><span>{formatPercent(item.crr)}</span><span className={Number(item.romi||0)<0?'negative':'positive'}>{formatPercent(item.romi)}</span></div>) : <div className="product-empty">По выбранным фильтрам рекламных товаров нет.</div>}</div>}
+
+      {advertisingTab === 'campaigns' && <div className="data-table ad-table"><div className="data-row head ad-full-campaign-row"><span>Кампания</span><span>Статус</span><span>Артикулы</span><span>Расход</span><span>Клики</span><span>Заказы</span><span>Выручка</span><span>CRR</span><span>ROMI</span></div>{filteredCampaigns.length ? [...filteredCampaigns].sort((a,b)=>Number(b.spend||0)-Number(a.spend||0)).map(item=><div className="data-row ad-full-campaign-row" key={item.advertId}><span><strong>{item.name}</strong><small>ID {item.advertId} · {item.statsStatus==='loaded'?'статистика загружена':'ожидает статистику'}</small></span><span><b className={`status-badge ${statusTone(item.status)}`}>{statusName(item.status)}</b></span><span>{Array.isArray(item.nmIds)&&item.nmIds.length?item.nmIds.slice(0,5).join(', '):'—'}</span><span>{formatMoney(item.spend)}</span><span>{formatNumber(item.clicks)}</span><span>{formatNumber(item.orders)}</span><span>{formatMoney(item.revenue)}</span><span>{formatPercent(item.crr)}</span><span className={Number(item.romi||0)<0?'negative':'positive'}>{formatPercent(item.romi)}</span></div>) : <div className="product-empty">По выбранным фильтрам кампаний нет.</div>}</div>}
+
+      {advertisingTab === 'dynamics' && <><div className="chart-card ad-chart-card ad-dynamics-chart"><div className="card-head"><div><span>По дням</span><h3>{trendLabels[advertisingTrendMetric]}</h3></div><div className="ad-trend-switch">{Object.entries(trendLabels).map(([key,label])=><button key={key} className={advertisingTrendMetric===key?'active':''} onClick={()=>setAdvertisingTrendMetric(key)}>{label}</button>)}</div></div><TrendChart data={daily} valueKey={advertisingTrendMetric} emptyText="Дневная статистика рекламы ещё не загружена"/></div><div className="data-table"><div className="data-row head ad-daily-row"><span>Дата</span><span>Расход</span><span>Показы</span><span>Клики</span><span>Заказы</span><span>Выручка</span><span>CTR</span><span>CPC</span><span>CRR</span><span>ROMI</span></div>{daily.length ? daily.map(row=><div className="data-row ad-daily-row" key={row.date}><span>{formatDate(row.date)}</span><span>{formatMoney(row.spend)}</span><span>{formatNumber(row.views)}</span><span>{formatNumber(row.clicks)}</span><span>{formatNumber(row.orders)}</span><span>{formatMoney(row.revenue)}</span><span>{formatPercent(row.ctr)}</span><span>{formatMoney(row.cpc)}</span><span>{formatPercent(row.crr)}</span><span className={Number(row.romi||0)<0?'negative':'positive'}>{formatPercent(row.romi)}</span></div>) : <div className="product-empty">Дневная статистика ещё не загружена.</div>}</div></>}
+
+      {!apiAvailable && <div className="settings-card ad-input-card"><h3>Резервный ручной расход</h3><p>Используется в P&amp;L только пока WB API рекламы не загрузил фактические расходы.</p><div className="inline-setting"><input type="number" min="0" value={settingsDraft.advertisingMonthly ?? 0} onChange={event=>updateSetting('advertisingMonthly',event.target.value)}/><button className="primary-btn" onClick={saveSettings}><Save size={17}/> Сохранить</button></div></div>}
     </section>
   }
+
+  const renderSearchQueries = () => <WbExtendedWorkspace mode="search" connection={connection} syncing={syncing} onSync={syncConnection} notify={notify}/>
+  const renderStockHistory = () => <WbExtendedWorkspace mode="stock" connection={connection} syncing={syncing} onSync={syncConnection} notify={notify}/>
+  const renderCommunications = () => <WbExtendedWorkspace mode="communications" connection={connection} syncing={syncing} onSync={syncConnection} notify={notify}/>
 
   const renderReviews = () => {
     const qualityRows = [...productRows].filter(p => Number(p.returnsCount || 0) > 0 || Number(p.returnRate || 0) > 0).sort((a,b) => Number(b.returnRate || 0)-Number(a.returnRate || 0))
@@ -970,6 +1015,11 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       { scope:'analytics', stage:'goodsReturns', title:'Возвраты и перемещения', text:'Возвраты товаров продавцу и движение' },
       { scope:'content', stage:'tariffs', title:'Тарифы WB', text:'Комиссии, логистика, хранение и возврат' },
       { scope:'analytics', stage:'funnel', title:'Воронка карточек', text:'Просмотры, корзина, заказы и выкупы' },
+      { scope:'analytics', stage:'searchQueries', title:'Поисковые запросы', text:'Фразы покупателей и позиции карточек · нужна подписка «Джем»' },
+      { scope:'analytics', stage:'stockHistory', title:'История остатков', text:'Ежедневный CSV-архив остатков за 90 дней' },
+      { scope:'feedbacks', stage:'reviews', title:'Отзывы', text:'Активные, отвеченные и архивные отзывы' },
+      { scope:'feedbacks', stage:'questions', title:'Вопросы', text:'Вопросы покупателей и статусы ответов' },
+      { scope:'chat', stage:'chats', title:'Чаты', text:'Диалоги и события в режиме чтения' },
       { scope:'documents', stage:'documents', title:'Документы', text:'Список актов, УПД, УКД и уведомлений' },
     ]
     const syncStatus = stage => connection.syncStates?.find(item => item.stage === stage)
@@ -993,9 +1043,9 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
           : { tone:'empty', title:'Подключите один основной API-ключ WB', text:'Если в нём есть все нужные категории, этого ключа будет достаточно для всех потоков.' }
 
     return <section className="app-page glass-panel connections-page"><div className="page-title"><span>Интеграции</span><h1>Подключение Wildberries</h1><p>ELISEI предпочитает один универсальный токен. Дополнительный ключ используется только когда в основном нет нужной категории.</p></div>
-      <div className={`token-mode-banner ${modeCopy.tone}`}><div className="token-mode-icon">{connection.tokenMode === 'universal' ? <CheckCircle2 size={24}/> : <ShieldCheck size={24}/>}</div><div><strong>{modeCopy.title}</strong><p>{modeCopy.text}</p>{primary && <small>Основной: {primary.label} · {primary.stageCoverageCount || 0}/{connection.stageTotal || primary.stageTotal || 17} рабочих потоков</small>}</div></div>
+      <div className={`token-mode-banner ${modeCopy.tone}`}><div className="token-mode-icon">{connection.tokenMode === 'universal' ? <CheckCircle2 size={24}/> : <ShieldCheck size={24}/>}</div><div><strong>{modeCopy.title}</strong><p>{modeCopy.text}</p>{primary && <small>Основной: {primary.label} · {primary.stageCoverageCount || 0}/{connection.stageTotal || primary.stageTotal || 22} рабочих потоков</small>}</div></div>
       <div className="wb-coverage-grid">{requirements.map(item => { const covered=connection.scopes?.includes(item.scope); const state=item.stage?syncStatus(item.stage):null; const source=item.stage?connection.coverageByStage?.[item.stage]:connection.tokens?.find(token => token.scopes?.includes(item.scope)); return <div className={`wb-coverage-card ${covered?'covered':'missing'}`} key={`${item.scope}:${item.stage || item.title}`}><span className="coverage-icon">{covered?<CheckCircle2 size={20}/>:<AlertTriangle size={20}/>}</span><div><strong>{item.title}</strong><p>{item.text}</p><small>{covered ? `${source?.isPrimary ? 'Основной токен' : source?.label || 'Токен подключён'}${item.stage ? ` · ${stageLabel(state)}` : ''}` : 'Нужна категория доступа'}</small></div></div>})}</div>
-      {connection.tokens?.length > 0 && <div className="token-manager"><div className="section-title-row"><div><span>Безопасное хранилище</span><h2>API-токены кабинета</h2></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Синхронизация':'Синхронизировать доступные разделы'}</button></div><div className="token-card-grid">{connection.tokens.map(item => <div className={`saved-token-card ${item.isPrimary?'primary-token-card':''}`} key={item.id}><div className="saved-token-head"><div className="token-shield"><ShieldCheck size={20}/></div><div><div className="token-title-line"><strong>{item.label}</strong>{item.isPrimary && <b className="primary-token-badge">Основной</b>}</div><span>{item.tokenType} · {item.readOnly?'только чтение':'чтение и запись'}</span></div><button className="token-remove" onClick={() => removeToken(item.id)} title="Удалить токен"><X size={17}/></button></div><div className="token-flow-coverage"><strong>{item.stageCoverageCount || 0}/{connection.stageTotal || item.stageTotal || 17} потоков</strong><span>{item.coversAllCoreFlows ? 'Покрывает всё рабочее ядро' : 'Используется только по своим категориям'}</span></div><div className="token-scopes">{item.scopeLabels?.map(scope => <b key={scope}>{scope}</b>)}</div><div className="token-card-foot"><small>До: {item.expiresAt?new Date(item.expiresAt).toLocaleDateString('ru-RU'):'не указано'} · код {item.fingerprint}</small>{!item.isPrimary && <button className="token-primary-btn" onClick={() => setPrimaryToken(item.id)}>Сделать основным</button>}</div></div>)}</div></div>}
+      {connection.tokens?.length > 0 && <div className="token-manager"><div className="section-title-row"><div><span>Безопасное хранилище</span><h2>API-токены кабинета</h2></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Синхронизация':'Синхронизировать доступные разделы'}</button></div><div className="token-card-grid">{connection.tokens.map(item => <div className={`saved-token-card ${item.isPrimary?'primary-token-card':''}`} key={item.id}><div className="saved-token-head"><div className="token-shield"><ShieldCheck size={20}/></div><div><div className="token-title-line"><strong>{item.label}</strong>{item.isPrimary && <b className="primary-token-badge">Основной</b>}</div><span>{item.tokenType} · {item.readOnly?'только чтение':'чтение и запись'}</span></div><button className="token-remove" onClick={() => removeToken(item.id)} title="Удалить токен"><X size={17}/></button></div><div className="token-flow-coverage"><strong>{item.stageCoverageCount || 0}/{connection.stageTotal || item.stageTotal || 22} потоков</strong><span>{item.coversAllCoreFlows ? 'Покрывает всё рабочее ядро' : 'Используется только по своим категориям'}</span></div><div className="token-scopes">{item.scopeLabels?.map(scope => <b key={scope}>{scope}</b>)}</div><div className="token-card-foot"><small>До: {item.expiresAt?new Date(item.expiresAt).toLocaleDateString('ru-RU'):'не указано'} · код {item.fingerprint}</small>{!item.isPrimary && <button className="token-primary-btn" onClick={() => setPrimaryToken(item.id)}>Сделать основным</button>}</div></div>)}</div></div>}
       <div className="connection-card add-token-card"><div className="connection-logo">WB</div><div className="connection-copy"><div className="connection-title"><h3>{connection.tokens?.length ? (connection.tokenMode === 'universal' ? 'Добавить резервный токен' : 'Дополнить недостающие категории') : 'Подключить основной токен'}</h3><span className={connection.tokens?.length?'connection-status connected':'connection-status'}>{connection.tokenMode === 'universal' ? 'Основной покрывает всё' : connection.tokens?.length ? `${connection.tokens.length} токен(а)` : 'Не подключён'}</span></div><p>{connection.tokenMode === 'universal' ? 'Основной токен уже покрывает рабочие потоки. Новый ключ добавляйте только как резервный или для будущих категорий — финансы, отзывы, чат и документы.' : 'Можно вставить один токен сразу со всеми нужными категориями. ELISEI автоматически сделает наиболее полный ключ основным и не будет дублировать запросы через остальные.'}</p><form className="token-form multi-token-form" onSubmit={saveConnection}><label>Название токена — необязательно<input type="text" value={tokenLabel} onChange={e => setTokenLabel(e.target.value)} placeholder={connection.tokens?.length ? 'Например: Резервный или Отзывы' : 'Например: Основной токен WB'} maxLength="80"/></label><label>API-ключ Wildberries</label><div className="token-input"><input type={showToken?'text':'password'} value={tokenDraft} onChange={e => setTokenDraft(e.target.value)} placeholder="Вставьте официальный API-ключ" autoComplete="off"/><button type="button" onClick={() => setShowToken(value => !value)}>{showToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>Категории определятся автоматически. Если ключ покрывает больше потоков, он станет основным. Сам токен обратно в браузер не возвращается.</small><button className="primary-btn" disabled={checking}>{checking?<><RefreshCw className="spin" size={17}/> Проверяем</>:<><PlugZap size={17}/> Проверить и добавить</>}</button></form></div></div>
       <div className="security-note"><ShieldCheck size={22}/><div><strong>Один токен — один набор запросов</strong><p>ELISEI не дублирует обращения к WB через запасные ключи. Для каждого потока выбирается основной токен, а дополнительный включается только при отсутствии нужной категории.</p></div></div>
       {connection.connected && <div className="connection-danger-zone"><div><strong>Отключить магазин полностью</strong><p>Удалятся токены и загруженные данные этого магазина.</p></div><button className="danger-btn" onClick={disconnect}>Отключить Wildberries</button></div>}
@@ -1162,8 +1212,8 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   }
 
   const renderers = {
-    'Главная':renderHome, 'Аналитика':renderAnalytics, 'Товары':renderProducts, 'Остатки':renderStocks,
-    'Финансы':renderFinance, 'Цены и акции':renderPricing, 'Реклама':renderAdvertising, 'Отзывы':renderReviews,
+    'Главная':renderHome, 'Аналитика':renderAnalytics, 'Товары':renderProducts, 'Остатки':renderStocks, 'История остатков':renderStockHistory,
+    'Финансы':renderFinance, 'Цены и акции':renderPricing, 'Реклама':renderAdvertising, 'Поисковые запросы':renderSearchQueries, 'Коммуникации':renderCommunications,
     'Сезонность':renderSeasonality, 'Отчёты':renderReports, 'Импорт данных':renderImport, 'AI CRM':renderCrm, 'Спросить ЭЛа':renderChat,
     'Подключения':renderConnections, 'Синхронизации':renderSyncHistory, 'Настройки':renderSettings,
   }

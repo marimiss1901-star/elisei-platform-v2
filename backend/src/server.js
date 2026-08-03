@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import crypto from 'node:crypto'
+import { inflateRawSync } from 'node:zlib'
 import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
@@ -384,17 +385,22 @@ const WB_SYNC_STAGES = Object.freeze({
   tariffs: { label: 'Тарифы и комиссии', scope: 'content' },
   funnel: { label: 'Воронка карточек', scope: 'analytics' },
   documents: { label: 'Документы WB', scope: 'documents' },
+  searchQueries: { label: 'Поисковые запросы', scope: 'analytics' },
+  stockHistory: { label: 'История остатков', scope: 'analytics' },
+  reviews: { label: 'Отзывы покупателей', scope: 'feedbacks' },
+  questions: { label: 'Вопросы покупателей', scope: 'feedbacks' },
+  chats: { label: 'Чаты с покупателями', scope: 'chat' },
 })
 const CORE_SYNC_SCOPES = [...new Set(Object.values(WB_SYNC_STAGES).map(item => item.scope))]
 const STOCK_DATA_SCHEMA_VERSION = 5
 const STOCK_DATA_SOURCE = 'wb_warehouse_remains'
 const STOCK_REPORT_PROFILE = 'article_barcode_size_v1'
-const HEAVY_SYNC_STAGES = Object.freeze(['finance','paidStorage','acceptance','acquiring','fbsArchive','measurementPenalties','deductionsReport'])
+const HEAVY_SYNC_STAGES = Object.freeze(['finance','paidStorage','acceptance','acquiring','fbsArchive','measurementPenalties','deductionsReport','searchQueries','stockHistory','reviews','questions','chats'])
 const HEAVY_PAGE_LIMIT = Math.max(500, Math.min(5000, Number(process.env.WB_HEAVY_PAGE_LIMIT || 2500)))
 const HEAVY_DB_BATCH_SIZE = Math.max(100, Math.min(500, Number(process.env.WB_HEAVY_DB_BATCH_SIZE || 250)))
 const HEAVY_STAGE_COOLDOWN_MS = Math.max(5000, Number(process.env.WB_HEAVY_STAGE_COOLDOWN_MS || 65000))
 const FBS_ARCHIVE_MONTHS = Math.max(1, Math.min(60, Number(process.env.WB_FBS_ARCHIVE_MONTHS || 24)))
-const EXTENDED_OBJECT_STAGES = new Set(['fbsArchive','measurementPenalties','deductionsReport','goodsReturns','tariffs','funnel','documents'])
+const EXTENDED_OBJECT_STAGES = new Set(['fbsArchive','measurementPenalties','deductionsReport','goodsReturns','tariffs','funnel','documents','searchQueries','stockHistory','reviews','questions','chats'])
 
 function decodeJwtPayload(value, invalidMessage) {
   try {
@@ -563,6 +569,128 @@ async function wbFetch(url, token, options = {}) {
     throw error
   }
   throw lastError || Object.assign(new Error(`${label}: запрос не выполнен`), { status: 502 })
+}
+
+
+async function wbFetchBuffer(url, token, options = {}) {
+  const {
+    timeoutMs = 60000,
+    deadlineAt = 0,
+    label = 'WB API',
+    ...fetchOptions
+  } = options
+  const remainingMs = deadlineAt ? deadlineAt - Date.now() : timeoutMs
+  if (remainingMs <= 1000) throw Object.assign(new Error(`${label}: достигнут общий лимит времени синхронизации`), { status:504 })
+  let response
+  try {
+    response = await fetch(url, {
+      ...fetchOptions,
+      headers:{ ...authHeaders(token), Accept:'application/zip,text/csv,*/*', ...(fetchOptions.headers || {}) },
+      signal:AbortSignal.timeout(Math.max(1000,Math.min(timeoutMs,remainingMs))),
+    })
+  } catch (cause) {
+    throw Object.assign(new Error(`${label}: сеть или таймаут запроса`), { status:502,cause })
+  }
+  if (response.ok) return Buffer.from(await response.arrayBuffer())
+  const text = await response.text()
+  let payload = null
+  try { payload = text ? JSON.parse(text) : null } catch { payload = text }
+  const requestId = response.headers.get('x-request-id') || payload?.requestId || ''
+  const detail = payload?.detail || payload?.message || payload?.title || `Wildberries API: ${response.status}`
+  const error = Object.assign(new Error(`${label}: ${detail}${requestId ? ` (requestId: ${requestId})` : ''}`), {
+    status:response.status,payload,requestId,
+  })
+  if (response.status === 429) {
+    const retrySeconds = retryAfterSeconds(response,0)
+    error.retryAfterSeconds = retrySeconds
+    error.nextAllowedAt = new Date(Date.now()+retrySeconds*1000).toISOString()
+    error.message = `${label}: Wildberries установил паузу ${humanWait(retrySeconds)}. ELISEI повторит загрузку автоматически.`
+  }
+  throw error
+}
+
+function readZipEntries(buffer) {
+  const MAX_ZIP_ENTRIES = 32
+  const MAX_ZIP_UNCOMPRESSED_BYTES = 180 * 1024 * 1024
+  const entries = []
+  let eocd = -1
+  for (let offset = buffer.length - 22; offset >= Math.max(0,buffer.length - 65557); offset -= 1) {
+    if (buffer.readUInt32LE(offset) === 0x06054b50) { eocd = offset; break }
+  }
+  if (eocd < 0) return entries
+  const totalEntries = buffer.readUInt16LE(eocd + 10)
+  if (totalEntries > MAX_ZIP_ENTRIES) throw Object.assign(new Error('История остатков WB: слишком много файлов в ZIP-архиве'), { status:502 })
+  let centralOffset = buffer.readUInt32LE(eocd + 16)
+  let totalUncompressed = 0
+  for (let index = 0; index < totalEntries && centralOffset + 46 <= buffer.length; index += 1) {
+    if (buffer.readUInt32LE(centralOffset) !== 0x02014b50) break
+    const flags = buffer.readUInt16LE(centralOffset + 8)
+    const method = buffer.readUInt16LE(centralOffset + 10)
+    const compressedSize = buffer.readUInt32LE(centralOffset + 20)
+    const uncompressedSize = buffer.readUInt32LE(centralOffset + 24)
+    const fileNameLength = buffer.readUInt16LE(centralOffset + 28)
+    const extraLength = buffer.readUInt16LE(centralOffset + 30)
+    const commentLength = buffer.readUInt16LE(centralOffset + 32)
+    const localOffset = buffer.readUInt32LE(centralOffset + 42)
+    const name = buffer.subarray(centralOffset + 46, centralOffset + 46 + fileNameLength).toString('utf8')
+    centralOffset += 46 + fileNameLength + extraLength + commentLength
+    if ((flags & 1) === 1) throw Object.assign(new Error('История остатков WB: зашифрованный ZIP не поддерживается'), { status:502 })
+    totalUncompressed += uncompressedSize
+    if (totalUncompressed > MAX_ZIP_UNCOMPRESSED_BYTES) throw Object.assign(new Error('История остатков WB: архив превышает безопасный размер распаковки'), { status:413 })
+    if (!name || name.endsWith('/') || localOffset + 30 > buffer.length || buffer.readUInt32LE(localOffset) !== 0x04034b50) continue
+    const localNameLength = buffer.readUInt16LE(localOffset + 26)
+    const localExtraLength = buffer.readUInt16LE(localOffset + 28)
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength
+    if (dataStart + compressedSize > buffer.length) throw Object.assign(new Error('История остатков WB: повреждён ZIP-архив'), { status:502 })
+    const compressed = buffer.subarray(dataStart,dataStart+compressedSize)
+    let data
+    if (method === 0) data = compressed
+    else if (method === 8) data = inflateRawSync(compressed, { maxOutputLength:MAX_ZIP_UNCOMPRESSED_BYTES })
+    else continue
+    entries.push({ name,data })
+  }
+  return entries
+}
+
+function detectCsvDelimiter(text) {
+  const line = String(text || '').split(/\r?\n/,1)[0] || ''
+  const candidates = [',',';','\t']
+  return candidates.sort((a,b)=>(line.split(b).length-line.split(a).length))[0]
+}
+
+function parseCsvRows(text) {
+  const source = String(text || '').replace(/^\uFEFF/,'')
+  const delimiter = detectCsvDelimiter(source)
+  const matrix = []
+  let row = [], value = '', quoted = false
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index]
+    if (quoted) {
+      if (char === '"' && source[index+1] === '"') { value += '"'; index += 1 }
+      else if (char === '"') quoted = false
+      else value += char
+      continue
+    }
+    if (char === '"') quoted = true
+    else if (char === delimiter) { row.push(value); value = '' }
+    else if (char === '\n') { row.push(value.replace(/\r$/,'')); matrix.push(row); row=[]; value='' }
+    else value += char
+  }
+  if (value || row.length) { row.push(value.replace(/\r$/,'')); matrix.push(row) }
+  const headers = (matrix.shift() || []).map((header,index)=>String(header || `column_${index+1}`).trim())
+  return matrix.filter(values=>values.some(cell=>String(cell).trim())).map(values=>Object.fromEntries(headers.map((header,index)=>{
+    const raw = String(values[index] ?? '').trim()
+    const numeric = /^-?\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : raw
+    return [header,numeric]
+  })))
+}
+
+function parseZipCsvRows(buffer) {
+  const entries = readZipEntries(buffer)
+  if (!entries.length) throw Object.assign(new Error('История остатков WB: ZIP-архив не содержит CSV-файл'), { status:502 })
+  return entries
+    .filter(entry=>/\.csv$/i.test(entry.name) || entries.length === 1)
+    .flatMap(entry=>parseCsvRows(entry.data.toString('utf8')).map(row=>({ sourceFile:entry.name,...row })))
 }
 
 async function probeToken(token) {
@@ -1261,6 +1389,11 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     paidStorage: stageStatus.paidStorage?.available ?? paidStorageRows.length > 0,
     acceptance: stageStatus.acceptance?.available ?? acceptanceRows.length > 0,
     acquiring: stageStatus.acquiring?.available ?? acquiringRows.length > 0,
+    searchQueries: stageStatus.searchQueries?.available ?? Number(data?.searchQueries?.totalRows || 0) > 0,
+    stockHistory: stageStatus.stockHistory?.available ?? Number(data?.stockHistory?.totalRows || 0) > 0,
+    reviews: stageStatus.reviews?.available ?? Number(data?.reviews?.totalRows || 0) > 0,
+    questions: stageStatus.questions?.available ?? Number(data?.questions?.totalRows || 0) > 0,
+    chats: stageStatus.chats?.available ?? Number(data?.chats?.totalRows || 0) > 0,
   }
   const periodDays = Math.max(1, Math.min(366, Number(data?.__periodDays || 30)))
   const productMap = new Map()
@@ -1614,7 +1747,10 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
         photo: item?.photo || '',
         spend, views, clicks, orders: adOrders, revenue: adRevenue,
         ctr: views > 0 ? clicks / views * 100 : null,
+        cpc: clicks > 0 ? spend / clicks : null,
         crr: adRevenue > 0 ? spend / adRevenue * 100 : null,
+        romi: spend > 0 ? (adRevenue - spend) / spend * 100 : null,
+        orderConversion: clicks > 0 ? adOrders / clicks * 100 : null,
         mapped: Boolean(item),
       })
     }
@@ -1631,7 +1767,8 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
           barcode: item?.barcode || '',
           title: item?.title || 'Товар',
           photo: item?.photo || '',
-          spend:null, views:null, clicks:null, orders:null, revenue:null, ctr:null, crr:null,
+          spend:null, views:null, clicks:null, orders:null, revenue:null,
+          ctr:null, cpc:null, crr:null, romi:null, orderConversion:null,
           mapped:Boolean(item), statsAvailable:false,
         })
       }
@@ -1974,6 +2111,13 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     },
     settings,
     availability,
+    engagement:{
+      searchQueries:data?.searchQueries || {rows:[],totalRows:0,complete:false},
+      stockHistory:data?.stockHistory || {rows:[],totalRows:0,complete:false},
+      reviews:data?.reviews || {rows:[],totalRows:0,complete:false},
+      questions:data?.questions || {rows:[],totalRows:0,complete:false},
+      chats:data?.chats || {rows:[],totalRows:0,complete:false},
+    },
     stageStatus,
     stockMeta: stockMeta ? {
       ...stockMeta,
@@ -2014,6 +2158,7 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
       campaigns: rawCampaigns,
       productRows: campaignProductRows,
       totals: advertisingData.totals || {},
+      daily: Array.isArray(advertisingData.daily) ? advertisingData.daily : [],
       period: advertisingData.period || null,
       truncated: Boolean(advertisingData.truncated),
       totalCampaigns: advertisingData.totalCampaigns || rawCampaigns.length,
@@ -3227,6 +3372,493 @@ async function loadFunnel(token, { deadlineAt = 0 } = {}) {
   return { value:compactExtendedValue({rows,totalRows:rows.length,period}),rawPayload:payload,validation:{rows:rows.length,period},endpoint }
 }
 
+
+
+
+function streamCooldownMs(stage, tokenInfo = null) {
+  // Коммуникации WB имеют общий лимит 3 запроса/сек. Не растягиваем
+  // загрузку отзывов, вопросов и чатов на часы даже для базового токена.
+  if (['reviews','questions','chats'].includes(stage)) return 1200
+  const baseWithoutSecret = Number(tokenInfo?.typeId || 0) === 1 && !wbClientSecret
+  if (!baseWithoutSecret) {
+    if (['searchQueries','stockHistory'].includes(stage)) return 21000
+    return 1200
+  }
+  if (stage === 'searchQueries') return 60 * 60 * 1000
+  if (stage === 'stockHistory') return 30 * 60 * 1000
+  return 1200
+}
+
+function engagementRowKey(stage, row = {}, index = 0) {
+  const explicit = row.eventID ?? row.eventId ?? row.feedbackId ?? row.questionId ?? row.id ?? row.chatID ?? row.chatId
+  if (explicit != null && String(explicit).trim()) return `${stage}:${String(row.rowType || 'row')}:id:${String(explicit).trim()}`
+  const identity = [
+    row.rowType || '',
+    row.nmId ?? row.nmID ?? row.nm_id ?? '',
+    row.searchText ?? row.searchQuery ?? row.query ?? row.text ?? '',
+    row.userName ?? row.user_name ?? '',
+    row.createdDate ?? row.createdAt ?? row.created_at ?? row.date ?? '',
+    row.subjectId ?? row.subjectID ?? '',
+    row.brandName ?? row.brand ?? '',
+    index,
+  ].join('|')
+  return `${stage}:sha:${crypto.createHash('sha1').update(identity).digest('hex')}`
+}
+
+async function compactPersistedObjectStream(connectionId, stream, syncId, {
+  period = null,
+  extra = {},
+  sampleLimit = 100,
+} = {}) {
+  const totalRows = await countStreamItems(pool,{connectionId,stream,syncId})
+  const sample = await loadStreamItemPage(pool,{connectionId,stream,syncId,afterKey:'',limit:sampleLimit})
+  await finalizeStreamItems(pool,{connectionId,stream,syncId})
+  return compactExtendedValue({
+    rows:sample.map(item=>item.payload),
+    totalRows,
+    syncId,
+    period,
+    extra,
+  })
+}
+
+function searchReportRows(payload) {
+  return extractExtendedRows(payload,['groups','products','items','searchTexts'])
+}
+
+async function advanceSearchQueriesTask(connectionId, token, state, data, { deadlineAt = 0, tokenInfo = null } = {}) {
+  const period = state?.metadata?.period || reportPeriod(30)
+  const syncId = String(state?.metadata?.syncId || crypto.randomUUID())
+  const phase = String(state?.metadata?.phase || 'overview')
+  const offset = Math.max(0,Number(state?.metadata?.offset || 0))
+  const pageNumber = Math.max(0,Number(state?.metadata?.pageNumber || 0))
+  const summary = state?.metadata?.summary && typeof state.metadata.summary === 'object' ? state.metadata.summary : {}
+  // Детальные фразы по товару WB разрешает запрашивать максимум за 7 дней.
+  const detailPeriod = state?.metadata?.detailPeriod || reportPeriod(7)
+
+  if (phase === 'overview') {
+    const endpoint = 'https://seller-analytics-api.wildberries.ru/api/v2/search-report/report'
+    const payload = await wbFetch(endpoint,token,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        currentPeriod:{start:period.dateFrom,end:period.dateTo},
+        positionCluster:'all',
+        orderBy:{field:'orders',mode:'desc'},
+        includeSubstitutedSKUs:true,
+        includeSearchTexts:true,
+        limit:1000,
+        offset,
+      }),
+      label:'Поисковые запросы WB',timeoutMs:60000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+    })
+    const rows = searchReportRows(payload).map(row=>({rowType:'group',...row}))
+    await saveStreamItemBatch(pool,{
+      connectionId,stream:'searchQueries',syncId,rows,
+      keyOf:(row,index)=>engagementRowKey('searchQueries',row,offset+index),batchSize:HEAVY_DB_BATCH_SIZE,
+    })
+    const persistedCount = await countStreamItems(pool,{connectionId,stream:'searchQueries',syncId})
+    const nextSummary = {
+      ...summary,
+      commonInfo:payload?.data?.commonInfo || payload?.commonInfo || null,
+      positionInfo:payload?.data?.positionInfo || payload?.positionInfo || null,
+      visibilityInfo:payload?.data?.visibilityInfo || payload?.visibilityInfo || null,
+      currency:payload?.data?.currency || payload?.currency || null,
+    }
+    if (rows.length >= 1000) {
+      return {pending:true,nextAllowedAt:new Date(Date.now()+streamCooldownMs('searchQueries',tokenInfo)).toISOString(),metadata:{period,syncId,phase,offset:offset+rows.length,pageNumber:pageNumber+1,persistedCount,summary:nextSummary}}
+    }
+    return {pending:true,nextAllowedAt:new Date(Date.now()+streamCooldownMs('searchQueries',tokenInfo)).toISOString(),metadata:{period,detailPeriod,syncId,phase:'products',offset:0,pageNumber:pageNumber+1,productOffset:0,persistedCount,summary:nextSummary}}
+  }
+
+  const nmIds = [...new Set((Array.isArray(data?.products) ? data.products : []).flatMap(productNmIds).map(Number).filter(Number.isFinite))]
+  const productOffset = Math.max(0,Number(state?.metadata?.productOffset || 0))
+  if (!nmIds.length || productOffset >= nmIds.length) {
+    const value = await compactPersistedObjectStream(connectionId,'searchQueries',syncId,{period,extra:{summary,detailPeriod,productsScanned:nmIds.length,complete:true}})
+    return {pending:false,value,validation:{period,detailPeriod,totalRows:value.totalRows,productsScanned:nmIds.length,pages:pageNumber,memorySafe:true},endpoint:'https://seller-analytics-api.wildberries.ru/api/v2/search-report/report + /product/search-texts'}
+  }
+
+  const batch = nmIds.slice(productOffset,productOffset+50)
+  const endpoint = 'https://seller-analytics-api.wildberries.ru/api/v2/search-report/product/search-texts'
+  const payload = await wbFetch(endpoint,token,{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      currentPeriod:{start:detailPeriod.dateFrom,end:detailPeriod.dateTo},
+      nmIds:batch,
+      topOrderBy:'orders',
+      includeSubstitutedSKUs:true,
+      includeSearchTexts:true,
+      orderBy:{field:'orders',mode:'desc'},
+      limit:30,
+    }),
+    label:'Поисковые фразы по товарам WB',timeoutMs:60000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+  })
+  const rows = searchReportRows(payload).map(row=>({rowType:'query',...row}))
+  await saveStreamItemBatch(pool,{
+    connectionId,stream:'searchQueries',syncId,rows,
+    keyOf:(row,index)=>engagementRowKey('searchQueries',row,productOffset*1000+index),batchSize:HEAVY_DB_BATCH_SIZE,
+  })
+  const persistedCount = await countStreamItems(pool,{connectionId,stream:'searchQueries',syncId})
+  const nextProductOffset = productOffset + batch.length
+  if (nextProductOffset < nmIds.length) {
+    return {pending:true,nextAllowedAt:new Date(Date.now()+streamCooldownMs('searchQueries',tokenInfo)).toISOString(),metadata:{period,detailPeriod,syncId,phase:'products',offset:0,pageNumber:pageNumber+1,productOffset:nextProductOffset,persistedCount,summary}}
+  }
+  const value = await compactPersistedObjectStream(connectionId,'searchQueries',syncId,{period,extra:{summary,detailPeriod,productsScanned:nmIds.length,complete:true}})
+  return {pending:false,value,validation:{period,detailPeriod,totalRows:value.totalRows,productsScanned:nmIds.length,pages:pageNumber+1,memorySafe:true},endpoint:'https://seller-analytics-api.wildberries.ru/api/v2/search-report/report + /product/search-texts'}
+}
+
+function firstRowValue(row, keys = []) {
+  for (const key of keys) {
+    const value = row?.[key]
+    if (value !== undefined && value !== null && String(value).trim() !== '') return value
+  }
+  return null
+}
+
+function normalizeStockHistoryRow(row = {}) {
+  const date = firstRowValue(row,['date','dt','reportDate','Дата','День'])
+  const quantity = firstRowValue(row,['quantity','stockCount','stocks','stock','остаток','Остаток','Остаток, шт.'])
+  return {
+    rowType:'daily',
+    sourceFile:row.sourceFile || null,
+    date:date == null ? null : String(date).slice(0,10),
+    nmID:firstRowValue(row,['nmID','nmId','nm_id','Артикул WB','Номенклатура']),
+    vendorCode:firstRowValue(row,['vendorCode','supplierArticle','sa_name','Артикул продавца','Артикул поставщика']),
+    title:firstRowValue(row,['title','name','Название','Предмет']),
+    warehouse:firstRowValue(row,['warehouseName','warehouse','officeName','Склад','Название склада']),
+    quantity:quantity == null || Number.isNaN(Number(quantity)) ? null : Number(quantity),
+    inWayToClient:Number(firstRowValue(row,['inWayToClient','in_way_to_client','В пути к клиенту']) || 0),
+    inWayFromClient:Number(firstRowValue(row,['inWayFromClient','in_way_from_client','В пути от клиента']) || 0),
+    raw:row,
+  }
+}
+
+function summarizeStockHistory(rows = []) {
+  const byDate = new Map()
+  const products = new Set()
+  const warehouses = new Set()
+  for (const row of rows) {
+    const date = row.date || 'Без даты'
+    const current = byDate.get(date) || { date,quantity:0,rows:0 }
+    current.quantity += Number(row.quantity || 0)
+    current.rows += 1
+    byDate.set(date,current)
+    if (row.nmID != null) products.add(String(row.nmID))
+    if (row.warehouse) warehouses.add(String(row.warehouse))
+  }
+  const daily = [...byDate.values()].sort((a,b)=>String(a.date).localeCompare(String(b.date)))
+  return {
+    dates:daily.length,
+    products:products.size,
+    warehouses:warehouses.size,
+    latestDate:daily.at(-1)?.date || null,
+    latestQuantity:daily.at(-1)?.quantity ?? null,
+    daily:daily.slice(-100),
+  }
+}
+
+function mergeEngagementSummary(current = {}, rows = [], phase = '') {
+  const next = {
+    ...current,
+    total:Number(current.total || 0) + rows.length,
+    phases:{ ...(current.phases || {}), [phase]:Number(current.phases?.[phase] || 0) + rows.length },
+    answered:Number(current.answered || 0),
+    unanswered:Number(current.unanswered || 0),
+    archived:Number(current.archived || 0),
+    ratings:{ ...(current.ratings || {}) },
+  }
+  for (const row of rows) {
+    if (row.archived) next.archived += 1
+    else if (row.isAnswered) next.answered += 1
+    else next.unanswered += 1
+    const rating = Number(row.productValuation ?? row.valuation ?? row.rating ?? 0)
+    if (rating >= 1 && rating <= 5) next.ratings[rating] = Number(next.ratings[rating] || 0) + 1
+  }
+  return next
+}
+
+function sanitizeChatObject(value) {
+  if (Array.isArray(value)) return value.map(sanitizeChatObject)
+  if (!value || typeof value !== 'object') return value
+  const safe = {}
+  for (const [key,nested] of Object.entries(value)) {
+    const normalized = String(key).replace(/[_-]/g,'').toLowerCase()
+    if (['replysign','signature'].includes(normalized)) continue
+    safe[key] = sanitizeChatObject(nested)
+  }
+  return safe
+}
+
+async function advanceStockHistoryTask(connectionId, token, state, { deadlineAt = 0, tokenInfo = null } = {}) {
+  const period = state?.metadata?.period || reportPeriod(90)
+  const syncId = String(state?.metadata?.syncId || crypto.randomUUID())
+  const reportId = String(state?.metadata?.reportId || state?.task_id || crypto.randomUUID())
+  const phase = String(state?.metadata?.phase || 'create')
+  const base = 'https://seller-analytics-api.wildberries.ru/api/v2/nm-report/downloads'
+  const cooldown = streamCooldownMs('stockHistory',tokenInfo)
+
+  if (phase === 'create') {
+    await wbFetch(base,token,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        id:reportId,
+        reportType:'STOCK_HISTORY_DAILY_CSV',
+        userReportName:`ELISEI — история остатков ${period.dateFrom}–${period.dateTo}`,
+        params:{
+          nmIds:[],subjectIds:[],brandNames:[],tagIds:[],
+          currentPeriod:{start:period.dateFrom,end:period.dateTo},
+          stockType:'',skipDeletedNm:true,
+        },
+      }),
+      label:'Создание ежедневной истории остатков WB',timeoutMs:45000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+    })
+    return {
+      pending:true,status:'pending',taskId:reportId,
+      nextAllowedAt:new Date(Date.now()+cooldown).toISOString(),
+      metadata:{period,syncId,reportId,phase:'poll',pollAttempts:0,persistedCount:0,reportType:'STOCK_HISTORY_DAILY_CSV'},
+    }
+  }
+
+  const filter = new URLSearchParams()
+  filter.append('filter[downloadIds]',reportId)
+  const payload = await wbFetch(`${base}?${filter.toString()}`,token,{
+    label:'Проверка ежедневной истории остатков WB',timeoutMs:30000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+  })
+  const reports = extractExtendedRows(payload,['data'])
+  const report = reports.find(item=>String(item?.id || item?.downloadId || '') === reportId) || reports[0] || null
+  const reportStatus = String(report?.status || '').toUpperCase()
+  if (!report || ['NEW','PROCESSING','PENDING','IN_PROGRESS','QUEUED'].includes(reportStatus)) {
+    const pollAttempts = Math.max(0,Number(state?.metadata?.pollAttempts || 0))+1
+    return {
+      pending:true,status:'pending',taskId:reportId,
+      nextAllowedAt:new Date(Date.now()+cooldown).toISOString(),
+      metadata:{...(state?.metadata||{}),period,syncId,reportId,phase:'poll',pollAttempts,reportStatus:reportStatus||'PROCESSING',persistedCount:Number(state?.metadata?.persistedCount||0)},
+    }
+  }
+  if (reportStatus === 'FAILED') {
+    await wbFetch(`${base}/retry`,token,{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({downloadId:reportId}),
+      label:'Повторная генерация истории остатков WB',timeoutMs:30000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+    })
+    return {
+      pending:true,status:'pending',taskId:reportId,
+      nextAllowedAt:new Date(Date.now()+cooldown).toISOString(),
+      metadata:{...(state?.metadata||{}),period,syncId,reportId,phase:'poll',pollAttempts:0,reportStatus:'RETRY',persistedCount:Number(state?.metadata?.persistedCount||0)},
+    }
+  }
+  if (!['SUCCESS','DONE','READY'].includes(reportStatus)) {
+    throw Object.assign(new Error(`История остатков WB: неизвестный статус отчёта ${reportStatus || 'без статуса'}`), { status:502 })
+  }
+
+  const zip = await wbFetchBuffer(`${base}/file/${encodeURIComponent(reportId)}`,token,{
+    label:'Загрузка ежедневной истории остатков WB',timeoutMs:90000,deadlineAt,
+  })
+  const rows = parseZipCsvRows(zip).map(normalizeStockHistoryRow)
+  const summary = summarizeStockHistory(rows)
+  await saveStreamItemBatch(pool,{
+    connectionId,stream:'stockHistory',syncId,rows,
+    keyOf:(row,index)=>engagementRowKey('stockHistory',row,index),batchSize:HEAVY_DB_BATCH_SIZE,
+  })
+  const persistedCount = await countStreamItems(pool,{connectionId,stream:'stockHistory',syncId})
+  const value = await compactPersistedObjectStream(connectionId,'stockHistory',syncId,{
+    period,extra:{complete:true,reportId,reportType:'STOCK_HISTORY_DAILY_CSV',source:'wb_csv_zip',summary},
+  })
+  return {
+    pending:false,value,
+    validation:{period,totalRows:persistedCount,reportId,reportType:'STOCK_HISTORY_DAILY_CSV',sourceFiles:[...new Set(rows.map(row=>row.sourceFile).filter(Boolean))],summary,persistedInBatches:true},
+    endpoint:`${base}/file/${reportId}`,
+  }
+}
+
+
+const QUESTION_HISTORY_START_UNIX = Math.floor(Date.UTC(2010,0,1) / 1000)
+
+function initialQuestionWindows() {
+  return [{ from:QUESTION_HISTORY_START_UNIX, to:Math.floor(Date.now()/1000) }]
+}
+
+async function finishQuestionsPhase(connectionId, syncId, phase, pageNumber, persistedCount, summary, tokenInfo) {
+  if (phase === 'unanswered') {
+    return {
+      pending:true,
+      nextAllowedAt:new Date(Date.now()+streamCooldownMs('questions',tokenInfo)).toISOString(),
+      metadata:{ syncId,phase:'answered',questionStep:'count',windows:initialQuestionWindows(),pageNumber,persistedCount,summary },
+    }
+  }
+  const value = await compactPersistedObjectStream(connectionId,'questions',syncId,{
+    extra:{complete:true,summary,truncated:Number(summary?.truncated || 0) > 0},
+  })
+  return {
+    pending:false,value,
+    validation:{totalRows:value.totalRows,pages:pageNumber,truncated:Number(summary?.truncated || 0),persistedInBatches:true},
+    endpoint:'https://feedbacks-api.wildberries.ru/api/v1/questions',
+  }
+}
+
+async function advanceQuestionsTask(connectionId, token, state, { deadlineAt = 0, tokenInfo = null } = {}) {
+  const syncId = String(state?.metadata?.syncId || crypto.randomUUID())
+  const phase = String(state?.metadata?.phase || 'unanswered')
+  const answered = phase === 'answered'
+  const pageNumber = Math.max(0,Number(state?.metadata?.pageNumber || 0))
+  const summary = state?.metadata?.summary && typeof state.metadata.summary === 'object' ? state.metadata.summary : {}
+  const windows = Array.isArray(state?.metadata?.windows) && state.metadata.windows.length
+    ? state.metadata.windows.map(item=>({from:Number(item.from),to:Number(item.to)})).filter(item=>Number.isFinite(item.from)&&Number.isFinite(item.to)&&item.to>=item.from)
+    : initialQuestionWindows()
+  const questionStep = String(state?.metadata?.questionStep || 'count')
+  const persistedCount = await countStreamItems(pool,{connectionId,stream:'questions',syncId})
+  if (!windows.length) return finishQuestionsPhase(connectionId,syncId,phase,pageNumber,persistedCount,summary,tokenInfo)
+
+  const current = windows[0]
+  const rest = windows.slice(1)
+  const baseParams = new URLSearchParams({
+    isAnswered:String(answered),
+    dateFrom:String(Math.floor(current.from)),
+    dateTo:String(Math.floor(current.to)),
+  })
+  const cooldown = streamCooldownMs('questions',tokenInfo)
+
+  if (questionStep === 'count') {
+    const countEndpoint = `https://feedbacks-api.wildberries.ru/api/v1/questions/count?${baseParams.toString()}`
+    const payload = await wbFetch(countEndpoint,token,{
+      label:'Количество вопросов покупателей WB',timeoutMs:45000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+    })
+    const count = Math.max(0,Number(payload?.data ?? payload?.count ?? payload ?? 0) || 0)
+    if (count > 10000 && current.to > current.from) {
+      const midpoint = Math.floor((current.from + current.to) / 2)
+      const split = [{from:midpoint+1,to:current.to},{from:current.from,to:midpoint},...rest]
+      return {
+        pending:true,nextAllowedAt:new Date(Date.now()+cooldown).toISOString(),
+        metadata:{syncId,phase,questionStep:'count',windows:split,pageNumber:pageNumber+1,persistedCount,summary},
+      }
+    }
+    if (count === 0) {
+      if (!rest.length) return finishQuestionsPhase(connectionId,syncId,phase,pageNumber+1,persistedCount,summary,tokenInfo)
+      return {
+        pending:true,nextAllowedAt:new Date(Date.now()+cooldown).toISOString(),
+        metadata:{syncId,phase,questionStep:'count',windows:rest,pageNumber:pageNumber+1,persistedCount,summary},
+      }
+    }
+    return {
+      pending:true,nextAllowedAt:new Date(Date.now()+cooldown).toISOString(),
+      metadata:{syncId,phase,questionStep:'fetch',windows,currentWindowCount:count,pageNumber:pageNumber+1,persistedCount,summary},
+    }
+  }
+
+  const expected = Math.max(1,Math.min(10000,Number(state?.metadata?.currentWindowCount || 10000)))
+  const listParams = new URLSearchParams(baseParams)
+  listParams.set('take',String(expected))
+  listParams.set('skip','0')
+  listParams.set('order','dateDesc')
+  const endpoint = `https://feedbacks-api.wildberries.ru/api/v1/questions?${listParams.toString()}`
+  const payload = await wbFetch(endpoint,token,{
+    label:'Вопросы покупателей WB',timeoutMs:90000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+  })
+  const rows = extractExtendedRows(payload,['questions']).map(row=>({...row,rowType:'questions',isAnswered:answered,archived:false}))
+  await saveStreamItemBatch(pool,{
+    connectionId,stream:'questions',syncId,rows,
+    keyOf:(row,index)=>engagementRowKey('questions',row,index),batchSize:HEAVY_DB_BATCH_SIZE,
+  })
+  const nextPersistedCount = await countStreamItems(pool,{connectionId,stream:'questions',syncId})
+  const nextSummary = mergeEngagementSummary(summary,rows,phase)
+  const expectedCount = Number(state?.metadata?.currentWindowCount || rows.length)
+  if (expectedCount > rows.length) nextSummary.truncated = Number(nextSummary.truncated || 0) + (expectedCount - rows.length)
+  if (!rest.length) return finishQuestionsPhase(connectionId,syncId,phase,pageNumber+1,nextPersistedCount,nextSummary,tokenInfo)
+  return {
+    pending:true,nextAllowedAt:new Date(Date.now()+cooldown).toISOString(),
+    metadata:{syncId,phase,questionStep:'count',windows:rest,pageNumber:pageNumber+1,persistedCount:nextPersistedCount,summary:nextSummary},
+  }
+}
+
+async function advanceFeedbackTask(stage, connectionId, token, state, { deadlineAt = 0, tokenInfo = null } = {}) {
+  if (stage === 'questions') return advanceQuestionsTask(connectionId,token,state,{deadlineAt,tokenInfo})
+  const plural = 'feedbacks'
+  const label = stage === 'reviews' ? 'Отзывы покупателей WB' : 'Вопросы покупателей WB'
+  const syncId = String(state?.metadata?.syncId || crypto.randomUUID())
+  const phase = String(state?.metadata?.phase || 'unanswered')
+  const skip = Math.max(0,Number(state?.metadata?.skip || 0))
+  const pageNumber = Math.max(0,Number(state?.metadata?.pageNumber || 0))
+  const take = stage === 'reviews' ? 5000 : 10000
+  const archived = stage === 'reviews' && phase === 'archive'
+  const answered = phase === 'answered'
+  const params = new URLSearchParams({ take:String(take),skip:String(skip),order:'dateDesc' })
+  if (!archived) params.set('isAnswered',String(answered))
+  const endpoint = `https://feedbacks-api.wildberries.ru/api/v1/${plural}${archived ? '/archive' : ''}?${params.toString()}`
+  const payload = await wbFetch(endpoint,token,{
+    label,timeoutMs:90000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+  })
+  const rows = extractExtendedRows(payload,[plural]).map(row=>({
+    ...row,
+    rowType:stage,
+    isAnswered:archived ? Boolean(row?.answer) : answered,
+    archived,
+  }))
+  await saveStreamItemBatch(pool,{
+    connectionId,stream:stage,syncId,rows,
+    keyOf:(row,index)=>engagementRowKey(stage,row,skip+index),batchSize:HEAVY_DB_BATCH_SIZE,
+  })
+  const persistedCount = await countStreamItems(pool,{connectionId,stream:stage,syncId})
+  const cooldown = streamCooldownMs(stage,tokenInfo)
+  const summary = mergeEngagementSummary(state?.metadata?.summary || {},rows,phase)
+  const phaseCanContinue = stage === 'reviews' && rows.length >= take && skip + rows.length <= 199990
+  if (phaseCanContinue) {
+    return {pending:true,nextAllowedAt:new Date(Date.now()+cooldown).toISOString(),metadata:{syncId,phase,skip:skip+rows.length,pageNumber:pageNumber+1,persistedCount,summary}}
+  }
+  if (phase === 'unanswered') {
+    const nextPhase = stage === 'reviews' ? 'archive' : 'answered'
+    return {pending:true,nextAllowedAt:new Date(Date.now()+cooldown).toISOString(),metadata:{syncId,phase:nextPhase,skip:0,pageNumber:pageNumber+1,persistedCount,summary}}
+  }
+  const truncated = stage === 'questions' && rows.length >= take
+  const value = await compactPersistedObjectStream(connectionId,stage,syncId,{extra:{complete:true,includesArchive:stage==='reviews',summary,truncated}})
+  return {
+    pending:false,value,
+    validation:{totalRows:value.totalRows,pages:pageNumber+1,includesArchive:stage==='reviews',truncated,persistedInBatches:true},
+    endpoint:`https://feedbacks-api.wildberries.ru/api/v1/${plural}`,
+  }
+}
+
+async function advanceChatsTask(connectionId, token, state, { deadlineAt = 0, tokenInfo = null } = {}) {
+  const syncId = String(state?.metadata?.syncId || crypto.randomUUID())
+  const phase = String(state?.metadata?.phase || 'chats')
+  const pageNumber = Math.max(0,Number(state?.metadata?.pageNumber || 0))
+  const cursor = state?.metadata?.cursor == null ? '' : String(state.metadata.cursor)
+  const base = 'https://buyer-chat-api.wildberries.ru/api/v1/seller'
+
+  if (phase === 'chats') {
+    const endpoint = `${base}/chats`
+    const payload = await wbFetch(endpoint,token,{
+      label:'Список чатов WB',timeoutMs:60000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+    })
+    const sourceRows = Array.isArray(payload?.result) ? payload.result : extractExtendedRows(payload,['chats'])
+    const rows = sourceRows.map(row=>({rowType:'chat',...sanitizeChatObject(row)}))
+    await saveStreamItemBatch(pool,{
+      connectionId,stream:'chats',syncId,rows,
+      keyOf:(row,index)=>engagementRowKey('chats',row,index),batchSize:HEAVY_DB_BATCH_SIZE,
+    })
+    const persistedCount = await countStreamItems(pool,{connectionId,stream:'chats',syncId})
+    return {pending:true,nextAllowedAt:new Date(Date.now()+streamCooldownMs('chats',tokenInfo)).toISOString(),metadata:{syncId,phase:'events',cursor:'',pageNumber:pageNumber+1,persistedCount,chatCount:rows.length}}
+  }
+
+  const endpoint = `${base}/events${cursor ? `?next=${encodeURIComponent(cursor)}` : ''}`
+  const payload = await wbFetch(endpoint,token,{
+    label:'События чатов WB',timeoutMs:60000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+  })
+  const eventPayload = payload?.result && typeof payload.result === 'object' ? payload.result : payload
+  const sourceRows = Array.isArray(eventPayload?.events) ? eventPayload.events : extractExtendedRows(payload,['events'])
+  const rows = sourceRows.map(row=>({rowType:'event',...sanitizeChatObject(row)}))
+  await saveStreamItemBatch(pool,{
+    connectionId,stream:'chats',syncId,rows,
+    keyOf:(row,index)=>engagementRowKey('chats',row,pageNumber*10000+index),batchSize:HEAVY_DB_BATCH_SIZE,
+  })
+  const persistedCount = await countStreamItems(pool,{connectionId,stream:'chats',syncId})
+  const nextCursor = eventPayload?.next ?? ''
+  const totalEvents = Number(eventPayload?.totalEvents ?? rows.length)
+  if (totalEvents > 0 && nextCursor !== '' && String(nextCursor) !== cursor && pageNumber < 10000) {
+    return {pending:true,nextAllowedAt:new Date(Date.now()+streamCooldownMs('chats',tokenInfo)).toISOString(),metadata:{syncId,phase:'events',cursor:String(nextCursor),pageNumber:pageNumber+1,persistedCount,chatCount:Number(state?.metadata?.chatCount||0),totalEvents}}
+  }
+  const chatCount = Number(state?.metadata?.chatCount||0)
+  const value = await compactPersistedObjectStream(connectionId,'chats',syncId,{extra:{complete:true,readOnly:true,chatCount,eventCount:Math.max(0,persistedCount-chatCount),lastCursor:cursor||null}})
+  return {pending:false,value,validation:{totalRows:value.totalRows,chatCount:value.chatCount,eventCount:value.eventCount,pages:pageNumber+1,readOnly:true,persistedInBatches:true},endpoint:`${base}/chats + ${base}/events`}
+}
+
 async function latestExtendedRows(connectionId, stream, { afterKey = '', limit = 100 } = {}) {
   const latest = await pool.query(`
     SELECT sync_id FROM wb_stream_items
@@ -3335,6 +3967,24 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
     } else if (stage === 'funnel') {
       const loaded=await loadFunnel(selected.token,{deadlineAt})
       value=loaded.value; meta=loaded.validation; snapshot=loaded
+    } else if (stage === 'searchQueries' || stage === 'stockHistory' || stage === 'reviews' || stage === 'questions' || stage === 'chats') {
+      const result = stage === 'searchQueries'
+        ? await advanceSearchQueriesTask(connection.id,selected.token,state,data,{deadlineAt,tokenInfo:selected.info})
+        : stage === 'stockHistory'
+          ? await advanceStockHistoryTask(connection.id,selected.token,state,{deadlineAt,tokenInfo:selected.info})
+          : stage === 'reviews' || stage === 'questions'
+            ? await advanceFeedbackTask(stage,connection.id,selected.token,state,{deadlineAt,tokenInfo:selected.info})
+            : await advanceChatsTask(connection.id,selected.token,state,{deadlineAt,tokenInfo:selected.info})
+      if (result.pending) {
+        state = await updateSyncState(connection.id,stage,{
+          status:result.status || 'queued',lastAttemptAt:new Date().toISOString(),nextAllowedAt:result.nextAllowedAt,lastError:null,taskId:result.taskId || null,
+          metadata:{...result.metadata,tokenId:selected.row.id,tokenLabel:selected.row.label,primary:Boolean(selected.row.is_primary),memorySafe:true},
+        })
+        return {stage,status:'queued',value:fallback,warning:`${definition.label}: сохранено ${Number(result.metadata.persistedCount||0)} строк, продолжение поставлено в очередь.`,state}
+      }
+      value=result.value
+      meta=result.validation
+      snapshot={endpoint:result.endpoint,validation:result.validation}
     } else if (stage === 'paidStorage' || stage === 'acceptance') {
       const result = await advanceGeneratedReportTask(stage, selected.token, state, { deadlineAt })
       if (result.pending) {
@@ -3388,7 +4038,7 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
         endpoint:snapshot.endpoint || stage,
         requestKey:['stocks','paidStorage','acceptance'].includes(stage) ? String(state?.task_id || meta?.taskId || '') : '',
         rawPayload:snapshot.rawPayload,
-        normalizedPayload:['products','stocks','sellerStocks','advertising','finance','paidStorage','acceptance','acquiring','goodsReturns','tariffs','funnel'].includes(stage) ? value : null,
+        normalizedPayload:['products','stocks','sellerStocks','advertising','finance','paidStorage','acceptance','acquiring','goodsReturns','tariffs','funnel','searchQueries','stockHistory','reviews','questions','chats'].includes(stage) ? value : null,
         validation:snapshot.validation || meta || {},
         keep:['orders','sales','finance','acquiring'].includes(stage) ? 2 : 4,
       })
@@ -3415,14 +4065,25 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       ...(meta || {}),
       ...(snapshot?.validation ? { validation:snapshot.validation } : {}),
     }
+    if (stage === 'advertising' && Number(value?.meta?.nextStatsOffset || 0) > 0) {
+      state = await updateSyncState(connection.id,stage,{
+        status:'queued',lastAttemptAt:new Date().toISOString(),lastSuccessAt:new Date().toISOString(),
+        nextAllowedAt:new Date(Date.now()+13000).toISOString(),lastError:null,lastCount:count,taskId:null,
+        metadata:{...stateMetadata,memorySafe:true},
+      })
+      return {stage,status:'queued',value,meta,warning:`${definition.label}: загружена статистика ещё для ${Number(value?.meta?.requestedCampaigns||0)} кампаний. Остальные кампании продолжат загружаться автоматически.`,state}
+    }
     state = await updateSyncState(connection.id, stage, {
       status:'success', lastAttemptAt:new Date().toISOString(), lastSuccessAt:new Date().toISOString(), nextAllowedAt:null,
       lastError:null, lastCount:count, taskId:null, metadata:stateMetadata,
     })
     return { stage, status:'success', value, meta, state }
   } catch (error) {
+    if (stage === 'searchQueries' && [402,403].includes(Number(error?.status))) {
+      error.message = 'Поисковые запросы WB доступны только при активной подписке «Джем» и токене категории «Аналитика».'
+    }
     const nextAllowedAt = error?.nextAllowedAt || (error?.retryAfterSeconds ? new Date(Date.now()+Number(error.retryAfterSeconds)*1000).toISOString() : null)
-    const status = Number(error?.status) === 429 ? 'rate_limited' : Number(error?.status) === 403 ? 'forbidden' : 'error'
+    const status = Number(error?.status) === 429 ? 'rate_limited' : stage === 'searchQueries' && [402,403].includes(Number(error?.status)) ? 'subscription_required' : Number(error?.status) === 403 ? 'forbidden' : 'error'
     state = await updateSyncState(connection.id, stage, {
       status, lastAttemptAt:new Date().toISOString(), nextAllowedAt, lastError:error.message,
       taskId:error?.resetTask ? null : state?.task_id,
@@ -3655,10 +4316,21 @@ app.get('/api/wb/extended/:stream', authRequired, async (req, res) => {
     if (!connection) return res.status(404).json({error:'Подключение не найдено'})
     const limit=Math.max(20,Math.min(500,Number(req.query.limit)||100))
     const afterKey=String(req.query.afterKey||'')
-    if (['fbsArchive','measurementPenalties','deductionsReport','documents'].includes(stream)) {
-      const page=await latestExtendedRows(connection.id,stream,{afterKey,limit})
-      const state=(await pool.query('SELECT * FROM wb_sync_states WHERE connection_id=$1 AND stage=$2',[connection.id,stream])).rows[0]||null
-      return res.json({stream,rows:page.rows,next:page.rows.length>=limit?page.next:null,syncId:page.syncId,total:Number(state?.last_count||0),status:state?.status||'idle'})
+    if (['fbsArchive','measurementPenalties','deductionsReport','documents','searchQueries','stockHistory','reviews','questions','chats'].includes(stream)) {
+      const [page,stateResult,storedResult]=await Promise.all([
+        latestExtendedRows(connection.id,stream,{afterKey,limit}),
+        pool.query('SELECT * FROM wb_sync_states WHERE connection_id=$1 AND stage=$2',[connection.id,stream]),
+        pool.query('SELECT payload,row_count,metadata,updated_at FROM wb_stream_data WHERE connection_id=$1 AND stream=$2',[connection.id,stream]),
+      ])
+      const state=stateResult.rows[0]||null
+      const stored=storedResult.rows[0]||null
+      const payload=stored?.payload&&typeof stored.payload==='object'?stored.payload:null
+      const total=page.syncId ? await countStreamItems(pool,{connectionId:connection.id,stream,syncId:page.syncId}) : Number(payload?.totalRows??stored?.row_count??0)
+      const rows=page.rows.length ? page.rows : (afterKey ? [] : (Array.isArray(payload?.rows)?payload.rows.slice(0,limit):[]))
+      return res.json({
+        stream,rows,next:page.rows.length>=limit?page.next:null,syncId:page.syncId||payload?.syncId||null,total,
+        status:state?.status||'idle',state:state?publicSyncState(state):null,payload,updatedAt:stored?.updated_at||null,
+      })
     }
     const stored=await pool.query('SELECT payload,row_count,metadata,updated_at FROM wb_stream_data WHERE connection_id=$1 AND stream=$2',[connection.id,stream])
     const row=stored.rows[0]

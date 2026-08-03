@@ -1,0 +1,18 @@
+Файлы проекта, которые обновляет патч ELISEI 5.5.0 поверх 5.4.9:
+
+FILES.txt
+README.md
+README_5_5_0.md
+RELEASE_NOTES_V5_5_0.txt
+backend/package.json
+backend/src/server.js
+backend/src/wb/adapters/promotion.js
+backend/src/wb/stream-store.js
+backend/tests/wb-extended-coverage.test.mjs
+backend/tests/wb-finance-fbs-fbo.test.mjs
+backend/tests/wb-integration-core.test.mjs
+package.json
+src/components/WbExtendedWorkspace.jsx
+src/lib/api.js
+src/pages/DashboardPage.jsx
+src/styles/app.css

@@ -87,7 +87,7 @@ const statsPayload = [
     sum:2500,
     orders:8,
     sum_price:16000,
-    days:[{ date:'2026-07-29', apps:[{ appType:1, nms:[{ nmId:101, views:1000, clicks:100, sum:2500, orders:8, sum_price:16000 }] }] }],
+    days:[{ date:'2026-07-29', apps:[{ appType:1, views:1000, clicks:100, sum:2500, orders:8, sum_price:16000, nms:[{ nmId:101, views:1000, clicks:100, sum:2500, orders:8, sum_price:16000 }] }] }],
   },
   {
     advertId:9002,
@@ -107,6 +107,12 @@ const advertising = mergeAdvertisingSnapshot({ campaigns, statsByAdvertId:stats,
 assert.equal(advertising.campaigns[0].statsStatus,'loaded')
 assert.equal(advertising.campaigns[1].statsStatus,'loaded')
 assert.equal(advertising.totals.spend,2500)
+assert.equal(advertising.totals.cpc,25)
+assert.equal(advertising.totals.orderConversion,8)
+assert.equal(advertising.totals.romi,540)
+assert.equal(advertising.daily.length,1)
+assert.equal(advertising.daily[0].date,'2026-07-29')
+assert.equal(advertising.daily[0].spend,2500)
 
 const master = buildProductMaster({ catalog:catalogPage.products, stockAllocation:allocation, advertising })
 assert.equal(master.length,2)

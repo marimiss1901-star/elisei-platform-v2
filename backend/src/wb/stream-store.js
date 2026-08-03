@@ -18,9 +18,14 @@ export const WB_STREAMS = Object.freeze([
   'tariffs',
   'funnel',
   'documents',
+  'searchQueries',
+  'stockHistory',
+  'reviews',
+  'questions',
+  'chats',
 ])
 
-const OBJECT_STREAMS = new Set(['advertising', 'finance', 'acquiring', 'fbsArchive', 'measurementPenalties', 'deductionsReport', 'goodsReturns', 'tariffs', 'funnel', 'documents'])
+const OBJECT_STREAMS = new Set(['advertising', 'finance', 'acquiring', 'fbsArchive', 'measurementPenalties', 'deductionsReport', 'goodsReturns', 'tariffs', 'funnel', 'documents', 'searchQueries', 'stockHistory', 'reviews', 'questions', 'chats'])
 
 function checksum(payload) {
   return crypto.createHash('sha256').update(JSON.stringify(payload ?? null)).digest('hex')
@@ -71,7 +76,7 @@ export async function ensureStreamSchema(db) {
     );
     ALTER TABLE wb_stream_data DROP CONSTRAINT IF EXISTS wb_stream_data_stream_check;
     ALTER TABLE wb_stream_data ADD CONSTRAINT wb_stream_data_stream_check
-      CHECK (stream IN ('products','orders','sales','stocks','sellerStocks','advertising','finance','paidStorage','acceptance','acquiring','fbsArchive','measurementPenalties','deductionsReport','goodsReturns','tariffs','funnel','documents'));
+      CHECK (stream IN ('products','orders','sales','stocks','sellerStocks','advertising','finance','paidStorage','acceptance','acquiring','fbsArchive','measurementPenalties','deductionsReport','goodsReturns','tariffs','funnel','documents','searchQueries','stockHistory','reviews','questions','chats'));
     CREATE INDEX IF NOT EXISTS wb_stream_data_updated_idx
       ON wb_stream_data(connection_id, updated_at DESC);
     CREATE TABLE IF NOT EXISTS wb_stream_items (
