@@ -349,3 +349,41 @@ body{background:radial-gradient(circle at 72% 7%,rgba(124,58,237,.18),transparen
 .service-access-banner>div:first-child{width:38px;height:38px;display:grid;place-items:center;border-radius:12px;background:rgba(139,92,246,.14);color:#cdbbff}.service-access-banner strong{display:block;color:#eee9fb;font-size:13px}.service-access-banner p{margin:5px 0 0;color:#8f95b1;font-size:11px;line-height:1.5}.service-access-banner.ready{border-color:rgba(52,211,153,.22);background:rgba(52,211,153,.055)}.service-access-banner.ready>div:first-child{background:rgba(52,211,153,.13);color:#79e3bd}.service-access-banner.warning{border-color:rgba(245,158,11,.22);background:rgba(245,158,11,.055)}.service-access-banner.warning>div:first-child{background:rgba(245,158,11,.13);color:#f5c275}.service-access-banner.missing{border-color:rgba(248,113,113,.18);background:rgba(248,113,113,.035)}
 .saved-token-card.service-token-card{border-color:rgba(94,234,212,.24);background:linear-gradient(145deg,rgba(20,184,166,.065),rgba(255,255,255,.02))}.service-token-badge{display:inline-flex;padding:4px 7px;border-radius:999px;border:1px solid rgba(94,234,212,.25);background:rgba(20,184,166,.1);color:#85ead8;font-size:9px}.service-token-connect-card{border-color:rgba(94,234,212,.2);background:linear-gradient(145deg,rgba(20,184,166,.045),rgba(255,255,255,.018))}.service-token-connect-card .service-logo{background:linear-gradient(135deg,#0f766e,#4338ca);color:#fff}
 @media(max-width:720px){.service-access-banner{grid-template-columns:38px 1fr}.service-token-connect-card{grid-template-columns:1fr}.service-token-connect-card .connection-logo{display:none}}
+
+/* ELISEI 5.7.0 — живой Эл */
+.el-personality-editor{margin:18px 0;padding:20px;border:1px solid rgba(145,112,255,.22);border-radius:22px;background:linear-gradient(145deg,rgba(124,58,237,.1),rgba(255,255,255,.02));display:grid;gap:16px}
+.el-personality-editor.compact{margin:4px 0 18px;padding:17px}
+.el-personality-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:14px}
+.el-personality-avatar{width:62px;height:62px;display:grid;place-items:center;border-radius:18px;background:rgba(139,92,246,.09);border:1px solid rgba(196,181,253,.15);overflow:hidden}
+.el-personality-avatar .el.compact{width:54px;height:54px}
+.el-personality-head>div:nth-child(2)>span{display:block;color:#a995f7;font-size:10px;text-transform:uppercase;letter-spacing:.14em;font-weight:800}
+.el-personality-head h3{margin:5px 0 3px;font-size:19px}
+.el-personality-head p{margin:0;color:#949ab7;font-size:12px;line-height:1.5}
+.el-character-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.el-character-grid button{display:grid;gap:6px;min-height:94px;padding:14px;border:1px solid rgba(255,255,255,.07);border-radius:15px;background:rgba(255,255,255,.022);color:#eeeaf9;text-align:left;cursor:pointer}
+.el-character-grid button:hover{border-color:rgba(153,118,255,.3);transform:translateY(-1px)}
+.el-character-grid button.active{border-color:rgba(139,92,246,.58);background:linear-gradient(145deg,rgba(124,58,237,.18),rgba(79,70,229,.06));box-shadow:inset 0 0 0 1px rgba(196,181,253,.05)}
+.el-character-grid strong{font-size:13px}.el-character-grid span{color:#8f95b2;font-size:10px;line-height:1.45}
+.el-personality-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.el-personality-fields label{display:grid;gap:7px;color:#9ea4bf;font-size:11px}
+.el-personality-fields select{width:100%;border:1px solid rgba(255,255,255,.09);background:#15142b;color:#f4f1ff;padding:11px 12px;border-radius:12px;outline:0}
+.el-personality-toggles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.el-personality-toggles label{display:grid;grid-template-columns:auto 1fr;align-items:start;gap:10px;padding:13px;border:1px solid rgba(255,255,255,.065);border-radius:14px;background:rgba(255,255,255,.018);cursor:pointer}
+.el-personality-toggles input{margin-top:2px;accent-color:#8b5cf6}
+.el-personality-toggles strong,.el-personality-toggles small{display:block}.el-personality-toggles strong{font-size:12px}.el-personality-toggles small{margin-top:3px;color:#898fa9;font-size:10px;line-height:1.4}
+.el-critical-safety{display:flex;align-items:flex-start;gap:9px;padding:11px 13px;border-radius:13px;background:rgba(74,193,255,.055);border:1px solid rgba(74,193,255,.14);color:#83cfff}
+.el-critical-safety span{color:#8f96b0;font-size:10px;line-height:1.5}.el-critical-safety strong{color:#c8e8ff}
+.el-chat-presence{display:grid;grid-template-columns:auto auto;align-items:center;gap:7px;padding:5px 9px 5px 4px;border:1px solid rgba(139,92,246,.2);border-radius:999px;background:rgba(139,92,246,.06)}
+.el-chat-presence .el.compact{width:34px;height:34px}.el-chat-presence span small,.el-chat-presence span strong{display:block;white-space:nowrap}.el-chat-presence span small{color:#7f849e;font-size:8px;text-transform:uppercase;letter-spacing:.08em}.el-chat-presence span strong{margin-top:2px;font-size:10px;color:#ddd6f7}
+.el-chat-presence.concerned{border-color:rgba(255,177,77,.25);background:rgba(255,177,77,.06)}.el-chat-presence.proud{border-color:rgba(76,224,166,.24);background:rgba(76,224,166,.06)}.el-chat-presence.supportive{border-color:rgba(74,193,255,.24);background:rgba(74,193,255,.06)}
+.el-message-head{display:flex;align-items:center;gap:8px;margin-bottom:4px}.el-message-head b{margin:0}
+.el-reaction-chip{padding:3px 7px;border-radius:999px;background:rgba(139,92,246,.12);border:1px solid rgba(139,92,246,.2);color:#bba8ff;font-size:9px}
+.el-reaction-chip.concerned{background:rgba(255,177,77,.09);border-color:rgba(255,177,77,.22);color:#ffc977}.el-reaction-chip.supportive{background:rgba(74,193,255,.09);border-color:rgba(74,193,255,.2);color:#8bd5ff}.el-reaction-chip.proud{background:rgba(76,224,166,.09);border-color:rgba(76,224,166,.2);color:#7be9bd}
+.el-grounding{margin-top:9px;padding:8px 10px;border:1px solid rgba(255,255,255,.065);border-radius:11px;background:rgba(255,255,255,.018);color:#8f95af;font-size:10px}
+.el-grounding summary{cursor:pointer;color:#b9b1d5;font-weight:600}.el-grounding>div{margin-top:6px;line-height:1.45}.el-grounding strong{color:#d7d1e9}
+.el-happy .el-aura,.el-proud .el-aura{background:radial-gradient(circle,rgba(130,88,255,.62),transparent 66%)}
+.el-thinking .el-aura{background:radial-gradient(circle,rgba(80,158,255,.48),transparent 66%)}
+.el-concerned .el-aura{background:radial-gradient(circle,rgba(255,171,76,.44),transparent 66%)}
+.el-supportive .el-aura{background:radial-gradient(circle,rgba(74,193,255,.48),transparent 66%)}
+.el-proud .el-render{transform:translateY(-1px) scale(1.015)}.el-thinking .el-render{filter:drop-shadow(0 10px 18px rgba(5,5,28,.36)) saturate(.94)}.el-concerned .el-render{filter:drop-shadow(0 10px 18px rgba(5,5,28,.36)) saturate(.82)}
+@media(max-width:900px){.el-personality-head{grid-template-columns:auto 1fr}.el-personality-head>.primary-btn{grid-column:1/-1;justify-content:center}.el-character-grid,.el-personality-fields,.el-personality-toggles{grid-template-columns:1fr}.el-chat-presence{display:none}}

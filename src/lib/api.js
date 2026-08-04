@@ -110,6 +110,8 @@ export const elApi = {
   plan: () => request('/api/el/plan'),
   setPlan: (payload) => request('/api/el/plan', { method:'PUT', body:JSON.stringify(payload) }),
   capabilities: () => request('/api/el/capabilities'),
+  profile: () => request('/api/el/profile'),
+  saveProfile: (profile) => request('/api/el/profile', { method:'PUT', body:JSON.stringify(profile) }),
   chat: (payload) => request('/api/el/chat', {
     method: 'POST',
     body: JSON.stringify(payload),

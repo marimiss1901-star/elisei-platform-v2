@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { detectModules, MODULES } = require('./elModuleRegistry.cjs');
 const { BUSINESS_RE } = require('./elModeRouter.cjs');
+const { normalizeElProfile, createVoiceContext, humorLine, socialResponse, reactionFor } = require('./elPersonality.cjs');
 
 const money = (value) => value == null || !Number.isFinite(Number(value)) ? 'нет данных' : `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(Number(value))} ₽`;
 const number = (value) => value == null || !Number.isFinite(Number(value)) ? 'нет данных' : new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 }).format(Number(value));
@@ -34,16 +35,9 @@ function topItems(items, score, limit = 5) {
     .slice(0, limit);
 }
 
-function mildHumor(tone, key) {
-  if (!String(tone || '').includes('playful')) return '';
-  const phrases = {
-    ads: ' Реклама должна продавать, а не устраивать платный кружок показов.',
-    stocks: ' Склад, конечно, любит запасы, но деньги любят движение.',
-    finance: ' Выручка выглядит бодро, но прибыль всегда просит показать чеки.',
-    returns: ' Возвраты снова напоминают: покупатель голосует не только звёздами, но и коробкой обратно.',
-    default: ' Цифры без паники — сначала проверяем, потом ругаем виновных.',
-  };
-  return phrases[key] || phrases.default;
+function mildHumor(voice, key) {
+  const phrase = humorLine(voice, key);
+  return phrase ? ` ${phrase}` : '';
 }
 
 function coverageWarnings(data) {
@@ -270,15 +264,40 @@ async function handleMemoryCommand(options) {
 }
 
 async function runElAnalyst(options = {}) {
-  const memoryAnswer = await handleMemoryCommand(options);
-  if (memoryAnswer) return { id: crypto.randomUUID(), ...memoryAnswer, sources: [], usedWeb: false, model: 'elisei-analyst-local', usage: null, apiUsed: false, toolTrace: [] };
-
   const message = String(options.message || '').trim();
+  const personality = normalizeElProfile(options.personality || { humor: String(options.tone || '').includes('playful') ? 'light' : 'off' });
+  const voice = createVoiceContext({
+    profile: personality,
+    message,
+    history: options.history,
+    context: options.context,
+    seed: `${options.identity?.userId || 'owner'}:${message}`,
+  });
+
+  const memoryAnswer = await handleMemoryCommand(options);
+  if (memoryAnswer) return {
+    id: crypto.randomUUID(), ...memoryAnswer, sources: [], usedWeb: false,
+    model: 'elisei-analyst-local', usage: null, apiUsed: false, toolTrace: [],
+    reaction: reactionFor({ voice, kind:'analysis' }),
+    grounding: { facts:[], assumptions:[] }, personality,
+  };
+
+  const social = !BUSINESS_RE.test(message) ? socialResponse({ message, profile:personality, history:options.history, context:options.context, identity:options.identity }) : null;
+  if (social) return {
+    id: crypto.randomUUID(), text:social.text, sources:[], usedWeb:false,
+    model:'elisei-analyst-local', usage:null, apiUsed:false, toolTrace:[], modulesUsed:[],
+    reaction:social.reaction, answerKind:social.kind,
+    grounding:{ facts:[], assumptions:[] }, personality,
+  };
+
   if (!BUSINESS_RE.test(message) && options.classification?.reason === 'analyst-selected') {
     return {
       id: crypto.randomUUID(),
-      text: 'В базовом режиме я бесплатно анализирую ваш WB-кабинет: продажи, рекламу, остатки, финансы, товары, возвраты, цены, закупки и качество данных. Для свободного общения на любые темы подключается «Эл GPT», а интернет и внешние исследования входят в «Эл Pro».',
+      text: personality.character === 'professional'
+        ? 'В режиме «Эл Аналитик» я работаю с данными WB-кабинета: продажами, рекламой, остатками, финансами, товарами, возвратами, ценами, закупками и качеством данных. Для универсальных задач используется «Эл GPT», а для интернета и исследований — «Эл Pro».'
+        : 'В базовом режиме я живу внутри твоего WB-кабинета: разбираю продажи, рекламу, остатки, финансы, товары, возвраты, цены и закупки. Для свободных задач есть «Эл GPT», а интернет и исследования — в «Эл Pro».',
       sources: [], usedWeb: false, model: 'elisei-analyst-local', usage: null, apiUsed: false, toolTrace: [], modulesUsed: [],
+      reaction:reactionFor({ voice, kind:'analysis' }), grounding:{ facts:[], assumptions:[] }, personality,
     };
   }
 
@@ -294,12 +313,17 @@ async function runElAnalyst(options = {}) {
       continue;
     }
     const formatter = FORMATTERS[moduleName] || formatOverview;
-    sections.push(formatter(data, options.tone));
+    sections.push(formatter(data, voice));
     warnings.push(...coverageWarnings(data));
   }
 
   if (!sections.length) {
     sections.push('Я понял вопрос, но подтверждённых данных выбранного кабинета пока недостаточно. Проверь подключение WB и журнал синхронизаций — гадать вместо цифр не буду.');
+  }
+  if (voice.support && ['tired','frustrated','worried'].includes(voice.emotion)) {
+    sections.unshift(voice.address === 'formal'
+      ? 'Понимаю, что сейчас тяжело. Давайте без лишнего шума: ниже только главное по подтверждённым данным.'
+      : 'Понимаю, что сейчас тяжело. Давай без лишнего шума: ниже только главное по подтверждённым данным.');
   }
   const uniqueWarnings = [...new Set(warnings.filter(Boolean))].slice(0, 3);
   if (uniqueWarnings.length) sections.push(`Ограничения данных:\n${uniqueWarnings.map((item) => `• ${item}`).join('\n')}`);
@@ -314,6 +338,13 @@ async function runElAnalyst(options = {}) {
     apiUsed: false,
     toolTrace: modules.map((module) => ({ name: 'local_analytics', module, ok: Boolean(results[module]?.ok) })),
     modulesUsed: modules,
+    reaction: reactionFor({ voice, warning: uniqueWarnings.length > 0 }),
+    answerKind: 'analysis',
+    grounding: {
+      facts: modules.filter((module) => Boolean(results[module]?.ok)).map((module) => MODULES[module]?.title || module),
+      assumptions: uniqueWarnings,
+    },
+    personality,
   };
 }
 

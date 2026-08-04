@@ -9,6 +9,7 @@ const { classifyElRequest } = require('../services/elModeRouter.cjs');
 const { createBusinessDataBridge } = require('../services/elBusinessDataBridge.cjs');
 const { publicCapabilities } = require('../services/elModuleRegistry.cjs');
 const { resolveElPlan, normalizeMode, canUseMode, publicPlan, modeLabel } = require('../services/elPlans.cjs');
+const { DEFAULT_EL_PROFILE, normalizeElProfile } = require('../services/elPersonality.cjs');
 
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 
@@ -43,7 +44,7 @@ function createRouter(express) {
     const plan = await resolveElPlan(req, identity);
     res.json({
       ok: true,
-      version: '5.4.3',
+      version: '5.7.0',
       name: 'El Tiered Intelligence',
       configured: Boolean(process.env.OPENAI_API_KEY && (process.env.ELISEI_GPT_MODEL || process.env.ELISEI_PRO_MODEL || process.env.ELISEI_AI_MODEL)),
       models: {
@@ -76,10 +77,25 @@ function createRouter(express) {
     res.json({ ok: true, plan: publicPlan(plan) });
   }));
 
+  router.get('/profile', asyncRoute(async (req, res) => {
+    const identity = identityFromRequest(req);
+    const memoryStore = createMemoryStore(req.app?.locals?.elMemoryStore);
+    const stored = typeof memoryStore.getProfile === 'function' ? await memoryStore.getProfile(identity) : null;
+    res.json({ ok:true, profile:normalizeElProfile(stored || DEFAULT_EL_PROFILE) });
+  }));
+
+  router.put('/profile', asyncRoute(async (req, res) => {
+    const identity = identityFromRequest(req, req.body || {});
+    const memoryStore = createMemoryStore(req.app?.locals?.elMemoryStore);
+    const profile = normalizeElProfile(req.body || {});
+    const saved = typeof memoryStore.saveProfile === 'function' ? await memoryStore.saveProfile(identity, profile) : profile;
+    res.json({ ok:true, profile:normalizeElProfile(saved || profile) });
+  }));
+
   router.get('/capabilities', asyncRoute(async (req, res) => {
     const identity = identityFromRequest(req);
     const plan = await resolveElPlan(req, identity);
-    res.json({ ok: true, version: '5.4.3', modules: publicCapabilities(), plan, writeActions: false });
+    res.json({ ok: true, version: '5.7.0', modules: publicCapabilities(), plan, writeActions: false });
   }));
 
   router.post('/chat', asyncRoute(async (req, res) => {
@@ -96,6 +112,8 @@ function createRouter(express) {
     const plan = await resolveElPlan(req, identity);
     const requestedMode = normalizeMode(body.mode || 'analyst');
     const memoryStore = createMemoryStore(req.app?.locals?.elMemoryStore);
+    const storedProfile = typeof memoryStore.getProfile === 'function' ? await memoryStore.getProfile(identity) : null;
+    const personality = normalizeElProfile({ ...(storedProfile || DEFAULT_EL_PROFILE), ...(body.personality || {}) });
     const conversationId = String(body.conversationId || crypto.randomUUID()).slice(0, 100);
     const serverHistory = await memoryStore.loadConversation(identity, conversationId);
     const history = serverHistory.length ? serverHistory : body.history;
@@ -115,13 +133,13 @@ function createRouter(express) {
       if (effectiveMode === 'analyst') {
         answer = await runElAnalyst({
           message, history, context, memories, identity,
-          tone: body.tone || 'auto', memoryStore, dataBridge, classification,
+          tone: body.tone || 'auto', personality, memoryStore, dataBridge, classification,
         });
       } else {
         const isPro = effectiveMode === 'pro';
         answer = await runElAgent({
           message, history, context, memories: isPro ? memories : [], identity,
-          tone: body.tone || 'auto',
+          tone: body.tone || 'auto', personality,
           allowMemoryTools: isPro,
           allowWeb: isPro && body.allowWeb !== false,
           memoryStore, dataBridge,
@@ -137,7 +155,7 @@ function createRouter(express) {
 
       await memoryStore.appendMessages(identity, conversationId, [
         { role: 'user', content: message, mode: effectiveMode, createdAt: new Date().toISOString() },
-        { role: 'assistant', content: answer.text, mode: effectiveMode, sources: answer.sources, modulesUsed: answer.modulesUsed, createdAt: new Date().toISOString() },
+        { role: 'assistant', content: answer.text, mode: effectiveMode, sources: answer.sources, modulesUsed: answer.modulesUsed, reaction:answer.reaction, answerKind:answer.answerKind, grounding:answer.grounding, createdAt: new Date().toISOString() },
       ]);
       res.json({
         ok: true,
@@ -153,6 +171,10 @@ function createRouter(express) {
         plan,
         toolTrace: answer.toolTrace,
         modulesUsed: answer.modulesUsed,
+        reaction: answer.reaction || null,
+        answerKind: answer.answerKind || 'analysis',
+        grounding: answer.grounding || { facts:answer.modulesUsed || [], assumptions:[] },
+        personality,
         detectedModules: prefetched.detectedModules,
       });
     } catch (error) {

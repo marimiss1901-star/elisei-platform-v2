@@ -25,13 +25,13 @@ function filePath(identity) {
   return path.join(dataDir(), `el-${tenantKey(identity)}.json`);
 }
 
-function blank() { return { conversations: {}, memories: [], updatedAt: new Date().toISOString() }; }
+function blank() { return { conversations: {}, memories: [], profile: null, updatedAt: new Date().toISOString() }; }
 
 function read(identity) {
   const file = filePath(identity);
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return { ...blank(), ...parsed, conversations: parsed.conversations || {}, memories: parsed.memories || [] };
+    return { ...blank(), ...parsed, conversations: parsed.conversations || {}, memories: parsed.memories || [], profile: parsed.profile || null };
   } catch { return blank(); }
 }
 
@@ -52,8 +52,7 @@ function normalizeText(value, max = 1000) {
 }
 
 function createMemoryStore(customStore) {
-  if (customStore && typeof customStore === 'object') return customStore;
-  return {
+  const fileStore = {
     async loadConversation(identity, conversationId) {
       const data = read(identity);
       return data.conversations[conversationId]?.messages || [];
@@ -110,7 +109,19 @@ function createMemoryStore(customStore) {
       await write(identity, data);
       return removed;
     },
+
+    async getProfile(identity) {
+      return read(identity).profile || null;
+    },
+    async saveProfile(identity, profile) {
+      const data = read(identity);
+      data.profile = profile && typeof profile === 'object' ? { ...profile, updatedAt: new Date().toISOString() } : null;
+      await write(identity, data);
+      return data.profile;
+    },
   };
+  if (customStore && typeof customStore === 'object') return { ...fileStore, ...customStore };
+  return fileStore;
 }
 
 module.exports = { createMemoryStore, tenantKey };

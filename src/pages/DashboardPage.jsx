@@ -29,6 +29,48 @@ const defaultElPlan = {
   features:{ analyst:true, gpt:false, pro:false, webSearch:false, longMemory:false, externalResearch:false },
 }
 
+const defaultElPersonality = {
+  character:'insider', humor:'light', support:true, celebrations:true,
+  address:'auto', noHumorInCritical:true,
+}
+
+const elCharacterMeta = {
+  professional:{ title:'Деловой', text:'Спокойно, профессионально и без разговорных вольностей.' },
+  friendly:{ title:'Дружелюбный', text:'Тепло, понятно и иногда с лёгким юмором.' },
+  insider:{ title:'Свой человек', text:'Живой язык, поддержка и уместные выражения вроде «лям двести».' },
+}
+
+const elHumorMeta = {
+  off:'Без юмора', light:'Лёгкий', noticeable:'Заметный',
+}
+
+const elMoodMeta = {
+  happy:'На связи', thinking:'Смотрю на данные', concerned:'Спокойно, проверяем',
+  supportive:'Я рядом', proud:'Есть чем гордиться',
+}
+
+function normalizeElSettings(value = {}) {
+  const legacyHumor = value.humor === true ? 'light' : value.humor === false ? 'off' : value.humor
+  return {
+    ...defaultElPersonality,
+    ...value,
+    character:['professional','friendly','insider'].includes(value.character) ? value.character : defaultElPersonality.character,
+    humor:['off','light','noticeable'].includes(legacyHumor) ? legacyHumor : defaultElPersonality.humor,
+    address:['auto','formal','informal'].includes(value.address) ? value.address : defaultElPersonality.address,
+    support:value.support !== false,
+    celebrations:value.celebrations !== false,
+    noHumorInCritical:true,
+    allowWeb:Boolean(value.allowWeb),
+  }
+}
+
+function initialElGreeting(greeting, displayName, settings) {
+  const name = displayName ? `, ${displayName}` : ''
+  if (settings.character === 'professional') return `${greeting}${name}. Готов проанализировать WB-кабинет и предложить следующий шаг.`
+  if (settings.character === 'friendly') return `${greeting}${name}. Я рядом — давай спокойно разберём, что сейчас важнее всего.`
+  return `${greeting}${name}. Я на месте. Данные кабинета проверю по фактам, а скучать постараюсь не дать.`
+}
+
 const elModeMeta = {
   analyst:{ title:'Эл Аналитик', subtitle:'WB-кабинет', description:'Продажи, реклама, остатки, финансы и другие данные кабинета. Без расходов OpenAI.' },
   gpt:{ title:'Эл GPT', subtitle:'Доп. функция', description:'Свободное общение, тексты, идеи и универсальные задачи.' },
@@ -284,14 +326,19 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [chat, setChat] = useState('')
   const [chatBusy, setChatBusy] = useState(false)
   const [elConversationId, setElConversationId] = useState(() => localStorage.getItem(EL_CHAT_CONVERSATION_KEY) || createElConversationId())
-  const [elSettings, setElSettings] = useState(() => ({ allowWeb:false, humor:true, ...readStoredJson(EL_CHAT_SETTINGS_KEY, {}) }))
+  const [elSettings, setElSettings] = useState(() => normalizeElSettings(readStoredJson(EL_CHAT_SETTINGS_KEY, {})))
   const [elPlan, setElPlan] = useState(defaultElPlan)
+  const [elProfileSaving, setElProfileSaving] = useState(false)
+  const [showElPersonality, setShowElPersonality] = useState(false)
+  const [elMood, setElMood] = useState('happy')
   const [elMode, setElMode] = useState(() => localStorage.getItem(EL_CHAT_MODE_KEY) || 'analyst')
   const [messages, setMessages] = useState(() => {
     const stored = readStoredJson(EL_CHAT_MESSAGES_KEY, [])
+    const storedSettings = normalizeElSettings(readStoredJson(EL_CHAT_SETTINGS_KEY, {}))
     return Array.isArray(stored) && stored.length ? stored.slice(-50) : [{
       role:'el',
-      text:`${greeting}${displayName ? `, ${displayName}` : ''}. По WB-кабинету я работаю как встроенный аналитик без расходов OpenAI. GPT-общение и интернет подключаются отдельно.`
+      text:initialElGreeting(greeting, displayName, storedSettings),
+      reaction:{ mood:'happy',label:'На связи' },
     }]
   })
   const [connection, setConnection] = useState(emptyConnection)
@@ -458,9 +505,10 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
   useEffect(() => {
     if (!elApi?.status) return
-    elApi.status().then(result => {
+    Promise.all([elApi.status(), elApi.profile().catch(() => null)]).then(([result, profileResult]) => {
       const plan = result?.plan || defaultElPlan
       setElPlan({ ...defaultElPlan, ...plan, features:{ ...defaultElPlan.features, ...(plan.features || {}) } })
+      if (profileResult?.profile) setElSettings(current => normalizeElSettings({ ...current, ...profileResult.profile }))
       setElMode(current => {
         if (current === 'pro' && !plan?.features?.pro) return plan?.features?.gpt ? 'gpt' : 'analyst'
         if (current === 'gpt' && !plan?.features?.gpt) return 'analyst'
@@ -830,6 +878,26 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     finally { setSavingSettings(false) }
   }
 
+  const updateElSetting = (key, value) => setElSettings(current => normalizeElSettings({ ...current, [key]:value }))
+
+  const saveElProfile = async () => {
+    setElProfileSaving(true)
+    try {
+      const result = await elApi.saveProfile({
+        character:elSettings.character,
+        humor:elSettings.humor,
+        support:elSettings.support,
+        celebrations:elSettings.celebrations,
+        address:elSettings.address,
+        noHumorInCritical:true,
+        userName:displayName,
+      })
+      if (result?.profile) setElSettings(current => normalizeElSettings({ ...current, ...result.profile }))
+      notify('Характер Эла сохранён для этого кабинета.')
+    } catch (error) { notify(error.message, 8000) }
+    finally { setElProfileSaving(false) }
+  }
+
   const downloadCsv = (name, headers, rows) => {
     const content = '\uFEFF' + [headers, ...rows].map(row => row.map(csvCell).join(';')).join('\n')
     const blob = new Blob([content], { type:'text/csv;charset=utf-8' })
@@ -898,7 +966,8 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     const previous = elConversationId
     const next = createElConversationId()
     setElConversationId(next)
-    setMessages([{ role:'el', text:`Новый диалог начат. Я на связи${displayName ? `, ${displayName}` : ''} — о чём думаем?` }])
+    setMessages([{ role:'el', text:elSettings.character === 'professional' ? 'Новый диалог начат. Какой вопрос по кабинету проверим?' : `Новый диалог начат. Я на связи${displayName ? `, ${displayName}` : ''} — о чём думаем?`, reaction:{ mood:'happy',label:'На связи' } }])
+    setElMood('happy')
     setChat('')
     if (previous) elApi.clearConversation(previous).catch(() => {})
   }
@@ -913,6 +982,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     setMessages(current => [...current, userMessage])
     setChat('')
     setChatBusy(true)
+    setElMood('thinking')
 
     try {
       const period = readElPeriod()
@@ -925,7 +995,12 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         })),
         mode:elMode,
         allowWeb:elMode === 'pro' && elSettings.allowWeb,
-        tone:elSettings.humor ? 'adaptive_playful' : 'professional',
+        tone:elSettings.humor === 'off' ? 'professional' : 'adaptive_playful',
+        personality:{
+          character:elSettings.character, humor:elSettings.humor, support:elSettings.support,
+          celebrations:elSettings.celebrations, address:elSettings.address, noHumorInCritical:true,
+        },
+        userName:displayName,
         cabinetId:connection.connectionId || 'main',
         cabinetName:user?.company || 'Основной кабинет WB',
         period,
@@ -942,6 +1017,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         } : null,
         screenContext:{
           section:lastBusinessSectionRef.current,
+          localHour:new Date().getHours(),
           period,
           summary,
           advertising:advertisingSnapshot?.totals || advertisingSnapshot || null,
@@ -959,15 +1035,21 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         model:result.model || null,
         mode:result.mode || elMode,
         apiUsed:Boolean(result.apiUsed),
+        reaction:result.reaction || null,
+        grounding:result.grounding || null,
+        answerKind:result.answerKind || 'analysis',
         createdAt:new Date().toISOString(),
       }])
+      setElMood(result.reaction?.mood || 'happy')
     } catch (error) {
       setMessages(current => [...current, {
         role:'el',
         text:error.message || 'Не удалось получить ответ Эла. Базовый аналитик работает без OpenAI; GPT и Pro требуют подключённой допфункции и активного API-баланса.',
         error:true,
+        reaction:{ mood:'concerned',label:'Нужно проверить' },
         createdAt:new Date().toISOString(),
       }])
+      setElMood('concerned')
     } finally {
       setChatBusy(false)
     }
@@ -975,10 +1057,74 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
   const requireConnection = children => connection.connected ? children : <div className="empty-state compact-empty"><PlugZap size={34}/><h3>Подключите Wildberries</h3><p>Раздел использует реальные данные кабинета, а не демонстрационные цифры.</p><button className="primary-btn" onClick={() => setActive('Подключения')}>Открыть подключения</button></div>
 
+  const homeElState = useMemo(() => {
+    const say = (professional, friendly, insider) => elSettings.character === 'professional'
+      ? professional
+      : elSettings.character === 'friendly' ? friendly : insider
+    if (!connection.connected) return {
+      mood:'thinking',
+      title:'Готов познакомиться',
+      line:say(
+        'Подключите кабинет Wildberries — после этого я смогу анализировать фактические показатели.',
+        'Подключим Wildberries, и я спокойно разложу кабинет по цифрам и задачам.',
+        'Подключим WB — и я перестану гадать по пустому экрану. Договорились?',
+      ),
+    }
+    const profit = Number(summary.operatingProfit)
+    if (summary.operatingProfit != null && Number.isFinite(profit) && profit < 0) return {
+      mood:'concerned',
+      title:'Спокойно, разбираемся',
+      line:say(
+        'Операционная прибыль отрицательная. Сначала проверим расходы и товары, формирующие убыток.',
+        'Прибыль сейчас в минусе. Без лишней тревоги: сначала найдём, где именно теряются деньги.',
+        'Прибыль в минусе. Тут без шуток — сначала найдём, кто тихо ест деньги.',
+      ),
+    }
+    const warnings = Array.isArray(coreData?.syncWarnings) ? coreData.syncWarnings : []
+    if (warnings.length) return {
+      mood:'thinking',
+      title:'Данные под контролем',
+      line:say(
+        'Часть источников ожидает ответа Wildberries. Сохранённые данные доступны, повторы выполняются автоматически.',
+        'Некоторые данные WB ещё в пути. Прогресс сохранён, поэтому начинаем не с нуля.',
+        'WB кое-что придержал, но прогресс не пропал. Эл помнит, где остановился.',
+      ),
+    }
+    const zeroStock = Number(summary.zeroStock || 0)
+    const lowStock = Number(summary.lowStock || 0)
+    if (zeroStock > 0 || lowStock > 0) return {
+      mood:'thinking',
+      title:'Есть задача на сегодня',
+      line:say(
+        `Обнаружено ${formatNumber(zeroStock)} товаров без остатка и ${formatNumber(lowStock)} с низким запасом.`,
+        `Есть ${formatNumber(zeroStock)} товаров без остатка и ещё ${formatNumber(lowStock)} заканчиваются — лучше проверить поставку.`,
+        `${formatNumber(zeroStock)} товаров уже без остатка, ещё ${formatNumber(lowStock)} на подходе. Склад намекает довольно прозрачно.`,
+      ),
+    }
+    if (summary.operatingProfit != null && profit > 0) return {
+      mood:'proud',
+      title:'Есть чем гордиться',
+      line:say(
+        'Операционная прибыль положительная. Теперь можно определить товары, которые способны дать дополнительный рост.',
+        'Прибыль положительная — хорошая база. Теперь посмотрим, что можно усилить.',
+        'Прибыль в плюсе. Вот это уже разговор — теперь ищем, где лежит следующий рост.',
+      ),
+    }
+    return {
+      mood:'happy',
+      title:'Я на связи',
+      line:say(
+        recommendations[0]?.title || 'Данные проверены. Готов перейти к приоритетной задаче.',
+        recommendations[0]?.title || 'Я всё проверил и подготовил следующий шаг.',
+        recommendations[0]?.title || 'Я всё проверил. Можно работать — и даже без драматичной музыки.',
+      ),
+    }
+  }, [connection.connected, coreData?.syncWarnings, summary.operatingProfit, summary.zeroStock, summary.lowStock, recommendations, elSettings.character])
+
   const renderHome = () => <>
     <section className="brand-hero glass-panel">
       <div className="brand-hero-copy">
-        <span className="brand-kicker"><Sparkles size={14}/> ЭЛ уже всё проверил</span>
+        <span className="brand-kicker"><Sparkles size={14}/> {connection.connected ? 'ЭЛ уже всё проверил' : 'ЭЛ готов к работе'}</span>
         <h1>{greeting},<br/><em>{displayName || 'рады вас видеть'}</em></h1>
         <p>{connection.connected
           ? `Я проверил ${formatNumber(summary.activeProducts || productRows.length)} товаров. ${coreData?.availability?.sales ? 'Продажи загружены.' : 'Продажи ожидают синхронизации.'} ${coreData?.availability?.stocks ? 'Остатки загружены.' : 'Отчёт остатков формируется отдельно.'}`
@@ -989,7 +1135,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         </div>
         <div className="brand-sync"><span className="status-dot"/>{connection.connected ? `Данные обновлены ${connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : '—'}` : 'Кабинет пока не подключён'}</div>
       </div>
-      <div className="brand-mascot-stage"><span className="brand-orbit one"/><span className="brand-orbit two"/><ElMascot/><div className="el-speech"><strong>ЭЛ</strong><span>{recommendations[0]?.title || 'Я подготовил план на сегодня ✨'}</span></div></div>
+      <div className="brand-mascot-stage"><span className="brand-orbit one"/><span className="brand-orbit two"/><ElMascot mood={homeElState.mood}/><div className="el-speech"><strong>ЭЛ · {elCharacterMeta[elSettings.character]?.title}</strong><span>{homeElState.line}</span></div></div>
     </section>
     <section className="brand-metrics">
       <button className="brand-metric" onClick={() => setActive('Аналитика')}><span className="brand-3d-icon"><TrendingUp/></span><span><small>Выручка · 30 дней</small><strong>{formatMoney(summary.revenue)}</strong><em>{formatNumber(summary.sales)} продаж</em></span><ChevronRight/></button>
@@ -999,7 +1145,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     </section>
     <section className="brand-grid">
       <div className="el-recommendations glass-panel"><div className="brand-section-head"><div><span>ЭЛ рекомендует</span><h2>Что сделать сегодня</h2></div><button onClick={() => setActive('Спросить ЭЛа')}>Спросить ЭЛа <ChevronRight size={16}/></button></div><div className="recommendation-cards">{recommendations.slice(0,3).map((item,index) => <button className={`recommendation-tile ${recommendationTone(item.type)}`} key={item.id || index} onClick={() => setActive(item.type === 'stock' ? 'Остатки' : item.type === 'price' ? 'Цены и акции' : item.type === 'quality' ? 'Отзывы' : 'Аналитика')}><span className="rec-number">0{index+1}</span><div><small>{item.type || 'Рекомендация'}</small><h3>{item.title}</h3><p>{item.text}</p><strong>{item.effect}</strong></div><ChevronRight className="rec-arrow" size={18}/></button>)}</div></div>
-      <aside className="el-profile-card glass-panel"><div className="el-profile-top"><span className="mini-el"><ElMascot compact/></span><div><span>ЭЛ · AI-помощник</span><h2>Я на связи</h2></div><b className="live-pill">LIVE</b></div><p>Я связываю продажи, запасы, возвраты и экономику, чтобы подсказать конкретное действие.</p><div className="el-profile-stats"><div><span>Проверено товаров</span><strong>{formatNumber(summary.activeProducts || productRows.length)}</strong></div><div><span>Задач найдено</span><strong>{recommendations.length}</strong></div><div><span>Дней запаса</span><strong>{summary.stockCoverDays ?? '—'}</strong></div></div><button className="primary-btn brand-primary" onClick={() => setActive('Спросить ЭЛа')}>Задать вопрос</button></aside>
+      <aside className="el-profile-card glass-panel"><div className="el-profile-top"><span className="mini-el"><ElMascot compact mood={homeElState.mood}/></span><div><span>ЭЛ · AI-помощник</span><h2>{homeElState.title}</h2></div><b className="live-pill">LIVE</b></div><p>Я связываю продажи, запасы, возвраты и экономику, чтобы подсказать конкретное действие.</p><div className="el-profile-stats"><div><span>Проверено товаров</span><strong>{formatNumber(summary.activeProducts || productRows.length)}</strong></div><div><span>Задач найдено</span><strong>{recommendations.length}</strong></div><div><span>Дней запаса</span><strong>{summary.stockCoverDays ?? '—'}</strong></div></div><button className="primary-btn brand-primary" onClick={() => setActive('Спросить ЭЛа')}>Задать вопрос</button></aside>
     </section>
   </>
 
@@ -1644,7 +1790,48 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     </>}</section>
   }
 
-  const renderSettings = () => <section className="app-page glass-panel"><div className="page-title"><span>Настройки</span><h1>Параметры бизнеса</h1><p>Финансовые допущения сохраняются отдельно для вашего аккаунта.</p></div><div className="settings-card standalone"><h3><Settings size={20}/> Основные параметры</h3><div className="settings-grid"><label>Комиссия WB, %<input type="number" value={settingsDraft.commissionPercent ?? 0} onChange={e => updateSetting('commissionPercent',e.target.value)}/></label><label>Логистика за продажу, ₽<input type="number" value={settingsDraft.logisticsPerSale ?? 0} onChange={e => updateSetting('logisticsPerSale',e.target.value)}/></label><label>Налог, %<input type="number" value={settingsDraft.taxPercent ?? 0} onChange={e => updateSetting('taxPercent',e.target.value)}/></label><label>Целевая маржа, %<input type="number" value={settingsDraft.targetMarginPercent ?? 20} onChange={e => updateSetting('targetMarginPercent',e.target.value)}/></label></div><button className="primary-btn" onClick={saveSettings} disabled={savingSettings}><Save size={17}/> Сохранить</button></div><div className="security-note"><ShieldCheck size={22}/><div><strong>MAXADORRE и ELISEI не связаны данными</strong><p>В ELISEI перенесена проверенная бизнес-логика, но репозитории, базы, API-ключи и клиентские данные полностью раздельны.</p></div></div></section>
+  const renderElPersonalityControls = ({ compact = false } = {}) => (
+    <div className={`el-personality-editor ${compact ? 'compact' : ''}`}>
+      <div className="el-personality-head">
+        <div className="el-personality-avatar"><ElMascot compact mood={elMood}/></div>
+        <div>
+          <span>Характер Эла</span>
+          <h3>{elCharacterMeta[elSettings.character]?.title || 'Свой человек'}</h3>
+          <p>{elCharacterMeta[elSettings.character]?.text}</p>
+        </div>
+        <button type="button" className="primary-btn" onClick={saveElProfile} disabled={elProfileSaving}>
+          {elProfileSaving ? <RefreshCw className="spin" size={17}/> : <Save size={17}/>} Сохранить характер
+        </button>
+      </div>
+      <div className="el-character-grid" role="radiogroup" aria-label="Характер Эла">
+        {Object.entries(elCharacterMeta).map(([key, meta]) => <button
+          type="button" key={key} role="radio" aria-checked={elSettings.character === key}
+          className={elSettings.character === key ? 'active' : ''}
+          onClick={() => updateElSetting('character', key)}
+        ><strong>{meta.title}</strong><span>{meta.text}</span></button>)}
+      </div>
+      <div className="el-personality-fields">
+        <label>Юмор<select value={elSettings.humor} onChange={event => updateElSetting('humor', event.target.value)}>
+          {Object.entries(elHumorMeta).map(([key,label]) => <option key={key} value={key}>{label}</option>)}
+        </select></label>
+        <label>Обращение<select value={elSettings.address} onChange={event => updateElSetting('address', event.target.value)}>
+          <option value="auto">Подстраиваться</option><option value="formal">На «вы»</option><option value="informal">На «ты»</option>
+        </select></label>
+      </div>
+      <div className="el-personality-toggles">
+        <label><input type="checkbox" checked={elSettings.support} onChange={event => updateElSetting('support', event.target.checked)}/><span><strong>Поддержка</strong><small>Спокойно помочь, когда тяжело или всё раздражает.</small></span></label>
+        <label><input type="checkbox" checked={elSettings.celebrations} onChange={event => updateElSetting('celebrations', event.target.checked)}/><span><strong>Поздравления</strong><small>Отмечать подтверждённые успехи без фальшивой мотивации.</small></span></label>
+      </div>
+      <div className="el-critical-safety"><ShieldCheck size={17}/><span><strong>В критических ситуациях шутки всегда выключены.</strong> Убытки, штрафы, блокировки и серьёзные ошибки Эл разбирает спокойно и прямо.</span></div>
+    </div>
+  )
+
+  const renderSettings = () => <section className="app-page glass-panel">
+    <div className="page-title"><span>Настройки</span><h1>Параметры бизнеса и Эла</h1><p>Финансовые допущения и характер AI-помощника сохраняются отдельно для вашего аккаунта и кабинета.</p></div>
+    <div className="settings-card standalone"><h3><Settings size={20}/> Основные параметры</h3><div className="settings-grid"><label>Комиссия WB, %<input type="number" value={settingsDraft.commissionPercent ?? 0} onChange={e => updateSetting('commissionPercent',e.target.value)}/></label><label>Логистика за продажу, ₽<input type="number" value={settingsDraft.logisticsPerSale ?? 0} onChange={e => updateSetting('logisticsPerSale',e.target.value)}/></label><label>Налог, %<input type="number" value={settingsDraft.taxPercent ?? 0} onChange={e => updateSetting('taxPercent',e.target.value)}/></label><label>Целевая маржа, %<input type="number" value={settingsDraft.targetMarginPercent ?? 20} onChange={e => updateSetting('targetMarginPercent',e.target.value)}/></label></div><button className="primary-btn" onClick={saveSettings} disabled={savingSettings}><Save size={17}/> Сохранить</button></div>
+    {renderElPersonalityControls()}
+    <div className="security-note"><ShieldCheck size={22}/><div><strong>MAXADORRE и ELISEI не связаны данными</strong><p>В ELISEI перенесена проверенная бизнес-логика, но репозитории, базы, API-ключи и клиентские данные полностью раздельны.</p></div></div>
+  </section>
 
   const renderChat = () => {
     const planTitle = elPlan.tier === 'pro' ? 'Эл Pro' : elPlan.tier === 'gpt' ? 'Эл GPT' : 'Эл Аналитик'
@@ -1664,6 +1851,8 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
           'Какие товары скоро закончатся и стоит ли их дозаказывать?',
           'Свяжи возвраты с отзывами и карточками',
           'Почему прибыль ниже выручки?',
+          'Эл, я устала. Помоги выбрать одно главное действие.',
+          'Похвали меня по делу: что в кабинете уже хорошо?',
         ]
       : elMode === 'gpt'
         ? ['Помоги написать ответ покупателю', 'Придумай идеи для карточки товара', 'Поболтай со мной и оцени идею', 'Составь план запуска нового товара']
@@ -1678,9 +1867,10 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
             <p>Вопросы по WB-кабинету обрабатывает собственный аналитический движок Елисея без расходов OpenAI. GPT-общение и внешние исследования подключаются отдельно.</p>
           </div>
           <div className="el-chat-actions">
+            <div className={`el-chat-presence ${elMood}`}><ElMascot compact mood={elMood}/><span><small>Эл сейчас</small><strong>{elMoodMeta[elMood] || 'На связи'}</strong></span></div>
             <span className="el-current-plan">Тариф Эла: <strong>{planTitle}</strong></span>
             {elMode === 'pro' && <label className="el-chat-toggle"><input type="checkbox" checked={elSettings.allowWeb} onChange={event => setElSettings(current => ({ ...current, allowWeb:event.target.checked }))}/> Интернет</label>}
-            <label className="el-chat-toggle"><input type="checkbox" checked={elSettings.humor} onChange={event => setElSettings(current => ({ ...current, humor:event.target.checked }))}/> Можно с юмором</label>
+            <button type="button" className={`secondary-btn ${showElPersonality ? 'active' : ''}`} onClick={() => setShowElPersonality(current => !current)}><Sparkles size={16}/> Характер Эла</button>
             <button type="button" className="secondary-btn" onClick={startNewElConversation} disabled={chatBusy}>Новый диалог</button>
           </div>
         </div>
@@ -1714,6 +1904,8 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
           </div>
         </div>
 
+        {showElPersonality && renderElPersonalityControls({ compact:true })}
+
         <div className="chat-suggestions">
           {suggestions.map(text => <button key={text} disabled={chatBusy} onClick={() => sendChat(null, text)}>{text}</button>)}
         </div>
@@ -1721,7 +1913,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         <div className="chat-stream" aria-live="polite">
           {messages.map((message,index) => (
             <div key={`${message.createdAt || index}-${index}`} className={`chat-message ${message.role} ${message.error ? 'error' : ''}`}>
-              {message.role === 'el' && <b>ЭЛ</b>}
+              {message.role === 'el' && <div className="el-message-head"><b>ЭЛ</b>{message.reaction?.label && <span className={`el-reaction-chip ${message.reaction.mood || ''}`}>{message.reaction.label}</span>}</div>}
               <p>{message.text}</p>
               {message.role === 'el' && message.mode && <div className="el-response-mode">
                 <span>{message.mode === 'analyst' ? 'Эл Аналитик' : message.mode === 'gpt' ? 'Эл GPT' : 'Эл Pro'}</span>
@@ -1729,6 +1921,11 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
               </div>}
               {message.modules?.length > 0 && <div className="el-chat-badges">{message.modules.map(module => <span key={module}>{elModuleNames[module] || module}</span>)}</div>}
               {message.usedWeb && <div className="el-web-note">Проверил актуальные источники в интернете</div>}
+              {message.role === 'el' && (message.grounding?.facts?.length > 0 || message.grounding?.assumptions?.length > 0) && <details className="el-grounding">
+                <summary>На чём основан ответ</summary>
+                {message.grounding?.facts?.length > 0 && <div><strong>Факты:</strong> {message.grounding.facts.map(item => elModuleNames[item] || item).join(', ')}</div>}
+                {message.grounding?.assumptions?.length > 0 && <div><strong>Ограничения:</strong> {message.grounding.assumptions.slice(0,3).join('; ')}</div>}
+              </details>}
               {message.sources?.length > 0 && <div className="el-chat-sources">
                 {message.sources.map((source,sourceIndex) => <a key={`${source.url}-${sourceIndex}`} href={source.url} target="_blank" rel="noreferrer">{source.title || source.url}</a>)}
               </div>}

@@ -326,6 +326,15 @@ async function initDatabase() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS el_memories_user_idx ON el_memories(user_id, cabinet_id, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS el_profiles (
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      cabinet_id TEXT NOT NULL,
+      profile JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY(user_id, cabinet_id)
+    );
+    CREATE INDEX IF NOT EXISTS el_profiles_updated_idx ON el_profiles(user_id, updated_at DESC);
     CREATE TABLE IF NOT EXISTS el_entitlements (
       user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       tier TEXT NOT NULL DEFAULT 'analyst' CHECK (tier IN ('analyst','gpt','pro')),
@@ -559,7 +568,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.16.0 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.17.0 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -4608,7 +4617,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.16.0',
+    version: '2.17.0',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -5806,6 +5815,27 @@ const elPostgresMemoryStore = pool ? {
       [key.userId, key.cabinetId, needle],
     )
     return result.rows.map(elMemoryRow)
+  },
+  async getProfile(identity) {
+    const key = elMemoryIdentity(identity)
+    const result = await pool.query(
+      `SELECT profile,updated_at FROM el_profiles WHERE user_id=$1::uuid AND cabinet_id=$2 LIMIT 1`,
+      [key.userId, key.cabinetId],
+    )
+    return result.rows[0]?.profile || null
+  },
+  async saveProfile(identity, profile) {
+    const key = elMemoryIdentity(identity)
+    const value = profile && typeof profile === 'object' ? profile : {}
+    const result = await pool.query(
+      `INSERT INTO el_profiles(user_id,cabinet_id,profile)
+       VALUES($1::uuid,$2,$3::jsonb)
+       ON CONFLICT(user_id,cabinet_id)
+       DO UPDATE SET profile=EXCLUDED.profile,updated_at=NOW()
+       RETURNING profile`,
+      [key.userId, key.cabinetId, JSON.stringify(value)],
+    )
+    return result.rows[0]?.profile || value
   },
 } : null
 

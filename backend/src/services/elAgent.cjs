@@ -5,6 +5,7 @@ const { requestResponses } = require('./openaiResponsesClient.cjs');
 const { uniqueSources, outputText } = require('./elSources.cjs');
 const { buildInstructions } = require('./elPrompt.cjs');
 const { moduleNames, detectModules } = require('./elModuleRegistry.cjs');
+const { normalizeElProfile, createVoiceContext, reactionFor } = require('./elPersonality.cjs');
 
 const MAX_TOOL_ROUNDS = 6;
 
@@ -102,6 +103,14 @@ async function executeTool(call, deps) {
 }
 
 async function runElAgent(options) {
+  const personality = normalizeElProfile(options.personality || {});
+  const voice = createVoiceContext({
+    profile: personality,
+    message: options.message,
+    history: options.history,
+    context: options.context,
+    seed: `${options.identity?.userId || 'owner'}:${options.message || ''}`,
+  });
   const model = options.model || process.env.ELISEI_AI_MODEL || '';
   if (!model) {
     const error = new Error('Для платных режимов Эла не настроена модель OpenAI. Добавьте ELISEI_GPT_MODEL и ELISEI_PRO_MODEL либо общий ELISEI_AI_MODEL.');
@@ -151,11 +160,19 @@ async function runElAgent(options) {
 
   const text = outputText(response) || 'Я всё проверил, но не смог сформировать ответ. Попробуй переформулировать вопрос.';
   const sources = uniqueSources(response);
+  const modulesUsed = [...new Set([...detectedModules, ...toolTrace.map((item) => item.module).filter(Boolean)])];
   return {
     id: response?.id || crypto.randomUUID(), text, sources,
     usedWeb: sources.length > 0 || (response?.output || []).some((item) => item?.type === 'web_search_call'),
     toolTrace, model, usage: response?.usage || null,
-    modulesUsed: [...new Set([...detectedModules, ...toolTrace.map((item) => item.module).filter(Boolean)])],
+    modulesUsed,
+    reaction: reactionFor({ voice, warning: voice.critical }),
+    answerKind: 'conversation',
+    grounding: {
+      facts: modulesUsed,
+      assumptions: sources.length ? [] : ['Ответ без внешних источников; факты кабинета подтверждаются только вызванными модулями ELISEI.'],
+    },
+    personality,
   };
 }
 

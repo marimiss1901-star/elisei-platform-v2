@@ -12,7 +12,8 @@ function identityFromRequest(req, body = {}) {
   const userId = user.id || user.userId || user.sub || req.headers['x-user-id'] || body.userId || 'owner';
   const cabinetId = body.cabinetId || req.headers['x-cabinet-id'] || req.query?.cabinetId || process.env.WB_DEFAULT_CABINET_ID || 'main';
   const cabinetName = body.cabinetName || req.headers['x-cabinet-name'] || process.env.WB_DEFAULT_CABINET_NAME || 'Основной кабинет';
-  return { userId: String(userId), cabinetId: String(cabinetId), cabinetName: String(cabinetName) };
+  const userName = body.userName || user.name || user.displayName || req.headers['x-user-name'] || '';
+  return { userId: String(userId), cabinetId: String(cabinetId), cabinetName: String(cabinetName), userName: String(userName).replace(/\s+/g, ' ').trim().slice(0, 120) };
 }
 
 async function collectBusinessContext(req, body, identity) {

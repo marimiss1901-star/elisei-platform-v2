@@ -5,6 +5,7 @@ README_5_6_1.md
 README_5_6_2.md
 README_5_6_3.md
 README_5_6_4.md
+README_5_7_0.md
 RELEASE_NOTES_V5_4_9.txt
 RELEASE_NOTES_V5_5_0.txt
 RELEASE_NOTES_V5_6_0.txt
@@ -12,8 +13,16 @@ RELEASE_NOTES_V5_6_1.txt
 RELEASE_NOTES_V5_6_2.txt
 RELEASE_NOTES_V5_6_3.txt
 RELEASE_NOTES_V5_6_4.txt
+RELEASE_NOTES_V5_7_0.txt
 backend/package.json
+backend/src/routes/elCore.cjs
 backend/src/server.js
+backend/src/services/elAgent.cjs
+backend/src/services/elAnalystEngine.cjs
+backend/src/services/elContext.cjs
+backend/src/services/elMemoryStore.cjs
+backend/src/services/elPersonality.cjs
+backend/src/services/elPrompt.cjs
 backend/src/wb/adapters/catalog.js
 backend/src/wb/adapters/promotion.js
 backend/src/wb/adapters/warehouse-remains.js
@@ -24,6 +33,7 @@ backend/src/wb/identity.js
 backend/src/wb/product-master.js
 backend/src/wb/snapshot-store.js
 backend/src/wb/stream-store.js
+backend/tests/el-personality.test.mjs
 backend/tests/warehouse-remains-parser.test.mjs
 backend/tests/wb-analytics-period.test.mjs
 backend/tests/wb-api-policy.test.mjs
