@@ -568,7 +568,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.17.4 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.17.5 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -4624,7 +4624,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.17.4',
+    version: '2.17.5',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -5630,6 +5630,14 @@ async function buildElModuleData({ req, identity, period, module, focus }) {
         returns: core.summary.returns, returnRate: core.summary.returnRate,
       },
       dailyTrend: core.dailyTrend || [],
+      fulfillment: {
+        ...(core.fulfillment || {}),
+        totalOrders:Number(core.summary?.orders || 0),
+        classifiedOrders:Number(core.fulfillment?.FBS?.orders || 0) + Number(core.fulfillment?.FBO?.orders || 0),
+        unknownOrders:Math.max(0,Number(core.summary?.orders || 0) - Number(core.fulfillment?.FBS?.orders || 0) - Number(core.fulfillment?.FBO?.orders || 0)),
+        ordersAvailable:Boolean(core.availability?.orders || sourceCounts.orders > 0),
+        source:'order_rows',
+      },
       topByRevenue: elTopProducts(products, item => item.revenue),
       topBySales: elTopProducts(products, item => item.salesCount),
     }

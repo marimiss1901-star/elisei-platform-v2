@@ -1044,6 +1044,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
             ? analyticsCore.dailyTrend
             : (Array.isArray(coreData?.dailyTrend) ? coreData.dailyTrend : [])).slice(-366),
           periodCoverage:analyticsCore?.periodCoverage || coreData?.periodCoverage || null,
+          fulfillment:analyticsCore?.fulfillment || coreData?.fulfillment || null,
           advertising:advertisingSnapshot?.totals || advertisingSnapshot || null,
           lastSync:connection.lastSync || null,
         },

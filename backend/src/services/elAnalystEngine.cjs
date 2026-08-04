@@ -59,6 +59,34 @@ function coverageWarnings(data) {
   return [...new Set(warnings.filter(Boolean))];
 }
 
+function fulfillmentOrders(data = {}) {
+  const fulfillment = data?.fulfillment && typeof data.fulfillment === 'object' ? data.fulfillment : {};
+  const fbs = Number(fulfillment?.FBS?.orders ?? fulfillment?.fbs?.orders ?? 0);
+  const fbo = Number(fulfillment?.FBO?.orders ?? fulfillment?.fbo?.orders ?? 0);
+  const total = Number(data?.summary?.orders ?? fulfillment?.totalOrders ?? 0);
+  const classified = Number.isFinite(Number(fulfillment?.classifiedOrders))
+    ? Number(fulfillment.classifiedOrders)
+    : Math.max(0,fbs) + Math.max(0,fbo);
+  const unknown = Number.isFinite(Number(fulfillment?.unknownOrders))
+    ? Math.max(0,Number(fulfillment.unknownOrders))
+    : Math.max(0,total-classified);
+  const available = Boolean(fulfillment?.ordersAvailable ?? fulfillment?.available ?? (classified > 0 || total === 0));
+  return { fbs:Math.max(0,fbs),fbo:Math.max(0,fbo),total:Math.max(0,total),classified:Math.max(0,classified),unknown,available };
+}
+
+function followupMetric(context = {}, message = '') {
+  return context?.conversationFollowup?.metric || (/(?:^|[^a-zа-я0-9])(?:fbs|фбс)(?=$|[^a-zа-я0-9])/i.test(message) ? 'fbs_orders'
+    : /(?:^|[^a-zа-я0-9])(?:fbo|фбо)(?=$|[^a-zа-я0-9])/i.test(message) ? 'fbo_orders'
+      : /возврат/i.test(message) ? 'returns'
+        : /выручк/i.test(message) ? 'revenue'
+          : /заказ/i.test(message) ? 'orders'
+            : /товар|артикул|лидер|топ/i.test(message) ? 'products' : null);
+}
+
+function isConversationalFollowup(context = {}) {
+  return Boolean(context?.conversationFollowup?.isFollowup);
+}
+
 function screenDailyRows(screen = {}) {
   const sources = [screen.dailyTrend, screen.salesDailyTrend, screen?.analytics?.dailyTrend];
   const byDate = new Map();
@@ -138,7 +166,7 @@ function screenFallback(moduleName, context = {}) {
   const period = screen.period || context.period || null;
   if (context?.period && (!screen.period || !samePeriod(context.period, screen.period))) return null;
   if (moduleName === 'sales' && has('revenue','orders','sales','returns')) {
-    return { available:true, summary, period, topByRevenue:[], topBySales:[], warning:'Использованы подтверждённые показатели текущего экрана ELISEI; товарная детализация через внутренний мост временно недоступна.' };
+    return { available:true, summary, period, fulfillment:screen.fulfillment || null, topByRevenue:[], topBySales:[], warning:'Использованы подтверждённые показатели текущего экрана ELISEI; товарная детализация через внутренний мост временно недоступна.' };
   }
   if (moduleName === 'overview' && has('revenue','orders','sales','stockUnits','operatingProfit')) {
     return { available:true, summary, period, criticalProducts:[], topRecommendations:[], warning:'Использованы подтверждённые показатели текущего экрана ELISEI.' };
@@ -173,12 +201,15 @@ function formatSales(data, tone, options = {}) {
   const s = data?.summary || {};
   const top = data?.topByRevenue || data?.topBySales || [];
   const message = String(options.message || tone?.message || '');
+  const context = options.context || {};
   const name = String(options?.identity?.userName || '').trim().split(/\s+/)[0];
   const prefix = name ? `${name}, ` : '';
   const asksRevenue = /выручк/i.test(message);
   const asksProductDetail = /товар|артикул|лидер|топ|что\s+продал|по\s+каким/i.test(message);
   const asksComparison = /сравн|динамик|рост|паден|измен/i.test(message);
-  const dateLabel = periodLabel(data, options.context);
+  const dateLabel = periodLabel(data, context);
+  const metric = followupMetric(context,message);
+  const followup = isConversationalFollowup(context);
   const lines = [];
   if (data?.periodDataAvailable === false) {
     const latest = validDateKey(data?.latestAvailableDate);
@@ -186,6 +217,28 @@ function formatSales(data, tone, options = {}) {
     const action = 'Общие потоки продаж и заказов подключены, поэтому переподключать WB не нужно — дождёмся следующей синхронизации.';
     return `${prefix}за ${dateLabel} подтверждённые строки продаж и заказов пока не дошли в ELISEI.${latestText} ${action}`.trim();
   }
+
+  if (['fbs_orders','fbo_orders'].includes(metric) || /(?:^|[^a-zа-я0-9])(?:fbs|fbo|фбс|фбо)(?=$|[^a-zа-я0-9])/i.test(message)) {
+    const split = fulfillmentOrders(data);
+    if (!split.available || (split.total > 0 && split.classified === 0)) {
+      return `${prefix}за ${dateLabel} загружено ${number(split.total)} заказов, но схема FBS/FBO по ним пока не подтверждена. Нулевую долю FBS я не показываю, чтобы не выдать отсутствие детализации за факт.`;
+    }
+    const fbsShare = split.total > 0 ? split.fbs / split.total * 100 : 0;
+    const fboShare = split.total > 0 ? split.fbo / split.total * 100 : 0;
+    const parts = [`Из ${number(split.total)} заказов за ${dateLabel}: FBS — ${number(split.fbs)} (${percent(fbsShare)}), FBO — ${number(split.fbo)} (${percent(fboShare)})`];
+    if (split.unknown > 0) parts.push(`Без подтверждённой схемы — ${number(split.unknown)}. Эти заказы не добавлены ни в FBS, ни в FBO.`);
+    else parts[0] += '.';
+    return `${prefix}${parts.join(' ')}`.trim();
+  }
+
+  if (followup && metric === 'returns') {
+    const rate = Number(s.sales || 0) > 0 ? Number(s.returns || 0) / Number(s.sales || 0) * 100 : s.returnRate;
+    return `${prefix}за ${dateLabel} возвратов — ${number(s.returns)} шт., это ${percent(rate)} от проданных единиц.`;
+  }
+  if (followup && metric === 'orders') return `${prefix}за ${dateLabel} заказов — ${number(s.orders)}.`;
+  if (followup && metric === 'sales') return `${prefix}за ${dateLabel} проданных единиц — ${number(s.sales)}.`;
+  if (followup && metric === 'revenue') return `${prefix}за ${dateLabel} выручка составила ${money(s.revenue)}.`;
+
   if (asksRevenue && !asksProductDetail && !asksComparison) {
     lines.push(`${prefix}за ${dateLabel} выручка составила ${money(s.revenue)}. Заказов — ${number(s.orders)}, проданных единиц — ${number(s.sales)}. Возвраты — ${number(s.returns)} шт.`);
   } else {
@@ -469,6 +522,7 @@ async function runElAnalyst(options = {}) {
       facts: modules.filter((module) => Boolean(results[module]?.ok)).map((module) => MODULES[module]?.title || module),
       assumptions: uniqueWarnings,
     },
+    followupContext:{ period:options.context?.period || null,modules,metric:followupMetric(options.context,message) },
     personality,
   };
 }

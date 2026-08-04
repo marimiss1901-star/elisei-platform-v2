@@ -11,6 +11,7 @@ const { publicCapabilities } = require('../services/elModuleRegistry.cjs');
 const { resolveElPlan, normalizeMode, canUseMode, publicPlan, modeLabel } = require('../services/elPlans.cjs');
 const { DEFAULT_EL_PROFILE, normalizeElProfile, mergeElProfiles } = require('../services/elPersonality.cjs');
 const { parseElTemporalRange } = require('../services/elTemporal.cjs');
+const { resolveConversationFollowup, buildAnalysisContext } = require('../services/elConversationContext.cjs');
 
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 
@@ -45,7 +46,7 @@ function createRouter(express) {
     const plan = await resolveElPlan(req, identity);
     res.json({
       ok: true,
-      version: '5.7.4',
+      version: '5.7.5',
       name: 'El Tiered Intelligence',
       configured: Boolean(process.env.OPENAI_API_KEY && (process.env.ELISEI_GPT_MODEL || process.env.ELISEI_PRO_MODEL || process.env.ELISEI_AI_MODEL)),
       models: {
@@ -96,7 +97,7 @@ function createRouter(express) {
   router.get('/capabilities', asyncRoute(async (req, res) => {
     const identity = identityFromRequest(req);
     const plan = await resolveElPlan(req, identity);
-    res.json({ ok: true, version: '5.7.4', modules: publicCapabilities(), plan, writeActions: false });
+    res.json({ ok: true, version: '5.7.5', modules: publicCapabilities(), plan, writeActions: false });
   }));
 
   router.post('/chat', asyncRoute(async (req, res) => {
@@ -119,23 +120,34 @@ function createRouter(express) {
     const conversationId = String(body.conversationId || crypto.randomUUID()).slice(0, 100);
     const serverHistory = await memoryStore.loadConversation(identity, conversationId);
     const history = serverHistory.length ? serverHistory : body.history;
+    const clock = {
+      localDate: body?.clientContext?.localDate || body?.screenContext?.localDate,
+      timeZone: body?.clientContext?.timeZone || body?.screenContext?.timeZone,
+      utcOffsetMinutes: body?.clientContext?.utcOffsetMinutes,
+    };
+    const conversationFollowup = resolveConversationFollowup({ message, history, clock, defaultPeriod:body.period });
     const classification = classifyElRequest({ message, requestedMode, history, page: body.page });
+    const salesFollowupMetrics = new Set(['fbs_orders','fbo_orders','returns','orders','sales','revenue','products']);
+    if (conversationFollowup.isFollowup && conversationFollowup.inheritedModules?.includes('sales') && salesFollowupMetrics.has(conversationFollowup.metric)) {
+      classification.modules = ['sales'];
+      classification.reason = 'conversation-followup';
+    } else if (!classification.modules?.length && conversationFollowup.inheritedModules?.length) {
+      classification.modules = conversationFollowup.inheritedModules.slice(0,4);
+      classification.reason = 'conversation-followup';
+    }
     const effectiveMode = classification.mode;
 
     if (!canUseMode(plan, effectiveMode)) throw upgradeError(effectiveMode, plan);
 
     const memories = await memoryStore.listMemories(identity);
-    const temporalIntent = parseElTemporalRange(message, {
-      localDate: body?.clientContext?.localDate || body?.screenContext?.localDate,
-      timeZone: body?.clientContext?.timeZone || body?.screenContext?.timeZone,
-      utcOffsetMinutes: body?.clientContext?.utcOffsetMinutes,
-    });
+    const temporalIntent = parseElTemporalRange(message, clock);
     const effectivePeriod = temporalIntent
       ? { from:temporalIntent.from, to:temporalIntent.to, days:temporalIntent.days }
-      : (body.period || null);
+      : (conversationFollowup.inheritedPeriod || body.period || null);
     const effectiveBody = { ...body, period:effectivePeriod };
     const context = await collectBusinessContext(req, effectiveBody, identity);
     context.temporalIntent = temporalIntent;
+    context.conversationFollowup = conversationFollowup;
     const dataBridge = createBusinessDataBridge({ req, identity, period: effectivePeriod, question: message });
     const prefetched = await dataBridge.prefetchForQuestion(message);
     context.moduleCoverage = { detected: prefetched.detectedModules, prefetched: prefetched.data };
@@ -165,9 +177,10 @@ function createRouter(express) {
         answer.apiUsed = true;
       }
 
+      const analysisContext = buildAnalysisContext({ period:effectivePeriod,modules:answer.modulesUsed || classification.modules,message,followup:conversationFollowup });
       await memoryStore.appendMessages(identity, conversationId, [
-        { role: 'user', content: message, mode: effectiveMode, createdAt: new Date().toISOString() },
-        { role: 'assistant', content: answer.text, mode: effectiveMode, sources: answer.sources, modulesUsed: answer.modulesUsed, reaction:answer.reaction, answerKind:answer.answerKind, grounding:answer.grounding, createdAt: new Date().toISOString() },
+        { role: 'user', content: message, mode: effectiveMode, resolvedPeriod:effectivePeriod, temporalIntent:temporalIntent?.kind || null, createdAt: new Date().toISOString() },
+        { role: 'assistant', content: answer.text, mode: effectiveMode, sources: answer.sources, modulesUsed: answer.modulesUsed, resolvedPeriod:effectivePeriod, analysisContext, reaction:answer.reaction, answerKind:answer.answerKind, grounding:answer.grounding, createdAt: new Date().toISOString() },
       ]);
       res.json({
         ok: true,
@@ -190,6 +203,8 @@ function createRouter(express) {
         detectedModules: prefetched.detectedModules,
         resolvedPeriod: effectivePeriod,
         temporalIntent: temporalIntent ? { kind:temporalIntent.kind,matchedText:temporalIntent.matchedText } : null,
+        conversationFollowup,
+        analysisContext,
       });
     } catch (error) {
       const payload = errorPayload(error);
