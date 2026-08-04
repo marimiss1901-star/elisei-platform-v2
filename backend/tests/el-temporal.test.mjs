@@ -68,4 +68,44 @@ const noWrongScreenFallback = await runElAnalyst({
 assert.doesNotMatch(noWrongScreenFallback.text, /6[\s\u00a0]?592[\s\u00a0]?685/)
 assert.match(noWrongScreenFallback.text, /цифр пока маловато|данных.*недостаточно/i)
 
+
+
+const exactScreenDaily = await runElAnalyst({
+  message:'что с выручкой за вчерашний день?',history:[],
+  context:{
+    period:{from:'2026-08-03',to:'2026-08-03',days:1},temporalIntent:{kind:'yesterday'},
+    screen:{
+      period:{from:'2026-07-29',to:'2026-08-04',days:7},
+      dailyTrend:[{date:'2026-08-03',revenue:438200,orders:612,sales:655,returns:7}],
+      periodCoverage:{orders:{from:'2026-07-01',to:'2026-08-03'},sales:{from:'2026-07-01',to:'2026-08-03'}},
+      summary:{revenue:6592685,orders:9111,sales:9691,returns:107,returnRate:1.1},
+    },
+  },
+  identity:{userId:'u',cabinetId:'c',userName:'Мария'},
+  personality:{character:'insider',humor:'off',support:true,address:'informal'},
+  classification:{reason:'cabinet-question',modules:['sales']},
+  dataBridge:{ async getMany(){ return { sales:{ok:false,warning:'Внутренний мост временно недоступен'} } } },
+})
+assert.match(exactScreenDaily.text,/Мария, за 3 августа 2026 года выручка составила 438[\s\u00a0]?200 ₽/)
+assert.match(exactScreenDaily.text,/Заказов — 612/)
+assert.doesNotMatch(exactScreenDaily.text,/цифр пока маловато|6[\s\u00a0]?592[\s\u00a0]?685/i)
+
+const laggedDaily = await runElAnalyst({
+  message:'что с выручкой за вчерашний день?',history:[],
+  context:{
+    period:{from:'2026-08-03',to:'2026-08-03',days:1},temporalIntent:{kind:'yesterday'},
+    screen:{
+      dailyTrend:[{date:'2026-08-02',revenue:300000,orders:400,sales:420,returns:3}],
+      periodCoverage:{orders:{from:'2026-07-01',to:'2026-08-02'},sales:{from:'2026-07-01',to:'2026-08-02'}},
+    },
+  },
+  identity:{userId:'u',cabinetId:'c',userName:'Мария'},
+  personality:{character:'insider',humor:'light',support:true,address:'informal'},
+  classification:{reason:'cabinet-question',modules:['sales']},
+  dataBridge:{ async getMany(){ return { sales:{ok:false,warning:'Нет строк за выбранный день'} } } },
+})
+assert.match(laggedDaily.text,/за 3 августа 2026 года подтверждённые строки/i)
+assert.match(laggedDaily.text,/Последняя подтверждённая дата[^.]+2 августа 2026 года/i)
+assert.doesNotMatch(laggedDaily.text,/подключение WB|кофе-брейк/i)
+
 console.log('ELISEI El temporal intent tests passed')

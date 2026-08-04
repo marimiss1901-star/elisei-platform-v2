@@ -899,7 +899,6 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         address:elSettings.address,
         noHumorInCritical:true,
         preferredName:elSettings.preferredName,
-        userName:preferredElName,
       }, connection.connectionId || 'main', user?.company || 'Основной кабинет WB')
       if (result?.profile) setElSettings(current => normalizeElSettings({ ...current, ...result.profile }))
       notify('Характер Эла сохранён для этого кабинета.')
@@ -1011,7 +1010,8 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         personality:{
           character:elSettings.character, humor:elSettings.humor, support:elSettings.support,
           celebrations:elSettings.celebrations, address:elSettings.address,
-          preferredName:elSettings.preferredName, noHumorInCritical:true,
+          ...(elSettings.preferredName ? { preferredName:elSettings.preferredName } : {}),
+          noHumorInCritical:true,
         },
         userName:preferredElName,
         clientContext:{
@@ -1040,6 +1040,10 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
           timeZone:clientTimeZone,
           period,
           summary,
+          dailyTrend:(Array.isArray(analyticsCore?.dailyTrend) && analyticsCore.dailyTrend.length
+            ? analyticsCore.dailyTrend
+            : (Array.isArray(coreData?.dailyTrend) ? coreData.dailyTrend : [])).slice(-366),
+          periodCoverage:analyticsCore?.periodCoverage || coreData?.periodCoverage || null,
           advertising:advertisingSnapshot?.totals || advertisingSnapshot || null,
           lastSync:connection.lastSync || null,
         },

@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const { detectModules, MODULES } = require('./elModuleRegistry.cjs');
 const { BUSINESS_RE } = require('./elModeRouter.cjs');
 const { normalizeElProfile, createVoiceContext, humorLine, socialResponse, noDataResponse, reactionFor } = require('./elPersonality.cjs');
-const { formatRuPeriod, validDateKey } = require('./elTemporal.cjs');
+const { formatRuPeriod, formatRuDate, validDateKey } = require('./elTemporal.cjs');
 
 const money = (value) => value == null || !Number.isFinite(Number(value)) ? 'нет данных' : `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(Number(value))} ₽`;
 const number = (value) => value == null || !Number.isFinite(Number(value)) ? 'нет данных' : new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 }).format(Number(value));
@@ -59,8 +59,79 @@ function coverageWarnings(data) {
   return [...new Set(warnings.filter(Boolean))];
 }
 
+function screenDailyRows(screen = {}) {
+  const sources = [screen.dailyTrend, screen.salesDailyTrend, screen?.analytics?.dailyTrend];
+  const byDate = new Map();
+  for (const rows of sources) {
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const date = validDateKey(row?.date || row?.day || row?.dt);
+      if (!date) continue;
+      byDate.set(date, {
+        date,
+        revenue:Number(row?.revenue || 0),
+        orders:Number(row?.orders || 0),
+        sales:Number(row?.sales || 0),
+        returns:Number(row?.returns || 0),
+      });
+    }
+  }
+  return [...byDate.values()].sort((a,b) => a.date.localeCompare(b.date));
+}
+
+function screenSalesCoverage(screen = {}) {
+  const coverage = screen.periodCoverage || screen.dataCoverage || {};
+  const sales = coverage.sales && typeof coverage.sales === 'object' ? coverage.sales : {};
+  const orders = coverage.orders && typeof coverage.orders === 'object' ? coverage.orders : {};
+  const from = [sales.from,orders.from].map(validDateKey).filter(Boolean).sort()[0] || null;
+  const to = [sales.to,orders.to].map(validDateKey).filter(Boolean).sort().at(-1) || null;
+  return { from,to };
+}
+
+function exactDailySalesFromScreen(context = {}) {
+  const screen = context?.screen && typeof context.screen === 'object' ? context.screen : {};
+  const period = periodKeys(context.period || {});
+  if (!period.from || period.from !== period.to) return null;
+  const rows = screenDailyRows(screen);
+  const row = rows.find(item => item.date === period.from);
+  const coverage = screenSalesCoverage(screen);
+  const observed = row && [row.revenue,row.orders,row.sales,row.returns].some(value => Number(value || 0) !== 0);
+  const covered = Boolean(coverage.from && coverage.to && period.from >= coverage.from && period.from <= coverage.to);
+  if (row && (observed || covered)) {
+    return {
+      available:true,
+      period:{ from:period.from,to:period.to,days:1 },
+      periodDataAvailable:true,
+      selectedRows:{ orders:Number(row.orders || 0),sales:Number(row.sales || 0) },
+      summary:{
+        revenue:Number(row.revenue || 0),orders:Number(row.orders || 0),sales:Number(row.sales || 0),returns:Number(row.returns || 0),
+        returnRate:Number(row.sales || 0) > 0 ? Number(row.returns || 0) / Number(row.sales || 0) * 100 : 0,
+      },
+      topByRevenue:[],topBySales:[],
+      source:'screen_daily_trend',
+    };
+  }
+  const latest = coverage.to || rows.at(-1)?.date || null;
+  if (latest && period.from > latest) {
+    return {
+      available:true,
+      period:{ from:period.from,to:period.to,days:1 },
+      periodDataAvailable:false,
+      selectedRows:{orders:0,sales:0},
+      latestAvailableDate:latest,
+      summary:{revenue:null,orders:null,sales:null,returns:null,returnRate:null},
+      topByRevenue:[],topBySales:[],
+      source:'screen_daily_coverage',
+    };
+  }
+  return null;
+}
+
 function screenFallback(moduleName, context = {}) {
   const screen = context?.screen && typeof context.screen === 'object' ? context.screen : {};
+  if (moduleName === 'sales') {
+    const exactDaily = exactDailySalesFromScreen(context);
+    if (exactDaily) return exactDaily;
+  }
   const summary = screen?.summary && typeof screen.summary === 'object' ? screen.summary : null;
   if (!summary) return null;
   const has = (...keys) => keys.some((key) => summary[key] != null && Number.isFinite(Number(summary[key])));
@@ -109,6 +180,12 @@ function formatSales(data, tone, options = {}) {
   const asksComparison = /сравн|динамик|рост|паден|измен/i.test(message);
   const dateLabel = periodLabel(data, options.context);
   const lines = [];
+  if (data?.periodDataAvailable === false) {
+    const latest = validDateKey(data?.latestAvailableDate);
+    const latestText = latest ? ` Последняя подтверждённая дата в потоках — ${formatRuDate(latest,true)}.` : '';
+    const action = 'Общие потоки продаж и заказов подключены, поэтому переподключать WB не нужно — дождёмся следующей синхронизации.';
+    return `${prefix}за ${dateLabel} подтверждённые строки продаж и заказов пока не дошли в ELISEI.${latestText} ${action}`.trim();
+  }
   if (asksRevenue && !asksProductDetail && !asksComparison) {
     lines.push(`${prefix}за ${dateLabel} выручка составила ${money(s.revenue)}. Заказов — ${number(s.orders)}, проданных единиц — ${number(s.sales)}. Возвраты — ${number(s.returns)} шт.`);
   } else {

@@ -9,7 +9,7 @@ const { classifyElRequest } = require('../services/elModeRouter.cjs');
 const { createBusinessDataBridge } = require('../services/elBusinessDataBridge.cjs');
 const { publicCapabilities } = require('../services/elModuleRegistry.cjs');
 const { resolveElPlan, normalizeMode, canUseMode, publicPlan, modeLabel } = require('../services/elPlans.cjs');
-const { DEFAULT_EL_PROFILE, normalizeElProfile } = require('../services/elPersonality.cjs');
+const { DEFAULT_EL_PROFILE, normalizeElProfile, mergeElProfiles } = require('../services/elPersonality.cjs');
 const { parseElTemporalRange } = require('../services/elTemporal.cjs');
 
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
@@ -45,7 +45,7 @@ function createRouter(express) {
     const plan = await resolveElPlan(req, identity);
     res.json({
       ok: true,
-      version: '5.7.3',
+      version: '5.7.4',
       name: 'El Tiered Intelligence',
       configured: Boolean(process.env.OPENAI_API_KEY && (process.env.ELISEI_GPT_MODEL || process.env.ELISEI_PRO_MODEL || process.env.ELISEI_AI_MODEL)),
       models: {
@@ -96,7 +96,7 @@ function createRouter(express) {
   router.get('/capabilities', asyncRoute(async (req, res) => {
     const identity = identityFromRequest(req);
     const plan = await resolveElPlan(req, identity);
-    res.json({ ok: true, version: '5.7.3', modules: publicCapabilities(), plan, writeActions: false });
+    res.json({ ok: true, version: '5.7.4', modules: publicCapabilities(), plan, writeActions: false });
   }));
 
   router.post('/chat', asyncRoute(async (req, res) => {
@@ -114,7 +114,7 @@ function createRouter(express) {
     const requestedMode = normalizeMode(body.mode || 'analyst');
     const memoryStore = createMemoryStore(req.app?.locals?.elMemoryStore);
     const storedProfile = typeof memoryStore.getProfile === 'function' ? await memoryStore.getProfile(identity) : null;
-    const personality = normalizeElProfile({ ...(storedProfile || DEFAULT_EL_PROFILE), ...(body.personality || {}) });
+    const personality = mergeElProfiles(storedProfile || DEFAULT_EL_PROFILE, body.personality || {});
     if (personality.preferredName) identity.userName = personality.preferredName;
     const conversationId = String(body.conversationId || crypto.randomUUID()).slice(0, 100);
     const serverHistory = await memoryStore.loadConversation(identity, conversationId);

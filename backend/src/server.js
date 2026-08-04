@@ -568,7 +568,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.17.3 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.17.4 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -4624,7 +4624,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.17.3',
+    version: '2.17.4',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -5606,10 +5606,25 @@ async function buildElModuleData({ req, identity, period, module, focus }) {
   }
   if (module === 'sales') {
     const salesAvailable = Boolean(core.availability?.orders || core.availability?.sales || sourceCounts.orders > 0 || sourceCounts.sales > 0)
+    const selectedRows = {
+      orders:Array.isArray(filtered.data?.orders) ? filtered.data.orders.length : 0,
+      sales:Array.isArray(filtered.data?.sales) ? filtered.data.sales.length : 0,
+    }
+    const periodDataAvailable = !filtered.range || selectedRows.orders > 0 || selectedRows.sales > 0
+    const periodCoverage = filtered.data?.__periodCoverage || null
+    const latestAvailableDate = [periodCoverage?.orders?.to,periodCoverage?.sales?.to].filter(Boolean).sort().at(-1) || null
     return {
       ...base,
       available:salesAvailable,
-      warning:salesAvailable ? null : 'Продажи и заказы ещё не синхронизированы для выбранного кабинета.',
+      periodDataAvailable,
+      selectedRows,
+      periodCoverage,
+      latestAvailableDate,
+      warning:!salesAvailable
+        ? 'Продажи и заказы ещё не синхронизированы для выбранного кабинета.'
+        : (filtered.range && !periodDataAvailable
+          ? `Потоки продаж и заказов загружены, но за период ${filtered.range.from} — ${filtered.range.to} подтверждённых строк пока нет.`
+          : null),
       summary: {
         revenue: core.summary.revenue, orders: core.summary.orders, sales: core.summary.sales,
         returns: core.summary.returns, returnRate: core.summary.returnRate,

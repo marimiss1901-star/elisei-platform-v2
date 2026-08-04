@@ -124,7 +124,9 @@ function normalizeElProfile(input = {}) {
   if (humorInput === false) humorInput = 'off';
   const humor = HUMOR_VALUES.has(String(humorInput || '')) ? String(humorInput) : DEFAULT_EL_PROFILE.humor;
   const address = ADDRESS_VALUES.has(String(input.address || '')) ? String(input.address) : DEFAULT_EL_PROFILE.address;
-  const preferredName = String(input.preferredName || input.userName || '')
+  // Имя для общения задаётся только явно. Имя аккаунта не записываем в профиль
+  // автоматически: владелец кабинета и фактический пользователь могут различаться.
+  const preferredName = String(input.preferredName || '')
     .replace(/[^\p{L}\p{M} .'-]+/gu, '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -138,6 +140,18 @@ function normalizeElProfile(input = {}) {
     preferredName,
     noHumorInCritical: true,
   };
+}
+
+
+function mergeElProfiles(stored = {}, incoming = {}) {
+  const saved = stored && typeof stored === 'object' ? stored : {};
+  const patch = incoming && typeof incoming === 'object' ? incoming : {};
+  const merged = { ...saved, ...patch };
+  // Пустое значение из старого frontend не должно стирать уже сохранённое имя.
+  if (!String(patch.preferredName || '').trim() && String(saved.preferredName || '').trim()) {
+    merged.preferredName = saved.preferredName;
+  }
+  return normalizeElProfile(merged);
 }
 
 function historyText(history = []) {
@@ -331,6 +345,7 @@ function reactionFor({ voice, kind = 'analysis', positive = false, warning = fal
 module.exports = {
   DEFAULT_EL_PROFILE,
   normalizeElProfile,
+  mergeElProfiles,
   createVoiceContext,
   humorLine,
   socialResponse,

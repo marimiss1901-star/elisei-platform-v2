@@ -6,7 +6,7 @@ import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
 const {
-  normalizeElProfile, createVoiceContext, humorLine, socialResponse,
+  normalizeElProfile, mergeElProfiles, createVoiceContext, humorLine, socialResponse,
 } = require('../src/services/elPersonality.cjs')
 const { createMemoryStore } = require('../src/services/elMemoryStore.cjs')
 const { runElAnalyst } = require('../src/services/elAnalystEngine.cjs')
@@ -18,6 +18,8 @@ assert.equal(migrated.humor, 'light')
 assert.equal(migrated.support, false)
 assert.equal(migrated.address, 'formal')
 assert.equal(migrated.noHumorInCritical, true)
+assert.equal(normalizeElProfile({userName:'Алексей'}).preferredName, '', 'account name must not be silently persisted as El preferred name')
+assert.equal(mergeElProfiles({preferredName:'Мария',character:'insider'},{preferredName:'',humor:'noticeable'}).preferredName, 'Мария', 'blank chat payload must not erase stored preferred name')
 
 const criticalVoice = createVoiceContext({
   profile:{ character:'insider',humor:'noticeable' },
