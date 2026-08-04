@@ -45,7 +45,15 @@ export const wbApi = {
   current: () => request('/api/wb/connection'),
   connect: (token, label = '') => request('/api/wb/connect', { method: 'POST', body: JSON.stringify({ token, label }) }),
   status: (connectionId) => request(`/api/wb/status/${encodeURIComponent(connectionId)}`),
-  sync: (connectionId, stages = null) => request('/api/wb/sync', { method: 'POST', body: JSON.stringify({ connectionId, ...(Array.isArray(stages) ? { stages } : {}) }), signal: AbortSignal.timeout(110000) }),
+  sync: (connectionId, stages = null, options = {}) => request('/api/wb/sync', {
+    method: 'POST',
+    body: JSON.stringify({
+      connectionId,
+      ...(Array.isArray(stages) ? { stages } : {}),
+      ...(options?.period?.from && options?.period?.to ? { period:{ from:String(options.period.from).slice(0,10),to:String(options.period.to).slice(0,10) } } : {}),
+    }),
+    signal: AbortSignal.timeout(110000),
+  }),
   dashboard: (connectionId) => request(`/api/wb/dashboard/${encodeURIComponent(connectionId)}`),
   products: (connectionId) => request(`/api/wb/products/${encodeURIComponent(connectionId)}`),
   core: (connectionId, params = {}) => {
@@ -55,9 +63,32 @@ export const wbApi = {
     const suffix = query.toString() ? `?${query.toString()}` : ''
     return request(`/api/wb/core/${encodeURIComponent(connectionId)}${suffix}`)
   },
-  advertising: (connectionId) => request(`/api/wb/advertising/${encodeURIComponent(connectionId)}`),
+  advertising: (connectionId, params = {}) => {
+    const query = new URLSearchParams()
+    if (params?.from) query.set('from',String(params.from).slice(0,10))
+    if (params?.to) query.set('to',String(params.to).slice(0,10))
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return request(`/api/wb/advertising/${encodeURIComponent(connectionId)}${suffix}`)
+  },
   diagnostics: (connectionId) => request(`/api/wb/diagnostics/${encodeURIComponent(connectionId)}`),
-  extended: (stream, connectionId, afterKey = '', limit = 150) => request(`/api/wb/extended/${encodeURIComponent(stream)}?connectionId=${encodeURIComponent(connectionId)}&limit=${encodeURIComponent(limit)}${afterKey ? `&afterKey=${encodeURIComponent(afterKey)}` : ''}`),
+  financeLedger: (connectionId, params = {}) => {
+    const query = new URLSearchParams()
+    for (const [key,value] of Object.entries(params || {})) {
+      if (value === undefined || value === null || value === '' || value === 'all') continue
+      query.set(key,String(value))
+    }
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return request(`/api/wb/finance-ledger/${encodeURIComponent(connectionId)}${suffix}`)
+  },
+  extended: (stream, connectionId, options = {}, legacyLimit = 150) => {
+    const params = typeof options === 'string' ? { afterKey:options,limit:legacyLimit } : (options || {})
+    const query = new URLSearchParams({ connectionId:String(connectionId),limit:String(params.limit || 150) })
+    for (const key of ['afterKey','from','to','query','status','rating','warehouse']) {
+      const value = params[key]
+      if (value !== undefined && value !== null && String(value).trim() !== '') query.set(key,String(value))
+    }
+    return request(`/api/wb/extended/${encodeURIComponent(stream)}?${query.toString()}`)
+  },
   repairStocks: (connectionId, taskId = '') => request(`/api/wb/stocks/${encodeURIComponent(connectionId)}/repair`, { method: 'POST', body: JSON.stringify({ ...(taskId ? { taskId } : {}) }), signal: AbortSignal.timeout(75000) }),
   syncHistory: (connectionId) => request(`/api/wb/sync-history/${encodeURIComponent(connectionId)}`),
   removeToken: (tokenId) => request(`/api/wb/tokens/${encodeURIComponent(tokenId)}`, { method: 'DELETE' }),

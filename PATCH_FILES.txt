@@ -1,15 +1,14 @@
-Файлы проекта, которые обновляет патч ELISEI 5.6.1 поверх 5.6.0:
+Файлы проекта, которые обновляет патч ELISEI 5.6.2 поверх 5.6.1:
 
 FILES.txt
 README.md
-README_5_6_1.md
-RELEASE_NOTES_V5_6_1.txt
+README_5_6_2.md
+RELEASE_NOTES_V5_6_2.txt
 backend/package.json
 backend/src/server.js
-backend/tests/wb-analytics-period.test.mjs
+backend/tests/wb-global-period.test.mjs
 package.json
-src/components/MetricCard.jsx
-src/components/TrendChart.jsx
+src/components/WbExtendedWorkspace.jsx
 src/lib/api.js
 src/pages/DashboardPage.jsx
 src/styles/app.css

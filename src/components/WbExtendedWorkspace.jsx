@@ -15,6 +15,11 @@ const formatDateTime = value => {
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('ru-RU')
 }
+const formatDate = value => {
+  if (!value) return '—'
+  const date = new Date(`${String(value).slice(0,10)}T00:00:00`)
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString('ru-RU')
+}
 const csvCell = value => `"${String(value ?? '').replaceAll('"','""')}"`
 
 function atPath(row, path) {
@@ -53,23 +58,38 @@ function saveCsv(filename, headers, rows) {
   URL.revokeObjectURL(url)
 }
 
-const emptyStream = { rows:[], total:0, next:null, payload:null, state:null, status:'idle', updatedAt:null }
+const emptyStream = { rows:[], total:0, next:null, payload:null, summary:null, coverage:null, state:null, status:'idle', updatedAt:null }
 
-export default function WbExtendedWorkspace({ mode, connection, syncing, onSync, notify }) {
+export default function WbExtendedWorkspace({
+  mode, connection, syncing, onSync, notify, period, periodControls,
+  query = '', onQueryChange = () => {},
+}) {
   const [communicationTab,setCommunicationTab] = useState('reviews')
   const [streams,setStreams] = useState({})
   const [loading,setLoading] = useState({})
-  const [filter,setFilter] = useState('')
+  const [statusFilter,setStatusFilter] = useState('all')
+  const [ratingFilter,setRatingFilter] = useState('all')
+  const [warehouseFilter,setWarehouseFilter] = useState('')
   const stream = mode === 'search' ? 'searchQueries' : mode === 'stock' ? 'stockHistory' : communicationTab
   const data = streams[stream] || emptyStream
   const stageState = (connection.syncStates || []).find(item=>item.stage === stream) || data.state
+
+  const requestOptions = ({ append = false } = {}) => ({
+    afterKey:append ? (streams[stream]?.next || '') : '',
+    limit:150,
+    from:period?.from,
+    to:period?.to,
+    query,
+    status:statusFilter,
+    rating:stream === 'reviews' ? ratingFilter : '',
+    warehouse:stream === 'stockHistory' ? warehouseFilter : '',
+  })
 
   const load = async ({ append = false } = {}) => {
     if (!connection.connectionId || loading[stream]) return
     setLoading(current=>({...current,[stream]:true}))
     try {
-      const previous = streams[stream] || emptyStream
-      const result = await wbApi.extended(stream,connection.connectionId,append ? previous.next || '' : '',150)
+      const result = await wbApi.extended(stream,connection.connectionId,requestOptions({append}))
       setStreams(current=>({
         ...current,
         [stream]:{
@@ -85,21 +105,28 @@ export default function WbExtendedWorkspace({ mode, connection, syncing, onSync,
   }
 
   useEffect(()=>{
-    setFilter('')
-    load().catch(()=>{})
+    setStatusFilter('all')
+    setRatingFilter('all')
+    setWarehouseFilter('')
+  },[stream])
+
+  useEffect(()=>{
+    const timer=window.setTimeout(()=>load().catch(()=>{}),280)
+    return ()=>window.clearTimeout(timer)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[stream,connection.connectionId,stageState?.lastSuccessAt,stageState?.status])
+  },[stream,connection.connectionId,stageState?.lastSuccessAt,stageState?.status,period?.from,period?.to,query,statusFilter,ratingFilter,warehouseFilter])
 
   const startSync = async () => {
-    await onSync(connection.connectionId,[stream])
+    await onSync(connection.connectionId,[stream],{period})
     await load()
   }
 
-  const filtered = useMemo(()=>{
-    const needle = filter.trim().toLowerCase()
-    if (!needle) return data.rows || []
-    return (data.rows || []).filter(row=>JSON.stringify(row).toLowerCase().includes(needle))
-  },[data.rows,filter])
+  const rows = data.rows || []
+  const selectedPeriodLabel = period?.from && period?.to ? `${formatDate(period.from)} — ${formatDate(period.to)}` : 'период не выбран'
+  const coverage = data.coverage || {}
+  const available = coverage.available || {}
+  const coverageLimited = Boolean(period?.from && period?.to && available?.from && available?.to && (period.from < available.from || period.to > available.to))
+  const periodMismatch = coverage.reason === 'search_report_requires_exact_period'
 
   const statusNotice = () => {
     if (!connection.connected) return <div className="notice warning"><AlertTriangle size={20}/><div><strong>Подключите Wildberries</strong><p>Раздел работает только с данными кабинета текущего пользователя.</p></div></div>
@@ -107,90 +134,97 @@ export default function WbExtendedWorkspace({ mode, connection, syncing, onSync,
     if (stageState?.status === 'missing_token') return <div className="notice warning"><AlertTriangle size={20}/><div><strong>Не хватает категории API-токена</strong><p>{stageState.lastError || 'Добавьте разрешение для этого потока в разделе подключений.'}</p></div></div>
     if (['pending','queued','running','rate_limited'].includes(stageState?.status)) return <div className="notice info"><RefreshCw className={stageState?.status==='running'?'spin':''} size={20}/><div><strong>Загрузка продолжается в очереди</strong><p>{stageState.lastError || `Уже сохранено ${formatNumber(stageState?.metadata?.persistedCount || stageState?.lastCount || 0)} строк.${stageState?.nextAllowedAt ? ` Следующая попытка: ${formatDateTime(stageState.nextAllowedAt)}.` : ''}`}</p></div></div>
     if (stageState?.status === 'error' || stageState?.status === 'forbidden') return <div className="notice warning"><AlertTriangle size={20}/><div><strong>WB не отдал данные</strong><p>{stageState.lastError || 'Повторите загрузку после проверки разрешений токена.'}</p></div><button onClick={startSync}>Повторить</button></div>
+    if (periodMismatch) return <div className="notice warning"><AlertTriangle size={20}/><div><strong>Для выбранного периода нужен новый отчёт</strong><p>Сейчас сохранён отчёт за {formatDate(available.from)} — {formatDate(available.to)}. Поисковые показатели агрегированы WB за весь интервал, поэтому ELISEI не разрезает их приблизительно.</p></div><button onClick={startSync}>Загрузить {selectedPeriodLabel}</button></div>
+    if (coverageLimited) return <div className="notice info"><AlertTriangle size={20}/><div><strong>Данные покрывают не весь выбранный период</strong><p>В базе есть строки с {formatDate(available.from)} по {formatDate(available.to)}. Дни вне покрытия не считаются подтверждённым нулём.</p></div><button onClick={startSync}>Обновить выбранный период</button></div>
     return null
   }
 
-  const toolbar = label => <div className="extended-toolbar">
-    <div className="extended-search"><Search size={16}/><input value={filter} onChange={event=>setFilter(event.target.value)} placeholder={`Поиск: ${label}`}/></div>
-    <button className="secondary-btn" disabled={syncing || loading[stream]} onClick={startSync}><RefreshCw size={16} className={(syncing||loading[stream])?'spin':''}/> Обновить</button>
+  const toolbar = label => <div className="extended-toolbar extended-toolbar-filters">
+    <div className="extended-search"><Search size={16}/><input value={query} onChange={event=>onQueryChange(event.target.value)} placeholder={`Поиск: ${label}`}/></div>
+    {stream === 'searchQueries' && <select value={statusFilter} onChange={event=>setStatusFilter(event.target.value)}><option value="all">Все строки</option><option value="group">Группы запросов</option><option value="query">Фразы по товарам</option></select>}
+    {stream === 'stockHistory' && <><select value={statusFilter} onChange={event=>setStatusFilter(event.target.value)}><option value="all">Любой остаток</option><option value="positive">Есть остаток</option><option value="zero">Нулевой остаток</option></select><input className="extended-warehouse-filter" value={warehouseFilter} onChange={event=>setWarehouseFilter(event.target.value)} placeholder="Склад точно"/></>}
+    {(stream === 'reviews' || stream === 'questions') && <select value={statusFilter} onChange={event=>setStatusFilter(event.target.value)}><option value="all">Все статусы</option><option value="unanswered">Без ответа</option><option value="answered">С ответом</option>{stream === 'reviews' && <option value="archived">Архив</option>}</select>}
+    {stream === 'reviews' && <select value={ratingFilter} onChange={event=>setRatingFilter(event.target.value)}><option value="all">Любая оценка</option>{[5,4,3,2,1].map(value=><option key={value} value={value}>{value} ★</option>)}</select>}
+    {stream === 'chats' && <select value={statusFilter} onChange={event=>setStatusFilter(event.target.value)}><option value="all">Диалоги и события</option><option value="chat">Только диалоги</option><option value="event">Только события</option></select>}
+    <button className="secondary-btn" disabled={syncing || loading[stream]} onClick={startSync}><RefreshCw size={16} className={(syncing||loading[stream])?'spin':''}/> Обновить период</button>
   </div>
 
-  const pager = () => <div className="extended-pager"><span>Показано {formatNumber(filtered.length)} из {formatNumber(data.total || data.rows?.length || 0)}</span>{data.next && <button className="secondary-btn" disabled={loading[stream]} onClick={()=>load({append:true})}>{loading[stream] ? <RefreshCw size={15} className="spin"/> : null} Показать ещё</button>}</div>
+  const pager = () => <div className="extended-pager"><span>Показано {formatNumber(rows.length)} из {formatNumber(data.total || 0)} · {selectedPeriodLabel}</span>{data.next && <button className="secondary-btn" disabled={loading[stream]} onClick={()=>load({append:true})}>{loading[stream] ? <RefreshCw size={15} className="spin"/> : null} Показать ещё</button>}</div>
 
   if (mode === 'search') {
-    const summary = data.payload?.summary || {}
-    const common = summary.commonInfo || {}
-    const rows = filtered
+    const summary = data.summary || data.payload?.summary || {}
+    const common = data.payload?.summary?.commonInfo || {}
     const exportRows = rows.map(row=>{
       const product = productInfo(row)
       return [pick(row,['searchText','searchQuery','query','keyword','text','name']),product.nmID,product.vendorCode,pick(row,['frequency','requestCount','searchCount','count']),pick(row,['avgPosition','averagePosition','position']),pick(row,['openCard','openCardCount','views']),pick(row,['addToCart','addToCartCount','cart']),pick(row,['orders','orderCount']),pick(row,['orderSum','revenue','sum'])]
     })
     return <section className="app-page glass-panel">
-      <div className="page-title"><span>WB Аналитика</span><h1>Поисковые запросы</h1><p>Запросы покупателей, позиции карточек, переходы, корзины и заказы. Отсутствие подписки «Джем» показывается отдельным статусом, а не нулём.</p></div>
+      <div className="page-title"><span>WB Аналитика</span><h1>Поисковые запросы</h1><p>Запросы покупателей, позиции карточек, переходы, корзины и заказы по единому периоду кабинета.</p></div>
+      {periodControls}
       {statusNotice()}
       <div className="metrics-grid four">
-        <MetricCard label="Строк отчёта" value={data.updatedAt?formatNumber(data.total):'Не загружено'} delta={data.updatedAt?`обновлено ${formatDateTime(data.updatedAt)}`:'ожидает синхронизацию'} icon={Search}/>
+        <MetricCard label="Строк отчёта" value={data.updatedAt?formatNumber(data.total):'Не загружено'} delta={data.updatedAt?selectedPeriodLabel:'ожидает синхронизацию'} icon={Search}/>
         <MetricCard label="Товаров в отчёте" value={formatNumber(pick(common,['totalProducts','productsCount'],data.payload?.productsScanned))} delta="просканировано по nmID" icon={PackageSearch}/>
-        <MetricCard label="Средняя позиция" value={formatNumber(pick(summary.positionInfo || {},['average','avg','position']))} delta="по доступному отчёту WB" icon={Eye}/>
-        <MetricCard label="Видимость" value={formatPercent(pick(summary.visibilityInfo || {},['visibility','percent','value']))} delta="если показатель отдан WB" icon={Star}/>
+        <MetricCard label="Средняя позиция" value={formatNumber(pick(data.payload?.summary?.positionInfo || {},['average','avg','position']))} delta="по доступному отчёту WB" icon={Eye}/>
+        <MetricCard label="Видимость" value={formatPercent(pick(data.payload?.summary?.visibilityInfo || {},['visibility','percent','value']))} delta="если показатель отдан WB" icon={Star}/>
       </div>
       {toolbar('фраза, артикул, товар')}
-      <div className="extended-actions"><button className="ghost-export" disabled={!rows.length} onClick={()=>saveCsv('elisei-search-queries.csv',['Запрос','nmID','Артикул продавца','Частотность','Позиция','Переходы','Корзины','Заказы','Выручка'],exportRows)}><Download size={16}/> CSV для Excel</button></div>
-      <div className="data-table extended-table"><div className="data-row head search-query-row"><span>Запрос / товар</span><span>Артикулы</span><span>Частотность</span><span>Позиция</span><span>Переходы</span><span>Корзины</span><span>Заказы</span><span>Выручка</span></div>{rows.length ? rows.map((row,index)=>{ const product=productInfo(row); const phrase=pick(row,['searchText','searchQuery','query','keyword','text','name'],product.title); return <div className="data-row search-query-row" key={row.rowKey || `${phrase}-${index}`}><span><strong>{phrase || 'Группа запросов'}</strong><small>{row.rowType === 'query' ? 'Фраза по товару' : 'Сводный отчёт'}</small></span><span><strong>{product.nmID || '—'}</strong><small>{product.vendorCode || product.title || '—'}</small></span><span>{formatNumber(pick(row,['frequency','requestCount','searchCount','count']))}</span><span>{formatNumber(pick(row,['avgPosition','averagePosition','position']))}</span><span>{formatNumber(pick(row,['openCard','openCardCount','views']))}</span><span>{formatNumber(pick(row,['addToCart','addToCartCount','cart']))}</span><span>{formatNumber(pick(row,['orders','orderCount']))}</span><span>{formatMoney(pick(row,['orderSum','revenue','sum']))}</span></div>}) : <div className="product-empty">Поисковые запросы ещё не загружены.</div>}</div>
+      <div className="extended-actions"><button className="ghost-export" disabled={!rows.length} onClick={()=>saveCsv(`elisei-search-queries-${period?.from}-${period?.to}.csv`,['Запрос','nmID','Артикул продавца','Частотность','Позиция','Переходы','Корзины','Заказы','Выручка'],exportRows)}><Download size={16}/> CSV для Excel</button></div>
+      <div className="data-table extended-table"><div className="data-row head search-query-row"><span>Запрос / товар</span><span>Артикулы</span><span>Частотность</span><span>Позиция</span><span>Переходы</span><span>Корзины</span><span>Заказы</span><span>Выручка</span></div>{rows.length ? rows.map((row,index)=>{ const product=productInfo(row); const phrase=pick(row,['searchText','searchQuery','query','keyword','text','name'],product.title); return <div className="data-row search-query-row" key={row.rowKey || `${phrase}-${index}`}><span><strong>{phrase || 'Группа запросов'}</strong><small>{row.rowType === 'query' ? 'Фраза по товару' : 'Сводный отчёт'}</small></span><span><strong>{product.nmID || '—'}</strong><small>{product.vendorCode || product.title || '—'}</small></span><span>{formatNumber(pick(row,['frequency','requestCount','searchCount','count']))}</span><span>{formatNumber(pick(row,['avgPosition','averagePosition','position']))}</span><span>{formatNumber(pick(row,['openCard','openCardCount','views']))}</span><span>{formatNumber(pick(row,['addToCart','addToCartCount','cart']))}</span><span>{formatNumber(pick(row,['orders','orderCount']))}</span><span>{formatMoney(pick(row,['orderSum','revenue','sum']))}</span></div>}) : <div className="product-empty">За выбранный период поисковый отчёт не загружен.</div>}</div>
       {pager()}
     </section>
   }
 
   if (mode === 'stock') {
-    const summary = data.payload?.summary || {}
-    const rows = filtered
+    const summary = data.summary || data.payload?.summary || {}
     return <section className="app-page glass-panel">
-      <div className="page-title"><span>Запасы · 90 дней</span><h1>История остатков</h1><p>Ежедневный CSV-архив WB: остатки по датам, товарам и складам. Текущий срез и история хранятся раздельно.</p></div>
+      <div className="page-title"><span>Запасы · история</span><h1>История остатков</h1><p>Ежедневный CSV-архив WB по датам, товарам и складам. Максимум одного официального отчёта — 90 дней.</p></div>
+      {periodControls}
       {statusNotice()}
       <div className="metrics-grid four">
-        <MetricCard label="Последний остаток" value={formatNumber(summary.latestQuantity)} delta={summary.latestDate?`на ${summary.latestDate}`:'ожидает отчёт'} icon={Warehouse}/>
-        <MetricCard label="Дней истории" value={formatNumber(summary.dates)} delta="до 90 дней" icon={RefreshCw}/>
+        <MetricCard label="Последний остаток" value={formatNumber(summary.latestQuantity)} delta={summary.latestDate?`на ${formatDate(summary.latestDate)}`:'ожидает отчёт'} icon={Warehouse}/>
+        <MetricCard label="Дней истории" value={formatNumber(summary.dates)} delta={selectedPeriodLabel} icon={RefreshCw}/>
         <MetricCard label="Товаров" value={formatNumber(summary.products)} delta="уникальных nmID" icon={PackageSearch}/>
-        <MetricCard label="Складов" value={formatNumber(summary.warehouses)} delta="в отчёте WB" icon={Warehouse}/>
+        <MetricCard label="Складов" value={formatNumber(summary.warehouses)} delta="после фильтров" icon={Warehouse}/>
       </div>
       {Array.isArray(summary.daily) && summary.daily.length > 0 && <div className="history-strip">{summary.daily.slice(-14).map(item=><div key={item.date}><span>{item.date?.slice(5)}</span><strong>{formatNumber(item.quantity)}</strong><small>{formatNumber(item.rows)} строк</small></div>)}</div>}
       {toolbar('дата, nmID, артикул, склад')}
-      <div className="extended-actions"><button className="ghost-export" disabled={!rows.length} onClick={()=>saveCsv('elisei-stock-history.csv',['Дата','nmID','Артикул продавца','Товар','Склад','Остаток','К клиенту','От клиента'],rows.map(row=>[row.date,row.nmID,row.vendorCode,row.title,row.warehouse,row.quantity,row.inWayToClient,row.inWayFromClient]))}><Download size={16}/> CSV для Excel</button></div>
-      <div className="data-table extended-table"><div className="data-row head stock-history-row"><span>Дата</span><span>Товар</span><span>Артикулы</span><span>Склад</span><span>Остаток</span><span>В пути</span></div>{rows.length ? rows.map((row,index)=><div className="data-row stock-history-row" key={row.rowKey || `${row.date}-${row.nmID}-${row.warehouse}-${index}`}><span>{row.date || '—'}</span><span><strong>{row.title || 'Товар WB'}</strong><small>{row.sourceFile || 'CSV WB'}</small></span><span><strong>{row.nmID || '—'}</strong><small>{row.vendorCode || '—'}</small></span><span>{row.warehouse || '—'}</span><span><strong>{formatNumber(row.quantity)}</strong></span><span>{formatNumber(Number(row.inWayToClient||0)+Number(row.inWayFromClient||0))}</span></div>) : <div className="product-empty">История остатков ещё не загружена.</div>}</div>
+      <div className="extended-actions"><button className="ghost-export" disabled={!rows.length} onClick={()=>saveCsv(`elisei-stock-history-${period?.from}-${period?.to}.csv`,['Дата','nmID','Артикул продавца','Товар','Склад','Остаток','К клиенту','От клиента'],rows.map(row=>[row.date,row.nmID,row.vendorCode,row.title,row.warehouse,row.quantity,row.inWayToClient,row.inWayFromClient]))}><Download size={16}/> CSV для Excel</button></div>
+      <div className="data-table extended-table"><div className="data-row head stock-history-row"><span>Дата</span><span>Товар</span><span>Артикулы</span><span>Склад</span><span>Остаток</span><span>В пути</span></div>{rows.length ? rows.map((row,index)=><div className="data-row stock-history-row" key={row.rowKey || `${row.date}-${row.nmID}-${row.warehouse}-${index}`}><span>{formatDate(row.date)}</span><span><strong>{row.title || 'Товар WB'}</strong><small>{row.sourceFile || 'CSV WB'}</small></span><span><strong>{row.nmID || '—'}</strong><small>{row.vendorCode || '—'}</small></span><span>{row.warehouse || '—'}</span><span><strong>{formatNumber(row.quantity)}</strong></span><span>{formatNumber(Number(row.inWayToClient||0)+Number(row.inWayFromClient||0))}</span></div>) : <div className="product-empty">За выбранный период строк истории остатков нет.</div>}</div>
       {pager()}
     </section>
   }
 
   const tabs = [{id:'reviews',label:'Отзывы',icon:Star},{id:'questions',label:'Вопросы',icon:HelpCircle},{id:'chats',label:'Чаты',icon:MessageCircle}]
-  const summary = data.payload?.summary || {}
-  const rows = filtered
+  const summary = data.summary || data.payload?.summary || {}
   const reviewRows = rows.filter(row=>row.rowType === 'reviews' || communicationTab === 'reviews')
   const questionRows = rows.filter(row=>row.rowType === 'questions' || communicationTab === 'questions')
   const chatRows = rows.filter(row=>row.rowType === 'chat')
   const eventRows = rows.filter(row=>row.rowType === 'event')
 
   return <section className="app-page glass-panel">
-    <div className="page-title"><span>Коммуникации WB</span><h1>Отзывы, вопросы и чаты</h1><p>Единый центр входящих обращений. В этой версии чаты работают в безопасном режиме чтения; автоматическая отправка сообщений не включена.</p></div>
+    <div className="page-title"><span>Коммуникации WB</span><h1>Отзывы, вопросы и чаты</h1><p>Единый центр входящих обращений с периодом, поиском и фильтрами статусов. Чаты остаются в безопасном режиме чтения.</p></div>
+    {periodControls}
     <div className="finance-tabs communication-tabs">{tabs.map(({id,label,icon:Icon})=><button key={id} className={communicationTab===id?'active':''} onClick={()=>setCommunicationTab(id)}><Icon size={15}/> {label}</button>)}</div>
     {statusNotice()}
     {communicationTab !== 'chats' ? <div className="metrics-grid four">
-      <MetricCard label="Всего" value={data.updatedAt?formatNumber(data.total):'Не загружено'} delta={communicationTab==='reviews'?'включая архив':'за всю доступную историю'} icon={communicationTab==='reviews'?Star:HelpCircle}/>
+      <MetricCard label="Всего" value={data.updatedAt?formatNumber(data.total):'Не загружено'} delta={selectedPeriodLabel} icon={communicationTab==='reviews'?Star:HelpCircle}/>
       <MetricCard label="Без ответа" value={formatNumber(summary.unanswered)} delta="требуют внимания" icon={AlertTriangle}/>
       <MetricCard label="С ответом" value={formatNumber(summary.answered)} delta="обработано" icon={ShieldCheck}/>
-      <MetricCard label={communicationTab==='reviews'?'Архив':'Полнота'} value={communicationTab==='reviews'?formatNumber(summary.archived):(data.payload?.truncated?'Есть пропуски':'Полная')} delta={communicationTab==='reviews'?'отдельный поток WB':'окна автоматически делятся'} icon={RefreshCw}/>
+      <MetricCard label={communicationTab==='reviews'?'Архив':'Полнота'} value={communicationTab==='reviews'?formatNumber(summary.archived):(data.payload?.truncated?'Есть пропуски':'Полная')} delta={communicationTab==='reviews'?'в выбранном периоде':'окна автоматически делятся'} icon={RefreshCw}/>
     </div> : <div className="metrics-grid four">
-      <MetricCard label="Диалогов" value={formatNumber(data.payload?.chatCount ?? chatRows.length)} delta="список чатов" icon={MessageCircle}/>
-      <MetricCard label="Событий" value={formatNumber(data.payload?.eventCount ?? eventRows.length)} delta="сообщения и статусы" icon={RefreshCw}/>
+      <MetricCard label="Диалогов" value={formatNumber(summary.chatCount ?? chatRows.length)} delta={selectedPeriodLabel} icon={MessageCircle}/>
+      <MetricCard label="Событий" value={formatNumber(summary.eventCount ?? eventRows.length)} delta="после фильтров" icon={RefreshCw}/>
       <MetricCard label="Режим" value="Только чтение" delta="без отправки сообщений" icon={ShieldCheck}/>
       <MetricCard label="Обновлено" value={data.updatedAt?formatDateTime(data.updatedAt):'Не загружено'} delta="из API WB" icon={RefreshCw}/>
     </div>}
     {toolbar(communicationTab==='chats'?'чат, сообщение, покупатель':'текст, товар, артикул')}
 
-    {communicationTab === 'reviews' && <div className="communication-list">{reviewRows.length ? reviewRows.map((row,index)=>{ const product=productInfo(row); const rating=number(pick(row,['productValuation','valuation','rating'])); return <article className="communication-card" key={row.rowKey || row.id || index}><div className="communication-card-head"><div><strong>{row.userName || 'Покупатель'}</strong><span>{formatDateTime(row.createdDate || row.createdAt)}</span></div><b className="rating-pill">{rating ? `${rating} ★` : 'Без оценки'}</b></div><h3>{product.title}</h3><p>{row.text || 'Покупатель оставил оценку без текста.'}</p>{row.pros && <small><b>Плюсы:</b> {row.pros}</small>}{row.cons && <small><b>Минусы:</b> {row.cons}</small>}<footer><span>nmID {product.nmID || '—'} · {product.vendorCode || '—'}</span><b className={`status-badge ${row.isAnswered?'success':'warning'}`}>{row.archived?'Архив':row.isAnswered?'Есть ответ':'Нужен ответ'}</b></footer></article>}) : <div className="product-empty">Отзывы ещё не загружены.</div>}</div>}
+    {communicationTab === 'reviews' && <div className="communication-list">{reviewRows.length ? reviewRows.map((row,index)=>{ const product=productInfo(row); const rating=number(pick(row,['productValuation','valuation','rating'])); return <article className="communication-card" key={row.rowKey || row.id || index}><div className="communication-card-head"><div><strong>{row.userName || 'Покупатель'}</strong><span>{formatDateTime(row.createdDate || row.createdAt)}</span></div><b className="rating-pill">{rating ? `${rating} ★` : 'Без оценки'}</b></div><h3>{product.title}</h3><p>{row.text || 'Покупатель оставил оценку без текста.'}</p>{row.pros && <small><b>Плюсы:</b> {row.pros}</small>}{row.cons && <small><b>Минусы:</b> {row.cons}</small>}<footer><span>nmID {product.nmID || '—'} · {product.vendorCode || '—'}</span><b className={`status-badge ${row.isAnswered?'success':'warning'}`}>{row.archived?'Архив':row.isAnswered?'Есть ответ':'Нужен ответ'}</b></footer></article>}) : <div className="product-empty">За выбранный период отзывов нет.</div>}</div>}
 
-    {communicationTab === 'questions' && <div className="communication-list">{questionRows.length ? questionRows.map((row,index)=>{ const product=productInfo(row); return <article className="communication-card" key={row.rowKey || row.id || index}><div className="communication-card-head"><div><strong>Вопрос покупателя</strong><span>{formatDateTime(row.createdDate || row.createdAt)}</span></div><b className={`status-badge ${row.isAnswered?'success':'warning'}`}>{row.isAnswered?'Отвечен':'Без ответа'}</b></div><h3>{product.title}</h3><p>{row.text || row.question || 'Текст вопроса не получен.'}</p>{row.answer?.text && <small><b>Ответ:</b> {row.answer.text}</small>}<footer><span>nmID {product.nmID || '—'} · {product.vendorCode || '—'}</span><span>{row.wasViewed === false ? 'Не просмотрен' : 'Просмотрен'}</span></footer></article>}) : <div className="product-empty">Вопросы ещё не загружены.</div>}</div>}
+    {communicationTab === 'questions' && <div className="communication-list">{questionRows.length ? questionRows.map((row,index)=>{ const product=productInfo(row); return <article className="communication-card" key={row.rowKey || row.id || index}><div className="communication-card-head"><div><strong>Вопрос покупателя</strong><span>{formatDateTime(row.createdDate || row.createdAt)}</span></div><b className={`status-badge ${row.isAnswered?'success':'warning'}`}>{row.isAnswered?'Отвечен':'Без ответа'}</b></div><h3>{product.title}</h3><p>{row.text || row.question || 'Текст вопроса не получен.'}</p>{row.answer?.text && <small><b>Ответ:</b> {row.answer.text}</small>}<footer><span>nmID {product.nmID || '—'} · {product.vendorCode || '—'}</span><span>{row.wasViewed === false ? 'Не просмотрен' : 'Просмотрен'}</span></footer></article>}) : <div className="product-empty">За выбранный период вопросов нет.</div>}</div>}
 
-    {communicationTab === 'chats' && <><div className="notice info"><ShieldCheck size={20}/><div><strong>Безопасный режим чтения</strong><p>ELISEI загружает список диалогов и события, но не отправляет сообщения и не сохраняет служебную подпись ответа WB.</p></div></div><div className="data-table extended-table"><div className="data-row head chat-event-row"><span>Тип</span><span>Чат / покупатель</span><span>Сообщение</span><span>Дата</span><span>Статус</span></div>{rows.length ? rows.map((row,index)=>{ const message=rowText(row); const chatId=pick(row,['chatID','chatId','chat.id','clientID','clientId']); const sender=pick(row,['sender','senderName','userName','clientName','message.sender'],'Покупатель'); return <div className="data-row chat-event-row" key={row.rowKey || row.eventID || `${chatId}-${index}`}><span><b className={`status-badge ${row.rowType==='chat'?'info':'success'}`}>{row.rowType==='chat'?'Диалог':'Событие'}</b></span><span><strong>{sender}</strong><small>{chatId || 'ID не указан'}</small></span><span>{message || pick(row,['eventType','type'],'Системное событие')}</span><span>{formatDateTime(pick(row,['addTimestamp','createdAt','createdDate','timestamp','date']))}</span><span>{pick(row,['status','eventType','type'],row.rowType==='chat'?'Открыт':'Получено')}</span></div>}) : <div className="product-empty">Чаты ещё не загружены.</div>}</div></>}
+    {communicationTab === 'chats' && <><div className="notice info"><ShieldCheck size={20}/><div><strong>Безопасный режим чтения</strong><p>ELISEI загружает список диалогов и события, но не отправляет сообщения и не сохраняет служебную подпись ответа WB.</p></div></div><div className="data-table extended-table"><div className="data-row head chat-event-row"><span>Тип</span><span>Чат / покупатель</span><span>Сообщение</span><span>Дата</span><span>Статус</span></div>{rows.length ? rows.map((row,index)=>{ const message=rowText(row); const chatId=pick(row,['chatID','chatId','chat.id','clientID','clientId']); const sender=pick(row,['sender','senderName','userName','clientName','message.sender'],'Покупатель'); return <div className="data-row chat-event-row" key={row.rowKey || row.eventID || `${chatId}-${index}`}><span><b className={`status-badge ${row.rowType==='chat'?'info':'success'}`}>{row.rowType==='chat'?'Диалог':'Событие'}</b></span><span><strong>{sender}</strong><small>{chatId || 'ID не указан'}</small></span><span>{message || pick(row,['eventType','type'],'Системное событие')}</span><span>{formatDateTime(pick(row,['addTimestamp','createdAt','createdDate','timestamp','date']))}</span><span>{pick(row,['status','eventType','type'],row.rowType==='chat'?'Открыт':'Получено')}</span></div>}) : <div className="product-empty">За выбранный период событий чатов нет.</div>}</div></>}
     {pager()}
   </section>
 }

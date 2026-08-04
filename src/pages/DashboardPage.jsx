@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle, BarChart3, Bell, Boxes, Calculator, CalendarDays, CheckCircle2, ChevronDown,
   ChevronRight, ChevronUp, CircleDollarSign, CreditCard, Download, Eye, EyeOff, FileText, Home, LogOut,
-  Megaphone, MessageCircle, PackageSearch, Percent, PlugZap, RefreshCw, Save, Search, Send,
+  Info, Megaphone, MessageCircle, PackageSearch, Percent, PlugZap, RefreshCw, Save, Search, Send,
   Settings, ShieldCheck, SlidersHorizontal, Sparkles, Star, Tag, TrendingUp, UsersRound,
   Upload, WalletCards, Warehouse, X
 } from 'lucide-react'
@@ -313,14 +313,13 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [analyticsXyz, setAnalyticsXyz] = useState('Все')
   const [analyticsStock, setAnalyticsStock] = useState('Все')
   const [advertisingSnapshot, setAdvertisingSnapshot] = useState(null)
+  const [advertisingCoverage, setAdvertisingCoverage] = useState(null)
   const [integrationDiagnostics, setIntegrationDiagnostics] = useState(null)
   const [financeLedger, setFinanceLedger] = useState(null)
   const [financeLedgerLoading, setFinanceLedgerLoading] = useState(false)
   const [financeTab, setFinanceTab] = useState('overview')
-  const [financeQuery, setFinanceQuery] = useState('')
   const [financePage, setFinancePage] = useState(1)
   const [advertisingTab, setAdvertisingTab] = useState('overview')
-  const [advertisingFilter, setAdvertisingFilter] = useState('')
   const [advertisingStatusFilter, setAdvertisingStatusFilter] = useState('all')
   const [advertisingTrendMetric, setAdvertisingTrendMetric] = useState('spend')
   const [liveProducts, setLiveProducts] = useState([])
@@ -351,13 +350,13 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
   const loadFinanceLedger = async (connectionId = connection.connectionId, options = {}) => {
     if (!connectionId) return
-    const range = financeDateRange()
+    const range = { from:analyticsPeriod.from, to:analyticsPeriod.to }
     setFinanceLedgerLoading(true)
     try {
       const result = await wbApi.financeLedger(connectionId, {
         ...range,
         ...financeRequestForTab(options.tab || financeTab),
-        query:options.query ?? financeQuery,
+        query:options.query ?? query,
         page:options.page ?? financePage,
         limit:120,
       })
@@ -380,22 +379,30 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `elisei-finance-${financeDateRange().from}-${financeDateRange().to}.csv`
+    anchor.download = `elisei-finance-${analyticsPeriod.from}-${analyticsPeriod.to}.csv`
     anchor.click()
     URL.revokeObjectURL(url)
   }
 
   const loadConnectionData = async connectionId => {
     const [dashboard, productResult, historyResult, coreResult, advertisingResult, diagnosticsResult] = await Promise.all([
-      wbApi.dashboard(connectionId), wbApi.products(connectionId), wbApi.syncHistory(connectionId), wbApi.core(connectionId), wbApi.advertising(connectionId), wbApi.diagnostics(connectionId)
+      wbApi.dashboard(connectionId), wbApi.products(connectionId), wbApi.syncHistory(connectionId), wbApi.core(connectionId), wbApi.advertising(connectionId,{ from:analyticsPeriod.from,to:analyticsPeriod.to }), wbApi.diagnostics(connectionId)
     ])
     setDashboardData(dashboard.dashboard || null)
     setLiveProducts(productResult.products || [])
     setSyncHistory(historyResult.history || [])
     setCoreData(coreResult.core || null)
     setAdvertisingSnapshot(advertisingResult.advertising || coreResult.core?.advertising || null)
+    setAdvertisingCoverage(advertisingResult.coverage || null)
     setIntegrationDiagnostics(diagnosticsResult || null)
     if (coreResult.core?.settings) setSettingsDraft(coreResult.core.settings)
+  }
+
+  const loadAdvertisingData = async (connectionId = connection.connectionId, period = analyticsPeriod) => {
+    if (!connectionId || !period?.from || !period?.to) return
+    const result = await wbApi.advertising(connectionId,{ from:period.from,to:period.to })
+    setAdvertisingSnapshot(result.advertising || null)
+    setAdvertisingCoverage(result.coverage || null)
   }
 
   const loadAnalyticsData = async (connectionId, period = analyticsPeriod, compare = analyticsCompare) => {
@@ -496,10 +503,10 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       } catch { /* фоновая проверка не должна мешать работе интерфейса */ }
     }, 15000)
     return () => window.clearInterval(timer)
-  }, [connection.connected, connection.connectionId])
+  }, [connection.connected, connection.connectionId, analyticsPeriod.from, analyticsPeriod.to])
 
   useEffect(() => {
-    if (!['Остатки','Реклама'].includes(active) || !connection.connected || !connection.connectionId) return
+    if (active !== 'Остатки' || !connection.connected || !connection.connectionId) return
     loadConnectionData(connection.connectionId).catch(() => {})
   }, [active, connection.connected, connection.connectionId])
 
@@ -516,9 +523,9 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   }, [analyticsCompare])
 
   useEffect(() => {
-    if (active !== 'Аналитика' || !connection.connected || !connection.connectionId) return undefined
+    if (!['Аналитика','Остатки','Финансы'].includes(active) || !connection.connected || !connection.connectionId) return undefined
     const timer = window.setTimeout(() => {
-      loadAnalyticsData(connection.connectionId,analyticsPeriod,analyticsCompare)
+      loadAnalyticsData(connection.connectionId,analyticsPeriod,active === 'Аналитика' ? analyticsCompare : false)
     }, 320)
     return () => window.clearTimeout(timer)
   }, [active, connection.connected, connection.connectionId, connection.lastSync, analyticsPeriod.from, analyticsPeriod.to, analyticsCompare])
@@ -529,8 +536,21 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       loadFinanceLedger(connection.connectionId).catch(() => {})
     }, 280)
     return () => window.clearTimeout(timer)
-  }, [active, connection.connected, connection.connectionId, financeTab, financeQuery, financePage,
+  }, [active, connection.connected, connection.connectionId, financeTab, query, financePage, analyticsPeriod.from, analyticsPeriod.to,
       (connection.syncStates || []).find(item => ['finance','acquiring','paidStorage','acceptance'].includes(item.stage))?.lastSuccessAt])
+
+  useEffect(() => {
+    if (active !== 'Реклама' || !connection.connected || !connection.connectionId) return undefined
+    const timer = window.setTimeout(() => {
+      loadAdvertisingData(connection.connectionId,analyticsPeriod).catch(error => notify(error.message,8000))
+    }, 280)
+    return () => window.clearTimeout(timer)
+  }, [active, connection.connected, connection.connectionId, analyticsPeriod.from, analyticsPeriod.to,
+      (connection.syncStates || []).find(item => item.stage === 'advertising')?.lastSuccessAt])
+
+  useEffect(() => {
+    setFinancePage(1)
+  }, [financeTab,query,analyticsPeriod.from,analyticsPeriod.to])
 
   const nav = [
     ['Главная', Home], ['Аналитика', BarChart3], ['Товары', PackageSearch], ['Остатки', Boxes], ['История остатков', Warehouse],
@@ -653,6 +673,28 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
   const setAnalyticsPreset = preset => setAnalyticsPeriod(periodPresetValue(preset))
 
+  const renderSharedPeriodControls = ({ note = '', maxDays = null } = {}) => {
+    const selectedDays = periodDaysBetween(analyticsPeriod)
+    const limited = maxDays && selectedDays > maxDays
+    return <div className="workspace-period-controls">
+      <div className="analytics-control-panel workspace-period-panel">
+        <div className="analytics-period-head">
+          <div><CalendarDays size={18}/><span>Единый период</span><strong>{formatDate(analyticsPeriod.from)} — {formatDate(analyticsPeriod.to)}</strong><small>{selectedDays} дн.</small></div>
+          <small className="workspace-period-global">Применяется ко всему кабинету</small>
+        </div>
+        <div className="analytics-presets">
+          {[['7','7 дней'],['30','30 дней'],['90','90 дней'],['month','Этот месяц'],['prevMonth','Прошлый месяц'],['year','Этот год']].map(([key,label]) => <button key={key} className={analyticsPeriod.preset===key?'active':''} onClick={() => setAnalyticsPreset(key)}>{label}</button>)}
+        </div>
+        <div className="analytics-date-range">
+          <label><span>С</span><input type="date" value={analyticsPeriod.from} min={addDays(analyticsPeriod.to,-365)} max={analyticsPeriod.to} onChange={event => setAnalyticsPeriod(current => ({ ...current,preset:'custom',from:event.target.value }))}/></label>
+          <span className="analytics-date-arrow">→</span>
+          <label><span>По</span><input type="date" value={analyticsPeriod.to} min={analyticsPeriod.from} max={earlierIsoDate(isoLocalDate(new Date()),addDays(analyticsPeriod.from,365))} onChange={event => setAnalyticsPeriod(current => ({ ...current,preset:'custom',to:event.target.value }))}/></label>
+        </div>
+      </div>
+      {(note || limited) && <div className={`workspace-period-note ${limited ? 'warning' : ''}`}><Info size={17}/><span>{limited ? `WB ограничивает один запрос этого раздела периодом ${maxDays} дн. ELISEI покажет фактическое покрытие и не подставит нули за недоступные даты.` : note}</span></div>}
+    </div>
+  }
+
   const changeProductSort = key => setProductSort(current => current.key === key
     ? { key, direction:current.direction === 'asc' ? 'desc' : 'asc' }
     : { key, direction:'desc' })
@@ -664,21 +706,23 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     { id:'demo-quality', type:'quality', title:'Проверить возвраты', text:'Эл выделит товары с повышенной долей возвратов.', effect:'Улучшение качества' },
   ]
 
-  const syncConnection = async (connectionId = connection.connectionId, stages = null) => {
+  const syncConnection = async (connectionId = connection.connectionId, stages = null, options = {}) => {
     if (!connectionId || syncing) return
     setSyncing(true)
     try {
-      const result = await wbApi.sync(connectionId, stages)
+      const result = await wbApi.sync(connectionId, stages, options)
       const normalized = normalizeConnection({ connected:true, lastSync:result.lastSync, syncStates:result.syncStates || connectionRef.current.syncStates }, connectionRef.current)
       connectionRef.current = normalized
       syncRevisionRef.current = syncDataRevision(normalized)
       setConnection(normalized)
       setDashboardData(result.dashboard || null)
       setCoreData(result.core || null)
-      setAdvertisingSnapshot(result.core?.advertising || null)
+      if (!stages || !stages.includes('advertising')) setAdvertisingSnapshot(result.core?.advertising || null)
       setSyncHistory(result.syncHistory || [])
       const productResult = await wbApi.products(connectionId)
       setLiveProducts(productResult.products || [])
+      if (stages?.includes('advertising')) await loadAdvertisingData(connectionId,options.period || analyticsPeriod)
+      if (stages?.some(stage => ['searchQueries','stockHistory','reviews','questions','chats'].includes(stage))) { /* workspace перечитает поток по обновлённому статусу */ }
       notify(result.warnings?.length
         ? `Синхронизация завершена частично: ${result.warnings[0]}`
         : `Готово: ${result.counts.products} товаров, ${result.counts.orders} заказов, ${result.counts.sales} продаж`,
@@ -1122,6 +1166,20 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   )
 
   const renderStocks = () => {
+    const periodStockSummary = analyticsCore?.summary || summary
+    const periodStockRows = analyticsBaseProducts.length ? analyticsBaseProducts : productRows
+    const stockNeedle = query.trim().toLowerCase()
+    const visibleStockRows = periodStockRows.filter(row => {
+      const matchesQuery = !stockNeedle || [row.article,row.vendorCode,row.barcode,row.title,row.brand,row.nmID,row.key].join(' ').toLowerCase().includes(stockNeedle)
+      const matchesStatus = productFilter === 'Все' ||
+        (productFilter === 'В наличии' && row.status === 'В наличии') ||
+        (productFilter === 'Заканчиваются' && row.status === 'Заканчивается') ||
+        (productFilter === 'Нет остатка' && row.status === 'Нет остатка') ||
+        (productFilter === 'Избыток' && ['Избыток','Без движения'].includes(row.status)) ||
+        (productFilter === 'С продажами' && row.salesCount != null && Number(row.salesCount) > 0) ||
+        (productFilter === 'Без продаж' && row.salesCount != null && Number(row.salesCount) === 0)
+      return matchesQuery && matchesStatus
+    })
     const stockState = connection.syncStates?.find(item => item.stage === 'stocks')
     const stockAvailable = Boolean(coreData?.availability?.stocks)
     const stockDetailsAvailable = Boolean(coreData?.availability?.stockDetails)
@@ -1138,6 +1196,8 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     const repairStockMapping = () => reportHasNoIdentities ? repairStockSnapshot() : syncConnection(connection.connectionId, ['products'])
 
     return <section className="app-page glass-panel"><div className="page-title"><span>Управление запасами</span><h1>Остатки</h1><p>Дни запаса, дефицит, излишки, замороженные деньги и план пополнения.</p></div>{requireConnection(<>
+      {renderSharedPeriodControls({ note:'Остаток берётся из последнего официального снимка WB, а продажи, скорость и дни запаса пересчитываются по единому выбранному периоду.' })}
+      <div className="workspace-filter-bar"><label><Search size={16}/><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Товар, артикул, nmID, бренд или штрихкод"/></label><select value={productFilter} onChange={event => setProductFilter(event.target.value)}><option>Все</option><option>В наличии</option><option>Заканчиваются</option><option>Нет остатка</option><option>Избыток</option><option>С продажами</option><option>Без продаж</option></select><span>{formatNumber(visibleStockRows.length)} товаров</span></div>
       {!stockAvailable && <div className="notice warning"><RefreshCw size={20}/><div><strong>{legacyIgnored ? 'Старые некорректные остатки скрыты' : stockState?.status === 'pending' ? 'Отчёт остатков формируется в WB' : 'Остатки ещё не загружены'}</strong><p>{legacyIgnored ? 'Предыдущие значения не имели подтверждённого источника WB и больше не участвуют в расчётах. Дождитесь нового отчёта.' : stockState?.lastError || (nextAttempt ? `Следующая автоматическая проверка: ${nextAttempt}.` : 'Запустите отдельный этап остатков. ELISEI создаст отчёт и заберёт его в фоне.')}</p></div><button disabled={syncing || stockState?.status === 'pending'} onClick={() => syncConnection(connection.connectionId, ['stocks'])}>{stockState?.status === 'pending' ? 'Формируется' : 'Загрузить остатки'}</button></div>}
       {mappingNeedsRefresh && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Остатки получены, но каталог не совпал с отчётом</strong><p>{reportHasNoIdentities ? 'Сохранённый снимок старой версии содержит количества по складам, но потерял nmID, штрихкоды и артикулы. ELISEI повторно скачает готовый отчёт по сохранённому taskId; если срок его хранения истёк, новый снимок будет поставлен в очередь.' : 'Официальный отчёт остатков сопоставляется по nmID, штрихкоду размера и артикулу продавца; chrtID для этого отчёта не требуется. ELISEI обновит каталог и повторно выполнит сопоставление уже сохранённого снимка без нового запроса остатков.'}</p><small>Отчёт: nmID {formatNumber(stockMeta?.reportIdentityCounts?.nmIds || 0)}, штрихкодов {formatNumber(stockMeta?.reportIdentityCounts?.barcodes || 0)}, артикулов {formatNumber(stockMeta?.reportIdentityCounts?.vendorCodes || 0)} · каталог: nmID {formatNumber(stockMeta?.catalogIdentityCounts?.nmIds || 0)}, штрихкодов {formatNumber(stockMeta?.catalogIdentityCounts?.barcodes || 0)}, артикулов {formatNumber(stockMeta?.catalogIdentityCounts?.vendorCodes || 0)}</small></div><button disabled={syncing} onClick={repairStockMapping}>{reportHasNoIdentities ? 'Восстановить отчёт' : 'Обновить каталог'}</button></div>}
       {missingDetails && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Сумма остатков сохранена, но детализация потеряна</strong><p>WB вернул {formatNumber(stockMeta?.totalQuantity || 0)} шт., однако в базе нет строк по артикулам и складам. Общая сумма показана честно, а товары не помечаются нулевыми.</p></div><button disabled={syncing || stockState?.status === 'pending'} onClick={repairStockSnapshot}>Восстановить детализацию</button></div>}
@@ -1145,15 +1205,19 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       {quantityMismatch && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Найдена разница в сохранённом снимке</strong><p>В отчёте WB {formatNumber(stockMeta?.totalQuantity || 0)} шт., в строках детализации — {formatNumber(stockMeta?.calculatedQuantity || 0)} шт. ELISEI использует сумму отчёта и предлагает обновить детализацию.</p></div></div>}
       {zeroSnapshot && <div className="notice info"><CheckCircle2 size={20}/><div><strong>Отчёт WB загружен: остаток равен нулю</strong><p>Wildberries вернул {formatNumber(stockMeta?.rows || 0)} строк по товарам и размерам, но суммарное доступное количество — 0 шт. Это не ошибка загрузки.</p></div></div>}
       {stockAvailable && stockDetailsAvailable && !zeroSnapshot && <div className="notice success"><CheckCircle2 size={20}/><div><strong>Официальный снимок остатков WB</strong><p>{formatNumber(stockMeta?.persistedRows ?? stockMeta?.rows ?? 0)} строк · {formatNumber(stockMeta?.totalQuantity || 0)} шт. · сопоставлено {formatNumber(stockMeta?.mappedRows || 0)} строк ({formatPercent(stockMeta?.mappingCoveragePercent)}) · получено {stockMeta?.receivedAt ? new Date(stockMeta.receivedAt).toLocaleString('ru-RU') : '—'}.</p></div></div>}
-      <div className="metrics-grid four"><MetricCard label="Всего единиц" value={formatNumber(summary.stockUnits)} delta={stockAvailable ? (stockDetailsAvailable ? `${formatNumber(stockMeta?.mappedProducts || 0)} товаров сопоставлено` : 'нужно сопоставить с каталогом') : 'данные ожидаются'} icon={Boxes}/><MetricCard label="Нет остатка" value={formatNumber(summary.zeroStock)} delta="потенциально упущенные продажи" icon={AlertTriangle}/><MetricCard label="Заканчиваются" value={formatNumber(summary.lowStock)} delta="запас менее 14 дней" icon={Warehouse}/><MetricCard label="Избыток" value={formatNumber(summary.slowStock)} delta="запас выше нормы" icon={PackageSearch}/></div>
+      <div className="metrics-grid four"><MetricCard label="Всего единиц" value={formatNumber(periodStockSummary.stockUnits)} delta={stockAvailable ? (stockDetailsAvailable ? `${formatNumber(stockMeta?.mappedProducts || 0)} товаров сопоставлено` : 'нужно сопоставить с каталогом') : 'данные ожидаются'} icon={Boxes}/><MetricCard label="Нет остатка" value={formatNumber(periodStockSummary.zeroStock)} delta="потенциально упущенные продажи" icon={AlertTriangle}/><MetricCard label="Заканчиваются" value={formatNumber(periodStockSummary.lowStock)} delta="запас менее 14 дней" icon={Warehouse}/><MetricCard label="Избыток" value={formatNumber(periodStockSummary.slowStock)} delta="запас выше нормы" icon={PackageSearch}/></div>
       {stockAvailable && coreData?.warehouses?.length > 0 && <div className="warehouse-grid">{coreData.warehouses.slice(0,8).map(row => <div className="warehouse-card" key={row.name}><Warehouse size={18}/><span>{row.name}</span><strong>{formatNumber(row.quantity)} шт.</strong></div>)}</div>}
-      <div className="data-table stock-table"><div className="data-row head stock-row"><span>Товар</span><span>Продажи</span><span>Остаток</span><span>Дней запаса</span><span>Заморожено</span><span>Статус</span><span>Что делать</span></div>{productRows.length === 0 ? <div className="product-empty">Сначала загрузите каталог товаров.</div> : [...productRows].sort((a,b) => (a.stockCoverDays ?? 99999) - (b.stockCoverDays ?? 99999)).map(p => <div className="data-row stock-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatNumber(p.salesCount)}</span><span>{formatNumber(p.stock)}</span><span>{p.stockCoverDays ?? '—'}</span><span>{p.stock == null ? '—' : formatMoney(p.frozenMoney || 0)}</span><span><b className={`status-badge ${stockTone(p.status)}`}>{p.status}</b></span><span>{p.recommendation}</span></div>)}</div>
-      {stockAvailable && coreData?.stockDetails?.length > 0 && <><div className="section-title-row"><div><span>Детализация</span><h2>По артикулам, размерам и складам</h2></div><small>{formatNumber(coreData.stockDetails.length)} строк</small></div><div className="data-table stock-detail-table"><div className="data-row head stock-detail-row"><span>Товар</span><span>Размер</span><span>nmID / штрихкод</span><span>Склад</span><span>Остаток</span></div>{coreData.stockDetails.slice(0,500).map(row => <div className="data-row stock-detail-row" key={row.key}><span><strong>{row.title}</strong><small>{row.vendorCode || `nmID ${row.nmID || '—'}`}</small></span><span>{row.techSize || '—'}</span><span>{row.nmID || row.barcode || '—'}{row.nmID && row.barcode ? <small>{row.barcode}</small> : null}</span><span>{row.warehouseName}</span><span>{formatNumber(row.quantity)}</span></div>)}</div></>}
-      {unmatchedRows.length > 0 && <><div className="section-title-row"><div><span>Диагностика</span><h2>Не сопоставленные строки WB</h2></div><small>{formatNumber(unmatchedRows.length)} строк</small></div><div className="data-table stock-detail-table"><div className="data-row head stock-detail-row"><span>Идентификатор</span><span>Размер</span><span>nmID / штрихкод</span><span>Склад</span><span>Остаток</span></div>{unmatchedRows.slice(0,200).map(row => <div className="data-row stock-detail-row" key={row.key}><span><strong>{row.vendorCode || `nmID ${row.nmID || 'не передан'}`}</strong><small>Строка пока не привязана к карточке</small></span><span>{row.techSize || '—'}</span><span>{row.nmID || row.barcode || row.vendorCode || '—'}</span><span>{row.warehouseName}</span><span>{formatNumber(row.quantity)}</span></div>)}</div></>}
+      <div className="data-table stock-table"><div className="data-row head stock-row"><span>Товар</span><span>Продажи</span><span>Остаток</span><span>Дней запаса</span><span>Заморожено</span><span>Статус</span><span>Что делать</span></div>{periodStockRows.length === 0 ? <div className="product-empty">Сначала загрузите каталог товаров.</div> : visibleStockRows.length === 0 ? <div className="product-empty">По выбранному периоду и фильтрам товаров нет.</div> : [...visibleStockRows].sort((a,b) => (a.stockCoverDays ?? 99999) - (b.stockCoverDays ?? 99999)).map(p => <div className="data-row stock-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatNumber(p.salesCount)}</span><span>{formatNumber(p.stock)}</span><span>{p.stockCoverDays ?? '—'}</span><span>{p.stock == null ? '—' : formatMoney(p.frozenMoney || 0)}</span><span><b className={`status-badge ${stockTone(p.status)}`}>{p.status}</b></span><span>{p.recommendation}</span></div>)}</div>
+      {stockAvailable && coreData?.stockDetails?.length > 0 && <><div className="section-title-row"><div><span>Детализация</span><h2>По артикулам, размерам и складам</h2></div><small>{formatNumber(coreData.stockDetails.length)} строк</small></div><div className="data-table stock-detail-table"><div className="data-row head stock-detail-row"><span>Товар</span><span>Размер</span><span>nmID / штрихкод</span><span>Склад</span><span>Остаток</span></div>{coreData.stockDetails.filter(row => !stockNeedle || [row.title,row.vendorCode,row.nmID,row.barcode,row.warehouseName].join(' ').toLowerCase().includes(stockNeedle)).slice(0,500).map(row => <div className="data-row stock-detail-row" key={row.key}><span><strong>{row.title}</strong><small>{row.vendorCode || `nmID ${row.nmID || '—'}`}</small></span><span>{row.techSize || '—'}</span><span>{row.nmID || row.barcode || '—'}{row.nmID && row.barcode ? <small>{row.barcode}</small> : null}</span><span>{row.warehouseName}</span><span>{formatNumber(row.quantity)}</span></div>)}</div></>}
+      {unmatchedRows.length > 0 && <><div className="section-title-row"><div><span>Диагностика</span><h2>Не сопоставленные строки WB</h2></div><small>{formatNumber(unmatchedRows.length)} строк</small></div><div className="data-table stock-detail-table"><div className="data-row head stock-detail-row"><span>Идентификатор</span><span>Размер</span><span>nmID / штрихкод</span><span>Склад</span><span>Остаток</span></div>{unmatchedRows.filter(row => !stockNeedle || [row.vendorCode,row.nmID,row.barcode,row.warehouseName].join(' ').toLowerCase().includes(stockNeedle)).slice(0,200).map(row => <div className="data-row stock-detail-row" key={row.key}><span><strong>{row.vendorCode || `nmID ${row.nmID || 'не передан'}`}</strong><small>Строка пока не привязана к карточке</small></span><span>{row.techSize || '—'}</span><span>{row.nmID || row.barcode || row.vendorCode || '—'}</span><span>{row.warehouseName}</span><span>{formatNumber(row.quantity)}</span></div>)}</div></>}
     </>)}</section>
   }
 
   const renderFinance = () => {
+    const periodFinanceSummary = analyticsCore?.summary || summary
+    const periodFinanceRows = analyticsBaseProducts.length ? analyticsBaseProducts : productRows
+    const financeProductNeedle = query.trim().toLowerCase()
+    const visibleFinanceProducts = periodFinanceRows.filter(row => !financeProductNeedle || [row.article,row.vendorCode,row.barcode,row.title,row.brand,row.nmID,row.key].join(' ').toLowerCase().includes(financeProductNeedle))
     const ledger = financeLedger || { rows:[],summary:{},products:[],groups:[],sources:[],timeline:[],reports:{sales:{rows:[]},acquiring:{rows:[]}},riskDetails:{},coverage:{} }
     const ledgerRows = Array.isArray(ledger.rows) ? ledger.rows : []
     const ledgerSummary = ledger.summary || {}
@@ -1168,13 +1232,13 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     }
     const sourceNames = { finance:'Финансовая детализация',acquiring:'Отчёт эквайринга',paidStorage:'Отчёт хранения',acceptance:'Отчёт приёмки',measurementPenalties:'Габариты и коэффициенты',deductionsReport:'Подмены и вложения',antifraudRetention:'Самовыкупы',labelingRetention:'Маркировка' }
     const productMap = new Map()
-    productRows.forEach(item => {
+    periodFinanceRows.forEach(item => {
       if (item.nmID) productMap.set(`nm:${item.nmID}`,item)
       if (item.vendorCode) productMap.set(`vendor:${item.vendorCode}`,item)
     })
     const titleForLedger = row => productMap.get(`nm:${row.nmId}`)?.title || productMap.get(`vendor:${row.vendorCode}`)?.title || 'Финансовая операция'
     const statusText = financeReady
-      ? `Финансовая детализация WB загружена. ${formatNumber(ledgerSummary.movements || 0)} движений в выбранном периоде.`
+      ? `Финансовая детализация WB загружена. ${formatNumber(ledgerSummary.movements || 0)} движений за ${formatDate(analyticsPeriod.from)} — ${formatDate(analyticsPeriod.to)}.`
       : 'Финансовый отчёт WB ещё не завершён. Нули не считаются подтверждёнными — показываем статус ожидания и уже сохранённые операции.'
     const financeValue = value => financeReady || Number(value || 0) !== 0 ? formatMoney(value) : 'Ожидает WB'
     const reportNumber = (row, aliases = []) => {
@@ -1194,7 +1258,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
     const renderLedgerTable = () => <>
       <div className="finance-ledger-tools">
-        <label className="finance-ledger-search"><Search size={16}/><input value={financeQuery} onChange={event => { setFinanceQuery(event.target.value); setFinancePage(1) }} placeholder="Операция, артикул, nmID, srid, заказ"/></label>
+        <label className="finance-ledger-search"><Search size={16}/><input value={query} onChange={event => { setQuery(event.target.value); setFinancePage(1) }} placeholder="Операция, артикул, nmID, srid, заказ"/></label>
         <button className="secondary-btn" onClick={exportFinanceLedger}><Download size={16}/> Выгрузить показанные</button>
       </div>
       {financeLedgerLoading ? <div className="finance-ledger-empty"><RefreshCw className="spin" size={22}/> Загружаю движения денег…</div>
@@ -1216,6 +1280,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
     return <section className="app-page glass-panel">
       <div className="page-title"><span>Финансы / P&amp;L</span><h1>Все движения денег WB</h1><p>Продажи, перечисления, FBS/FBO-логистика, хранение, приёмка, эквайринг, штрафы, удержания, компенсации и корректировки — с привязкой к товару и источнику.</p></div>
+      {renderSharedPeriodControls({ note:'Финансовый реестр, отчёты, динамика и P&L ограничиваются единым выбранным периодом. Поиск применяется на сервере ко всем операциям.' })}
       <div className={`notice ${financeReady ? 'success' : 'warning'}`}><ShieldCheck size={20}/><div><strong>{financeReady ? 'Финансовые данные подтверждены WB' : 'Ожидает завершения «Финансы WB»'}</strong><p>{statusText}</p></div><button onClick={() => setActive('Синхронизации')}>Открыть статусы</button></div>
       <div className="finance-tabs">{tabs.map(([key,label]) => <button className={financeTab === key ? 'active' : ''} key={key} onClick={() => { setFinanceTab(key); setFinancePage(1) }}>{label}</button>)}</div>
 
@@ -1229,10 +1294,10 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       {financeTab === 'overview' && <>
         <div className="finance-layout">
           <div className="settings-card"><h3><Calculator size={19}/> Резервные параметры и себестоимость</h3><p className="settings-hint">WB-расходы подставляются автоматически. Здесь остаются себестоимость, налог, постоянные расходы и fallback на случай недоступности отчёта.</p><div className="settings-grid"><label>Комиссия WB, %<input type="number" min="0" max="100" value={settingsDraft.commissionPercent ?? 0} onChange={e => updateSetting('commissionPercent',e.target.value)}/></label><label>Логистика за продажу, ₽<input type="number" min="0" value={settingsDraft.logisticsPerSale ?? 0} onChange={e => updateSetting('logisticsPerSale',e.target.value)}/></label><label>Реклама, ₽/мес.<input type="number" min="0" value={settingsDraft.advertisingMonthly ?? 0} onChange={e => updateSetting('advertisingMonthly',e.target.value)}/></label><label>Хранение, ₽/мес.<input type="number" min="0" value={settingsDraft.storageMonthly ?? 0} onChange={e => updateSetting('storageMonthly',e.target.value)}/></label><label>Постоянные расходы, ₽/мес.<input type="number" min="0" value={settingsDraft.fixedMonthly ?? 0} onChange={e => updateSetting('fixedMonthly',e.target.value)}/></label><label>Налог с выручки, %<input type="number" min="0" max="100" value={settingsDraft.taxPercent ?? 0} onChange={e => updateSetting('taxPercent',e.target.value)}/></label><label>Себестоимость по умолчанию, % цены<input type="number" min="0" max="100" value={settingsDraft.defaultCostPercent ?? 0} onChange={e => updateSetting('defaultCostPercent',e.target.value)}/></label><label>Целевая маржа, %<input type="number" min="0" max="90" value={settingsDraft.targetMarginPercent ?? 20} onChange={e => updateSetting('targetMarginPercent',e.target.value)}/></label></div><button className="primary-btn" disabled={savingSettings} onClick={saveSettings}>{savingSettings ? <RefreshCw className="spin" size={17}/> : <Save size={17}/>} Сохранить и пересчитать</button></div>
-          <div className="pnl-card"><h3>P&amp;L за выбранный период</h3>{[['Выручка',summary.revenue],['Себестоимость',summary.cogs],['Комиссия WB',summary.commission],['Логистика',summary.logistics],['Хранение',summary.storage],['Платная приёмка',summary.acceptance],['Эквайринг',summary.acquiring],['Штрафы',summary.penalties],['Удержания',summary.deductions],['Корректировки / доплаты',summary.additionalPayment],['Реклама',summary.advertising],['Постоянные расходы',summary.fixed],['Налог',summary.tax]].map(([label,value]) => <div className="pnl-line" key={label}><span>{label}</span><strong>{formatMoney(value)}</strong></div>)}<div className={`pnl-line total ${summary.operatingProfit != null && summary.operatingProfit < 0 ? 'negative' : ''}`}><span>Операционная прибыль</span><strong>{formatMoney(summary.operatingProfit)}</strong></div><div className="pnl-margin"><span>Операционная маржа</span><strong>{formatPercent(summary.margin)}</strong></div><div className="finance-source-note"><ShieldCheck size={16}/><span>«К перечислению» не уменьшается повторно на компоненты отчёта. Отдельные отчёты хранения, приёмки и эквайринга используются для детализации без двойного счёта.</span></div></div>
+          <div className="pnl-card"><h3>P&amp;L за выбранный период</h3>{[['Выручка',periodFinanceSummary.revenue],['Себестоимость',periodFinanceSummary.cogs],['Комиссия WB',periodFinanceSummary.commission],['Логистика',periodFinanceSummary.logistics],['Хранение',periodFinanceSummary.storage],['Платная приёмка',periodFinanceSummary.acceptance],['Эквайринг',periodFinanceSummary.acquiring],['Штрафы',periodFinanceSummary.penalties],['Удержания',periodFinanceSummary.deductions],['Корректировки / доплаты',periodFinanceSummary.additionalPayment],['Реклама',periodFinanceSummary.advertising],['Постоянные расходы',periodFinanceSummary.fixed],['Налог',periodFinanceSummary.tax]].map(([label,value]) => <div className="pnl-line" key={label}><span>{label}</span><strong>{formatMoney(value)}</strong></div>)}<div className={`pnl-line total ${periodFinanceSummary.operatingProfit != null && periodFinanceSummary.operatingProfit < 0 ? 'negative' : ''}`}><span>Операционная прибыль</span><strong>{formatMoney(periodFinanceSummary.operatingProfit)}</strong></div><div className="pnl-margin"><span>Операционная маржа</span><strong>{formatPercent(periodFinanceSummary.margin)}</strong></div><div className="finance-source-note"><ShieldCheck size={16}/><span>«К перечислению» не уменьшается повторно на компоненты отчёта. Отдельные отчёты хранения, приёмки и эквайринга используются для детализации без двойного счёта.</span></div></div>
         </div>
         <div className="finance-breakdown-grid">{(ledger.groups || []).map(item => <div key={item.group}><span>{groupNames[item.group] || item.group}</span><strong>{formatMoney(item.expense || item.income)}</strong><small>{formatNumber(item.movements)} операций</small></div>)}</div>
-        <div className="section-title-row"><div><span>Себестоимость</span><h2>По товарам</h2></div><button className="secondary-btn" onClick={saveSettings}><Save size={16}/> Сохранить</button></div><div className="data-table cost-table"><div className="data-row head cost-row"><span>Товар</span><span>Средняя цена</span><span>Себестоимость за единицу</span><span>Цена в ноль</span><span>Прибыль</span><span>Маржа</span></div>{productRows.slice(0,100).map(p => { const costKey=String(p.key || p.nmID || p.vendorCode); const cost=settingsDraft.productCosts?.[costKey] ?? p.unitCost ?? 0; return <div className="data-row cost-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatMoney(p.averagePrice)}</span><span><input className="inline-cost" type="number" min="0" value={cost} onChange={e => updateProductCost(p,e.target.value)} /></span><span>{formatMoney(p.breakevenPrice)}</span><span className={p.profit != null && p.profit < 0 ? 'negative' : 'positive'}>{formatMoney(p.profit)}</span><span>{formatPercent(p.margin)}</span></div>})}</div>
+        <div className="section-title-row"><div><span>Себестоимость</span><h2>По товарам</h2></div><button className="secondary-btn" onClick={saveSettings}><Save size={16}/> Сохранить</button></div><div className="data-table cost-table"><div className="data-row head cost-row"><span>Товар</span><span>Средняя цена</span><span>Себестоимость за единицу</span><span>Цена в ноль</span><span>Прибыль</span><span>Маржа</span></div>{visibleFinanceProducts.slice(0,100).map(p => { const costKey=String(p.key || p.nmID || p.vendorCode); const cost=settingsDraft.productCosts?.[costKey] ?? p.unitCost ?? 0; return <div className="data-row cost-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatMoney(p.averagePrice)}</span><span><input className="inline-cost" type="number" min="0" value={cost} onChange={e => updateProductCost(p,e.target.value)} /></span><span>{formatMoney(p.breakevenPrice)}</span><span className={p.profit != null && p.profit < 0 ? 'negative' : 'positive'}>{formatMoney(p.profit)}</span><span>{formatPercent(p.margin)}</span></div>})}</div>
       </>}
 
       {financeTab === 'products' && <div className="data-table finance-products-table"><div className="data-row head finance-products-row"><span>Товар</span><span>Схема</span><span>К перечислению</span><span>Расходы WB</span><span>Логистика</span><span>Штрафы</span><span>Удержания</span><span>Компенсации</span></div>{(ledger.products || []).map(row => <div className="data-row finance-products-row" key={`${row.nmId}-${row.vendorCode}-${row.fulfillmentMode}`}><span><strong>{titleForLedger(row)}</strong><small>{row.vendorCode || '—'} · nmID {row.nmId || '—'}</small></span><span><b className="mode-pill">{row.fulfillmentMode || '—'}</b></span><span>{formatMoney(row.sellerPayable)}</span><span>{formatMoney(row.expenses)}</span><span>{formatMoney(row.logistics)}</span><span>{formatMoney(row.penalties)}</span><span>{formatMoney(row.deductions)}</span><span>{formatMoney(row.compensations)}</span></div>)}</div>}
@@ -1269,7 +1334,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const renderPricing = () => <section className="app-page glass-panel"><div className="page-title"><span>Ценообразование</span><h1>Цены и акции</h1><p>Цена в ноль, целевая цена, цена пика и безопасные сценарии скидок.</p></div>{summary.cogs == null && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Добавьте себестоимость</strong><p>Без неё невозможно честно определить убыточные скидки.</p></div><button onClick={() => setActive('Финансы')}>Открыть финансы</button></div>}<div className="data-table pricing-table"><div className="data-row head pricing-row"><span>Товар</span><span>Текущая/средняя</span><span>Цена в 0</span><span>Целевая</span><span>Пик</span><span>−20%</span><span>−40%</span><span>Решение</span></div>{productRows.map(p => { const base=p.averagePrice || p.targetPrice || 0; const discount20=base*.8; const discount40=base*.6; return <div className="data-row pricing-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatMoney(base)}</span><span>{formatMoney(p.breakevenPrice)}</span><span>{formatMoney(p.targetPrice)}</span><span>{formatMoney(p.peakPrice)}</span><span className={p.breakevenPrice && discount20 < p.breakevenPrice ? 'negative' : 'positive'}>{formatMoney(discount20)}</span><span className={p.breakevenPrice && discount40 < p.breakevenPrice ? 'negative' : 'positive'}>{formatMoney(discount40)}</span><span>{p.profit != null && p.profit < 0 ? 'Повысить цену / снизить расходы' : p.status === 'Избыток' ? 'Допустима контролируемая акция' : 'Сохранять цену'}</span></div>})}</div></section>
 
   const renderAdvertising = () => {
-    const advertising = coreData?.advertising || advertisingSnapshot || { campaigns:[], productRows:[], daily:[], totals:{}, source:'manual' }
+    const advertising = advertisingSnapshot || coreData?.advertising || { campaigns:[], productRows:[], daily:[], totals:{}, source:'manual' }
     const campaigns = Array.isArray(advertising.campaigns) ? advertising.campaigns : []
     const adProductRows = Array.isArray(advertising.productRows) ? advertising.productRows : []
     const daily = Array.isArray(advertising.daily) ? advertising.daily : []
@@ -1280,7 +1345,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     const hasPromotionToken = connection.scopes?.includes('promotion')
     const statusName = status => ({ 4:'Готова', 7:'Завершена', 8:'Отменена', 9:'Активна', 11:'На паузе', '-1':'Удалена' }[String(status)] || 'Неизвестно')
     const statusTone = status => Number(status) === 9 ? 'success' : Number(status) === 11 ? 'warning' : Number(status) === 8 || Number(status) === -1 ? 'danger' : 'info'
-    const needle = advertisingFilter.trim().toLowerCase()
+    const needle = query.trim().toLowerCase()
     const matchStatus = row => advertisingStatusFilter === 'all' || String(row.status) === advertisingStatusFilter
     const filteredProducts = adProductRows.filter(row => matchStatus(row) && (!needle || [row.campaignName,row.advertId,row.nmID,row.vendorCode,row.title,row.barcode].some(value => String(value || '').toLowerCase().includes(needle))))
     const filteredCampaigns = campaigns.filter(row => matchStatus(row) && (!needle || [row.name,row.advertId,...(row.nmIds || [])].some(value => String(value || '').toLowerCase().includes(needle))))
@@ -1288,19 +1353,19 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     const exportRows = () => {
       let headers = []
       let rows = []
-      let filename = 'elisei-advertising.csv'
+      let filename = `elisei-advertising-${analyticsPeriod.from}-${analyticsPeriod.to}.csv`
       if (advertisingTab === 'campaigns') {
         headers = ['ID кампании','Название','Статус','Артикулы WB','Расход','Показы','Клики','Заказы','Выручка','CTR','CPC','CRR','ROMI','Конверсия в заказ']
         rows = filteredCampaigns.map(row => [row.advertId,row.name,statusName(row.status),(row.nmIds || []).join(', '),row.spend,row.views,row.clicks,row.orders,row.revenue,row.ctr,row.cpc,row.crr,row.romi,row.orderConversion])
-        filename = 'elisei-advertising-campaigns.csv'
+        filename = `elisei-advertising-campaigns-${analyticsPeriod.from}-${analyticsPeriod.to}.csv`
       } else if (advertisingTab === 'dynamics') {
         headers = ['Дата','Расход','Показы','Клики','Заказы','Выручка','CTR','CPC','CRR','ROMI']
         rows = daily.map(row => [row.date,row.spend,row.views,row.clicks,row.orders,row.revenue,row.ctr,row.cpc,row.crr,row.romi])
-        filename = 'elisei-advertising-daily.csv'
+        filename = `elisei-advertising-daily-${analyticsPeriod.from}-${analyticsPeriod.to}.csv`
       } else {
         headers = ['Кампания','ID кампании','Статус','nmID','Артикул продавца','Товар','Штрихкод','Расход','Показы','Клики','Заказы','Выручка','CTR','CPC','CRR','ROMI','Конверсия в заказ','Привязан к каталогу']
         rows = filteredProducts.map(row => [row.campaignName,row.advertId,statusName(row.status),row.nmID,row.vendorCode,row.title,row.barcode,row.spend,row.views,row.clicks,row.orders,row.revenue,row.ctr,row.cpc,row.crr,row.romi,row.orderConversion,row.mapped?'Да':'Нет'])
-        filename = 'elisei-advertising-products.csv'
+        filename = `elisei-advertising-products-${analyticsPeriod.from}-${analyticsPeriod.to}.csv`
       }
       if (!rows.length) return notify('В выбранном разделе рекламы пока нет строк для выгрузки.')
       const lines = [headers.map(csvCell).join(';'),...rows.map(row=>row.map(csvCell).join(';'))]
@@ -1317,6 +1382,8 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
     return <section className="app-page glass-panel advertising-workspace">
       <div className="page-title"><span>WB Продвижение</span><h1>Полная реклама</h1><p>Кампании, товары и дневная динамика в едином блоке. Расходы связываются с nmID и входят в прибыль конкретного товара.</p></div>
+      {renderSharedPeriodControls({ maxDays:31,note:'Рекламные показатели, кампании и дневная динамика фильтруются по единому периоду.' })}
+      {advertisingCoverage && !advertisingCoverage.exact && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Покрытие рекламы неполное</strong><p>В базе есть статистика за {formatDate(advertisingCoverage.available?.from)} — {formatDate(advertisingCoverage.available?.to)}. За остальные даты ELISEI не подставляет нули.</p></div><button disabled={syncing} onClick={() => syncConnection(connection.connectionId,['advertising'],{ period:analyticsPeriod })}>Загрузить выбранный период</button></div>}
       <div className="metrics-grid four">
         <MetricCard label="Расходы" value={statsAvailable?formatMoney(spend):'Не загружено'} delta={statsAvailable?'фактически по API WB':'статистика ожидается'} icon={Megaphone}/>
         <MetricCard label="Выручка из рекламы" value={statsAvailable?formatMoney(totals.revenue):'Не загружено'} delta={statsAvailable?`${formatNumber(totals.orders)} заказов`:'не показываем ложный ноль'} icon={TrendingUp}/>
@@ -1325,19 +1392,19 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       </div>
 
       {!hasPromotionToken && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Не подключена категория «Продвижение»</strong><p>Добавьте API-токен WB с этой категорией. Новый магазин создавать не нужно.</p></div><button onClick={() => setActive('Подключения')}>Добавить токен</button></div>}
-      {hasPromotionToken && !apiAvailable && <div className="notice"><RefreshCw size={20}/><div><strong>Рекламный токен подключён</strong><p>Запустите отдельный этап «Реклама».</p></div><button onClick={() => syncConnection(connection.connectionId, ['advertising'])}>Синхронизировать</button></div>}
-      {apiAvailable && campaigns.length > 0 && !statsAvailable && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Кампании загружены, статистика ещё ожидается</strong><p>ELISEI видит {formatNumber(advertising.totalCampaigns || campaigns.length)} кампаний. Неполученные расходы не заменяются нулями и не входят в P&amp;L.</p></div><button onClick={() => syncConnection(connection.connectionId, ['advertising'])}>Обновить статистику</button></div>}
+      {hasPromotionToken && !apiAvailable && <div className="notice"><RefreshCw size={20}/><div><strong>Рекламный токен подключён</strong><p>Запустите отдельный этап «Реклама».</p></div><button onClick={() => syncConnection(connection.connectionId, ['advertising'], { period:analyticsPeriod })}>Синхронизировать</button></div>}
+      {apiAvailable && campaigns.length > 0 && !statsAvailable && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Кампании загружены, статистика ещё ожидается</strong><p>ELISEI видит {formatNumber(advertising.totalCampaigns || campaigns.length)} кампаний. Неполученные расходы не заменяются нулями и не входят в P&amp;L.</p></div><button onClick={() => syncConnection(connection.connectionId, ['advertising'], { period:analyticsPeriod })}>Обновить статистику</button></div>}
 
       <div className="finance-tabs ad-workspace-tabs">{tabs.map(([key,label])=><button key={key} className={advertisingTab===key?'active':''} onClick={()=>setAdvertisingTab(key)}>{label}</button>)}</div>
       <div className="ad-filter-bar">
-        <div className="ad-search"><Search size={16}/><input value={advertisingFilter} onChange={event=>setAdvertisingFilter(event.target.value)} placeholder="Кампания, nmID, артикул или товар"/></div>
+        <div className="ad-search"><Search size={16}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder="Кампания, nmID, артикул или товар"/></div>
         <select className="ad-status-filter" value={advertisingStatusFilter} onChange={event=>setAdvertisingStatusFilter(event.target.value)}><option value="all">Все статусы</option><option value="9">Активные</option><option value="11">На паузе</option><option value="7">Завершённые</option><option value="4">Готовые</option><option value="8">Отменённые</option></select>
-        <button className="secondary-btn" disabled={syncing || !hasPromotionToken} onClick={()=>syncConnection(connection.connectionId,['advertising'])}><RefreshCw size={16} className={syncing?'spin':''}/> Обновить</button>
+        <button className="secondary-btn" disabled={syncing || !hasPromotionToken} onClick={()=>syncConnection(connection.connectionId,['advertising'],{ period:analyticsPeriod })}><RefreshCw size={16} className={syncing?'spin':''}/> Обновить</button>
         <button className="secondary-btn" onClick={exportRows}><Download size={16}/> CSV</button>
       </div>
 
       {advertisingTab === 'overview' && <div className="ad-overview-grid">
-        <div className="chart-card ad-chart-card"><div className="card-head"><div><span>Последние дни</span><h3>Расход и результат</h3></div><div className="ad-trend-switch">{Object.entries(trendLabels).map(([key,label])=><button key={key} className={advertisingTrendMetric===key?'active':''} onClick={()=>setAdvertisingTrendMetric(key)}>{label}</button>)}</div></div><TrendChart data={daily} valueKey={advertisingTrendMetric} emptyText="Дневная статистика рекламы ещё не загружена"/></div>
+        <div className="chart-card ad-chart-card"><div className="card-head"><div><span>{formatDate(analyticsPeriod.from)} — {formatDate(analyticsPeriod.to)}</span><h3>Расход и результат</h3></div><div className="ad-trend-switch">{Object.entries(trendLabels).map(([key,label])=><button key={key} className={advertisingTrendMetric===key?'active':''} onClick={()=>setAdvertisingTrendMetric(key)}>{label}</button>)}</div></div><TrendChart data={daily} valueKey={advertisingTrendMetric} emptyText="Дневная статистика рекламы ещё не загружена"/></div>
         <div className="ad-breakdown-card"><h3>Воронка рекламы</h3><div className="ad-funnel-list"><div><span>Показы</span><strong>{statsAvailable?formatNumber(totals.views):'—'}</strong></div><div><span>Клики</span><strong>{statsAvailable?formatNumber(totals.clicks):'—'}</strong><small>CTR {formatPercent(totals.ctr)}</small></div><div><span>Заказы</span><strong>{statsAvailable?formatNumber(totals.orders):'—'}</strong><small>{formatPercent(totals.orderConversion)} от кликов</small></div><div><span>Выручка</span><strong>{statsAvailable?formatMoney(totals.revenue):'—'}</strong><small>CRR {formatPercent(totals.crr)}</small></div></div></div>
         <div className="ad-breakdown-card"><h3>Покрытие данных</h3><div className="ad-funnel-list"><div><span>Всего кампаний</span><strong>{formatNumber(advertising.totalCampaigns || campaigns.length)}</strong></div><div><span>Со статистикой</span><strong>{formatNumber(advertising.statsLoadedCampaigns || 0)}</strong></div><div><span>Ожидают данные</span><strong>{formatNumber(advertising.statsPendingCampaigns || 0)}</strong></div><div><span>Привязано к товарам</span><strong>{formatNumber(advertising.mappedProductRows || adProductRows.filter(row=>row.mapped).length)}</strong></div></div></div>
       </div>}
@@ -1352,9 +1419,9 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     </section>
   }
 
-  const renderSearchQueries = () => <WbExtendedWorkspace mode="search" connection={connection} syncing={syncing} onSync={syncConnection} notify={notify}/>
-  const renderStockHistory = () => <WbExtendedWorkspace mode="stock" connection={connection} syncing={syncing} onSync={syncConnection} notify={notify}/>
-  const renderCommunications = () => <WbExtendedWorkspace mode="communications" connection={connection} syncing={syncing} onSync={syncConnection} notify={notify}/>
+  const renderSearchQueries = () => <WbExtendedWorkspace mode="search" connection={connection} syncing={syncing} onSync={syncConnection} notify={notify} period={analyticsPeriod} periodControls={renderSharedPeriodControls({ note:'Поисковый отчёт WB загружается строго для выбранного периода. Для некоторых детализаций WB ограничивает один запрос семью днями — покрытие показывается отдельно.' })} query={query} onQueryChange={setQuery}/>
+  const renderStockHistory = () => <WbExtendedWorkspace mode="stock" connection={connection} syncing={syncing} onSync={syncConnection} notify={notify} period={analyticsPeriod} periodControls={renderSharedPeriodControls({ maxDays:90,note:'История остатков ограничивается единым периодом и фильтруется по товару и складу.' })} query={query} onQueryChange={setQuery}/>
+  const renderCommunications = () => <WbExtendedWorkspace mode="communications" connection={connection} syncing={syncing} onSync={syncConnection} notify={notify} period={analyticsPeriod} periodControls={renderSharedPeriodControls({ note:'Отзывы, вопросы и события чатов фильтруются по выбранным датам и общему поиску. Чаты остаются только для чтения.' })} query={query} onQueryChange={setQuery}/>
 
   const renderReviews = () => {
     const qualityRows = [...productRows].filter(p => Number(p.returnsCount || 0) > 0 || Number(p.returnRate || 0) > 0).sort((a,b) => Number(b.returnRate || 0)-Number(a.returnRate || 0))

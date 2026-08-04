@@ -1010,9 +1010,10 @@ async function saveBusinessSettings(userId, settings) {
 
 function dateKey(value) {
   if (!value) return ''
-  const raw = String(value)
+  const raw = String(value).trim()
   if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10)
-  const parsed = new Date(value)
+  const unix = /^\d{10}$/.test(raw) ? Number(raw) * 1000 : /^\d{13}$/.test(raw) ? Number(raw) : null
+  const parsed = new Date(unix ?? value)
   return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10)
 }
 
@@ -2728,7 +2729,7 @@ function buildAdvertisingMeta(value = {}) {
   }
 }
 
-async function loadAdvertising(token, { deadlineAt = 0, previous = {} } = {}) {
+async function loadAdvertising(token, { deadlineAt = 0, previous = {}, period = null } = {}) {
   const campaignEndpoint = 'https://advert-api.wildberries.ru/api/advert/v2/adverts?statuses=4,7,8,9,11'
   const campaignPayload = await wbFetch(campaignEndpoint, token, {
     label:'Кампании WB', timeoutMs:45000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
@@ -2737,30 +2738,45 @@ async function loadAdvertising(token, { deadlineAt = 0, previous = {} } = {}) {
   const statusPriority = status => ({ 9:0, 11:1, 4:2, 7:3, 8:4 }[Number(status)] ?? 9)
   const campaigns = [...allCampaigns].sort((a,b) => statusPriority(a.status)-statusPriority(b.status) || Date.parse(b.changeTime || 0)-Date.parse(a.changeTime || 0))
 
+  const defaultPeriod = reportPeriod(30)
+  const selectedPeriod = period && (period.dateFrom || period.from) && (period.dateTo || period.to)
+    ? {
+        beginDate:dateKey(period.dateFrom || period.from),
+        endDate:dateKey(period.dateTo || period.to),
+        days:Number(period.days || 30),
+        requestedFrom:period.requestedFrom || null,
+        requestedTo:period.requestedTo || null,
+        limited:Boolean(period.limited),
+      }
+    : { beginDate:defaultPeriod.dateFrom,endDate:defaultPeriod.dateTo,days:defaultPeriod.days }
+  const previousFrom=dateKey(previous?.period?.beginDate || previous?.period?.from || previous?.period?.dateFrom)
+  const previousTo=dateKey(previous?.period?.endDate || previous?.period?.to || previous?.period?.dateTo)
+  const previousForPeriod=previousFrom===selectedPeriod.beginDate && previousTo===selectedPeriod.endDate ? previous : {}
+
   if (!campaigns.length) {
-    const value = mergeAdvertisingSnapshot({ previous, campaigns:[], requestedIds:[], period:{ days:30 } })
+    const value = mergeAdvertisingSnapshot({ previous:previousForPeriod, campaigns:[], requestedIds:[], period:selectedPeriod })
     value.meta = buildAdvertisingMeta(value)
     return { value, rawPayload:{ campaigns:campaignPayload, stats:[] }, validation:{ campaigns:0, statsRows:0 }, endpoint:campaignEndpoint }
   }
 
   const batchSize = 50
-  const previousOffset = Math.max(0, Number(previous?.meta?.nextStatsOffset || 0))
+  const previousOffset = Math.max(0, Number(previousForPeriod?.meta?.nextStatsOffset || period?.nextStatsOffset || 0))
   const offset = previousOffset >= campaigns.length ? 0 : previousOffset
   const batch = campaigns.slice(offset, offset + batchSize)
   const requestedIds = batch.map(item => String(item.advertId))
-  const endDate = new Date().toISOString().slice(0,10)
-  const beginDate = new Date(Date.now()-29*86400000).toISOString().slice(0,10)
+  const endDate = selectedPeriod.endDate
+  const beginDate = selectedPeriod.beginDate
   const statsEndpoint = `https://advert-api.wildberries.ru/adv/v3/fullstats?ids=${encodeURIComponent(requestedIds.join(','))}&beginDate=${beginDate}&endDate=${endDate}`
   const statsPayload = requestedIds.length ? await wbFetch(statsEndpoint, token, {
     label:'Статистика рекламы WB', timeoutMs:60000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
   }) : []
   const statsByAdvertId = normalizeFullStatsStrict(statsPayload)
   const value = mergeAdvertisingSnapshot({
-    previous,
+    previous:previousForPeriod,
     campaigns,
     statsByAdvertId,
     requestedIds,
-    period:{ beginDate, endDate, days:30 },
+    period:selectedPeriod,
   })
   const nextStatsOffset = offset + batch.length >= campaigns.length ? 0 : offset + batch.length
   value.meta = {
@@ -3979,16 +3995,141 @@ async function advanceChatsTask(connectionId, token, state, { deadlineAt = 0, to
   return {pending:false,value,validation:{totalRows:value.totalRows,chatCount:value.chatCount,eventCount:value.eventCount,pages:pageNumber+1,readOnly:true,persistedInBatches:true},endpoint:`${base}/chats + ${base}/events`}
 }
 
-async function latestExtendedRows(connectionId, stream, { afterKey = '', limit = 100 } = {}) {
+function extendedDateExpression(stream) {
+  if (stream === 'stockHistory') return `NULLIF(SUBSTRING(COALESCE(payload->>'date',payload->>'dt',payload->>'reportDate') FROM 1 FOR 10),'')`
+  if (stream === 'reviews' || stream === 'questions') return `NULLIF(SUBSTRING(COALESCE(payload->>'createdDate',payload->>'createdAt',payload->>'date') FROM 1 FOR 10),'')`
+  if (stream === 'chats') {
+    const raw = `COALESCE(payload->>'addTimestamp',payload->>'createdAt',payload->>'createdDate',payload->>'timestamp',payload->>'date',payload#>>'{lastMessage,addTimestamp}',payload#>>'{lastMessage,createdAt}',payload#>>'{message,createdAt}')`
+    return `(CASE WHEN ${raw} ~ '^[0-9]{10}$' THEN TO_CHAR(TO_TIMESTAMP((${raw})::numeric),'YYYY-MM-DD') WHEN ${raw} ~ '^[0-9]{13}$' THEN TO_CHAR(TO_TIMESTAMP((${raw})::numeric/1000),'YYYY-MM-DD') ELSE NULLIF(SUBSTRING(${raw} FROM 1 FOR 10),'') END)`
+  }
+  return ''
+}
+
+function extendedSqlFilter(stream, options = {}, params = [], { includePeriod = true, includeQuery = true, includeStatus = true } = {}) {
+  const clauses = []
+  const add = value => { params.push(value); return `$${params.length}` }
+  const dateExpression = extendedDateExpression(stream)
+  if (includePeriod && dateExpression && options.from && options.to) {
+    const fromRef = add(String(options.from).slice(0,10))
+    const toRef = add(String(options.to).slice(0,10))
+    clauses.push(`${dateExpression} BETWEEN ${fromRef} AND ${toRef}`)
+  }
+  if (includeQuery && String(options.query || '').trim()) {
+    clauses.push(`payload::text ILIKE ${add(`%${String(options.query).trim()}%`)}`)
+  }
+  if (includeStatus && options.status && options.status !== 'all') {
+    if (stream === 'reviews' || stream === 'questions') {
+      if (options.status === 'answered') clauses.push(`COALESCE(payload->>'isAnswered','false')='true'`)
+      if (options.status === 'unanswered') clauses.push(`COALESCE(payload->>'isAnswered','false')<>'true' AND COALESCE(payload->>'archived','false')<>'true'`)
+      if (options.status === 'archived') clauses.push(`COALESCE(payload->>'archived','false')='true'`)
+    } else if (stream === 'chats' && ['chat','event'].includes(options.status)) {
+      clauses.push(`payload->>'rowType'=${add(options.status)}`)
+    } else if (stream === 'searchQueries' && ['group','query'].includes(options.status)) {
+      clauses.push(`payload->>'rowType'=${add(options.status)}`)
+    } else if (stream === 'stockHistory' && ['positive','zero'].includes(options.status)) {
+      const quantity = `CASE WHEN COALESCE(payload->>'quantity','') ~ '^-?[0-9]+([.,][0-9]+)?$' THEN REPLACE(payload->>'quantity',',','.')::numeric ELSE NULL END`
+      clauses.push(options.status === 'positive' ? `${quantity}>0` : `${quantity}=0`)
+    }
+  }
+  if (stream === 'reviews' && options.rating && options.rating !== 'all') {
+    const rating = `CASE WHEN COALESCE(payload->>'productValuation',payload->>'valuation',payload->>'rating','') ~ '^[0-9]+([.,][0-9]+)?$' THEN REPLACE(COALESCE(payload->>'productValuation',payload->>'valuation',payload->>'rating'),',','.')::numeric ELSE NULL END`
+    clauses.push(`${rating}=${add(Number(options.rating))}`)
+  }
+  if (stream === 'stockHistory' && String(options.warehouse || '').trim()) {
+    clauses.push(`COALESCE(payload->>'warehouse',payload->>'warehouseName',payload->>'officeName')=${add(String(options.warehouse).trim())}`)
+  }
+  return clauses
+}
+
+async function latestExtendedRows(connectionId, stream, { afterKey = '', limit = 100, ...filters } = {}) {
   const latest = await pool.query(`
     SELECT sync_id FROM wb_stream_items
     WHERE connection_id=$1 AND stream=$2
     ORDER BY updated_at DESC LIMIT 1
   `,[connectionId,stream])
   const syncId = latest.rows[0]?.sync_id
-  if (!syncId) return { rows:[],syncId:null,next:null }
-  const page = await loadStreamItemPage(pool,{connectionId,stream,syncId,afterKey,limit})
-  return { rows:page.map(item=>({rowKey:item.row_key,...item.payload})),syncId,next:page.length ? page.at(-1).row_key : null }
+  if (!syncId) return { rows:[],syncId:null,next:null,total:0 }
+
+  const pageParams = [connectionId,stream,syncId]
+  const pageWhere = [`connection_id=$1`,`stream=$2`,`sync_id=$3::uuid`]
+  if (afterKey) { pageParams.push(afterKey); pageWhere.push(`row_key>$${pageParams.length}`) }
+  pageWhere.push(...extendedSqlFilter(stream,filters,pageParams))
+  pageParams.push(Math.max(1,Math.min(500,Number(limit)||100)))
+  const page = await pool.query(`
+    SELECT row_key,payload FROM wb_stream_items
+    WHERE ${pageWhere.join(' AND ')}
+    ORDER BY row_key
+    LIMIT $${pageParams.length}
+  `,pageParams)
+
+  const countParams = [connectionId,stream,syncId]
+  const countWhere = [`connection_id=$1`,`stream=$2`,`sync_id=$3::uuid`,...extendedSqlFilter(stream,filters,countParams)]
+  const count = await pool.query(`SELECT COUNT(*)::int AS count FROM wb_stream_items WHERE ${countWhere.join(' AND ')}`,countParams)
+  return {
+    rows:page.rows.map(item=>({rowKey:item.row_key,...item.payload})),
+    syncId,
+    next:page.rows.length ? page.rows.at(-1).row_key : null,
+    total:Number(count.rows[0]?.count || 0),
+  }
+}
+
+async function extendedStreamSummary(connectionId, stream, syncId, filters = {}) {
+  if (!syncId) return { summary:null,availablePeriod:null }
+  const dateExpression = extendedDateExpression(stream)
+  let availablePeriod = null
+  if (dateExpression) {
+    const coverage = await pool.query(`
+      SELECT MIN(${dateExpression}) AS from_date,MAX(${dateExpression}) AS to_date,COUNT(*) FILTER (WHERE ${dateExpression} IS NOT NULL)::int AS dated_rows
+      FROM wb_stream_items WHERE connection_id=$1 AND stream=$2 AND sync_id=$3::uuid
+    `,[connectionId,stream,syncId])
+    availablePeriod = {
+      from:coverage.rows[0]?.from_date || null,
+      to:coverage.rows[0]?.to_date || null,
+      datedRows:Number(coverage.rows[0]?.dated_rows || 0),
+    }
+  }
+
+  const params = [connectionId,stream,syncId]
+  const where = [`connection_id=$1`,`stream=$2`,`sync_id=$3::uuid`,...extendedSqlFilter(stream,filters,params)]
+  const whereSql = where.join(' AND ')
+  if (stream === 'reviews' || stream === 'questions') {
+    const result = await pool.query(`
+      SELECT COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE COALESCE(payload->>'archived','false')='true')::int AS archived,
+        COUNT(*) FILTER (WHERE COALESCE(payload->>'isAnswered','false')='true' AND COALESCE(payload->>'archived','false')<>'true')::int AS answered,
+        COUNT(*) FILTER (WHERE COALESCE(payload->>'isAnswered','false')<>'true' AND COALESCE(payload->>'archived','false')<>'true')::int AS unanswered
+      FROM wb_stream_items WHERE ${whereSql}
+    `,params)
+    return { summary:{...result.rows[0]},availablePeriod }
+  }
+  if (stream === 'chats') {
+    const result = await pool.query(`
+      SELECT COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE payload->>'rowType'='chat')::int AS chatCount,
+        COUNT(*) FILTER (WHERE payload->>'rowType'='event')::int AS eventCount
+      FROM wb_stream_items WHERE ${whereSql}
+    `,params)
+    return { summary:{...result.rows[0]},availablePeriod }
+  }
+  if (stream === 'stockHistory') {
+    const quantity = `CASE WHEN COALESCE(payload->>'quantity','') ~ '^-?[0-9]+([.,][0-9]+)?$' THEN REPLACE(payload->>'quantity',',','.')::numeric ELSE 0 END`
+    const daily = await pool.query(`
+      SELECT ${dateExpression} AS date,SUM(${quantity})::numeric AS quantity,COUNT(*)::int AS rows
+      FROM wb_stream_items WHERE ${whereSql} AND ${dateExpression} IS NOT NULL
+      GROUP BY ${dateExpression} ORDER BY ${dateExpression} DESC LIMIT 100
+    `,params)
+    const totals = await pool.query(`
+      SELECT COUNT(DISTINCT ${dateExpression})::int AS dates,
+        COUNT(DISTINCT COALESCE(payload->>'nmID',payload->>'nmId',payload->>'nm_id'))::int AS products,
+        COUNT(DISTINCT COALESCE(payload->>'warehouse',payload->>'warehouseName',payload->>'officeName'))::int AS warehouses
+      FROM wb_stream_items WHERE ${whereSql}
+    `,params)
+    const rows = [...daily.rows].reverse().map(row=>({date:row.date,quantity:Number(row.quantity || 0),rows:Number(row.rows || 0)}))
+    const latest = rows.at(-1) || null
+    return { summary:{...totals.rows[0],latestDate:latest?.date || null,latestQuantity:latest?.quantity ?? null,daily:rows},availablePeriod }
+  }
+  const result = await pool.query(`SELECT COUNT(*)::int AS total FROM wb_stream_items WHERE ${whereSql}`,params)
+  return { summary:{...result.rows[0]},availablePeriod }
 }
 
 
@@ -4038,7 +4179,7 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       value = loaded.value
       snapshot = loaded
     } else if (stage === 'advertising') {
-      const loaded = await loadAdvertising(selected.token, { deadlineAt, previous:fallback })
+      const loaded = await loadAdvertising(selected.token, { deadlineAt, previous:fallback, period:state?.metadata?.period || null })
       value = loaded.value
       meta = value.meta || null
       snapshot = loaded
@@ -4449,20 +4590,69 @@ app.get('/api/wb/extended/:stream', authRequired, async (req, res) => {
     if (!connection) return res.status(404).json({error:'Подключение не найдено'})
     const limit=Math.max(20,Math.min(500,Number(req.query.limit)||100))
     const afterKey=String(req.query.afterKey||'')
+    const range=analyticsPeriodRange(req.query)
+    const filters={
+      ...(range ? {from:range.from,to:range.to} : {}),
+      query:String(req.query.query||''),
+      status:String(req.query.status||'all'),
+      rating:String(req.query.rating||'all'),
+      warehouse:String(req.query.warehouse||''),
+    }
     if (['financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','documents','searchQueries','stockHistory','reviews','questions','chats'].includes(stream)) {
-      const [page,stateResult,storedResult]=await Promise.all([
-        latestExtendedRows(connection.id,stream,{afterKey,limit}),
+      const [stateResult,storedResult]=await Promise.all([
         pool.query('SELECT * FROM wb_sync_states WHERE connection_id=$1 AND stage=$2',[connection.id,stream]),
         pool.query('SELECT payload,row_count,metadata,updated_at FROM wb_stream_data WHERE connection_id=$1 AND stream=$2',[connection.id,stream]),
       ])
       const state=stateResult.rows[0]||null
       const stored=storedResult.rows[0]||null
       const payload=stored?.payload&&typeof stored.payload==='object'?stored.payload:null
-      const total=page.syncId ? await countStreamItems(pool,{connectionId:connection.id,stream,syncId:page.syncId}) : Number(payload?.totalRows??stored?.row_count??0)
-      const rows=page.rows.length ? page.rows : (afterKey ? [] : (Array.isArray(payload?.rows)?payload.rows.slice(0,limit):[]))
+      const storedPeriod=payload?.period || state?.metadata?.period || null
+      const storedFrom=dateKey(storedPeriod?.dateFrom || storedPeriod?.from || storedPeriod?.start)
+      const storedTo=dateKey(storedPeriod?.dateTo || storedPeriod?.to || storedPeriod?.end)
+      const searchPeriodExact=stream!=='searchQueries' || !range || (storedFrom===range.from && storedTo===range.to)
+
+      if (stream==='searchQueries' && !searchPeriodExact) {
+        return res.json({
+          stream,rows:[],next:null,syncId:payload?.syncId||null,total:0,
+          status:state?.status||'idle',state:state?publicSyncState(state):null,payload,
+          summary:{total:0},updatedAt:stored?.updated_at||null,
+          period:range?{from:range.from,to:range.to,days:range.days}:null,
+          coverage:{available:{from:storedFrom,to:storedTo},exact:false,reason:'search_report_requires_exact_period'},
+        })
+      }
+
+      const page=await latestExtendedRows(connection.id,stream,{afterKey,limit,...filters})
+      const calculated=await extendedStreamSummary(connection.id,stream,page.syncId,filters)
+      let rows=page.rows
+      let total=page.total
+      let summary=calculated.summary
+      if (!page.syncId && !afterKey && Array.isArray(payload?.rows)) {
+        const query=filters.query.trim().toLowerCase()
+        rows=payload.rows.filter(row=>{
+          const rowDate=dateKey(row?.date || row?.createdDate || row?.createdAt || row?.addTimestamp || row?.timestamp)
+          if (range && extendedDateExpression(stream) && (!rowDate || rowDate<range.from || rowDate>range.to)) return false
+          if (query && !JSON.stringify(row).toLowerCase().includes(query)) return false
+          if (filters.status==='answered' && !row?.isAnswered) return false
+          if (filters.status==='unanswered' && (row?.isAnswered || row?.archived)) return false
+          if (filters.status==='archived' && !row?.archived) return false
+          if (['chat','event','group','query'].includes(filters.status) && row?.rowType!==filters.status) return false
+          if (filters.rating!=='all' && Number(row?.productValuation ?? row?.valuation ?? row?.rating)!==Number(filters.rating)) return false
+          if (filters.warehouse && String(row?.warehouse || row?.warehouseName || '')!==filters.warehouse) return false
+          return true
+        })
+        total=rows.length
+        rows=rows.slice(0,limit)
+      }
+      const available=calculated.availablePeriod || (storedFrom||storedTo?{from:storedFrom,to:storedTo}:null)
       return res.json({
         stream,rows,next:page.rows.length>=limit?page.next:null,syncId:page.syncId||payload?.syncId||null,total,
-        status:state?.status||'idle',state:state?publicSyncState(state):null,payload,updatedAt:stored?.updated_at||null,
+        status:state?.status||'idle',state:state?publicSyncState(state):null,payload,summary,updatedAt:stored?.updated_at||null,
+        period:range?{from:range.from,to:range.to,days:range.days}:null,
+        coverage:{
+          available,
+          exact:!range || !available?.from || !available?.to || (range.from>=available.from && range.to<=available.to),
+          requested:range?{from:range.from,to:range.to}:null,
+        },
       })
     }
     const stored=await pool.query('SELECT payload,row_count,metadata,updated_at FROM wb_stream_data WHERE connection_id=$1 AND stream=$2',[connection.id,stream])
@@ -4475,12 +4665,55 @@ app.get('/api/wb/extended/:stream', authRequired, async (req, res) => {
   }
 })
 
+
+function boundedSyncPeriod(range, maxDays) {
+  if (!range) return null
+  const days=Math.max(1,Math.min(Number(maxDays || range.days),range.days))
+  const end=new Date(`${range.to}T00:00:00.000Z`)
+  const start=new Date(end.getTime()-(days-1)*86400000)
+  return {
+    dateFrom:start.toISOString().slice(0,10),dateTo:range.to,days,
+    requestedFrom:range.from,requestedTo:range.to,requestedDays:range.days,
+    limited:range.days>days,
+  }
+}
+
+function syncPeriodForStage(stage, range) {
+  if (!range) return null
+  if (stage==='stockHistory') return boundedSyncPeriod(range,90)
+  if (stage==='advertising') return boundedSyncPeriod(range,31)
+  if (stage==='searchQueries') return boundedSyncPeriod(range,365)
+  return boundedSyncPeriod(range,366)
+}
+
+function initialPeriodStageMetadata(stage, period) {
+  if (!period) return {}
+  if (stage==='searchQueries') {
+    const detailRange=analyticsPeriodRange({from:period.dateFrom,to:period.dateTo})
+    const detailPeriod=boundedSyncPeriod(detailRange,7)
+    return {period,detailPeriod,syncId:crypto.randomUUID(),phase:'overview',offset:0,pageNumber:0,productOffset:0,persistedCount:0,summary:{}}
+  }
+  if (stage==='stockHistory') return {period,syncId:crypto.randomUUID(),reportId:crypto.randomUUID(),phase:'create',pollAttempts:0,persistedCount:0,reportType:'STOCK_HISTORY_DAILY_CSV'}
+  if (stage==='advertising') return {period,nextStatsOffset:0}
+  return {period}
+}
+
 app.post('/api/wb/sync', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, String(req.body?.connectionId || '') || null)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено. Подключите Wildberries.' })
   await recoverStaleSyncStates({ connectionId:connection.id, reason:'manual-sync' })
   const requestedStages = Array.isArray(req.body?.stages) ? req.body.stages.filter(stage => WB_SYNC_STAGES[stage]) : Object.keys(WB_SYNC_STAGES)
   if (!requestedStages.length) return res.status(400).json({ error: 'Не выбраны этапы синхронизации' })
+  const requestedRange = analyticsPeriodRange(req.body?.period || {})
+  if (requestedRange) {
+    for (const stage of requestedStages.filter(item => ['advertising','searchQueries','stockHistory'].includes(item))) {
+      const period = syncPeriodForStage(stage,requestedRange)
+      await updateSyncState(connection.id,stage,{
+        status:'queued',lastAttemptAt:null,nextAllowedAt:null,lastError:null,lastCount:0,taskId:null,
+        metadata:initialPeriodStageMetadata(stage,period),
+      })
+    }
+  }
 
   const syncKey = `${req.auth.sub}:${connection.id}`
   if (activeSyncs.has(syncKey)) return res.status(409).json({ error: 'Синхронизация уже выполняется. Дождитесь её завершения.' })
@@ -4747,13 +4980,23 @@ app.get('/api/wb/advertising/:id', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, req.params.id)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
   const canonical = await canonicalConnectionData(connection)
-  const advertising = canonical.data?.advertising && typeof canonical.data.advertising === 'object'
+  const rawAdvertising = canonical.data?.advertising && typeof canonical.data.advertising === 'object'
     ? canonical.data.advertising
     : { campaigns: [], totals: {}, period: null, truncated: false }
+  const range = analyticsPeriodRange(req.query)
+  const advertising = analyticsFilterAdvertising(rawAdvertising,range)
+  const availableFrom = dateKey(rawAdvertising?.period?.from || rawAdvertising?.period?.beginDate || rawAdvertising?.period?.dateFrom)
+  const availableTo = dateKey(rawAdvertising?.period?.to || rawAdvertising?.period?.endDate || rawAdvertising?.period?.dateTo)
   const stateResult = await pool.query('SELECT * FROM wb_sync_states WHERE connection_id=$1 AND stage=$2', [connection.id, 'advertising'])
   res.json({
     advertising,
     meta: advertising.meta || buildAdvertisingMeta(advertising),
+    period:range ? {from:range.from,to:range.to,days:range.days} : null,
+    coverage:{
+      available:{from:availableFrom || null,to:availableTo || null},
+      exact:!range || !availableFrom || !availableTo || (range.from>=availableFrom && range.to<=availableTo),
+      maxRequestDays:31,
+    },
     dataSource:canonical.sources?.advertising || null,
     recovered:canonical.recovered || [],
     syncState: stateResult.rows[0] ? publicSyncState(stateResult.rows[0]) : null,
@@ -4859,10 +5102,13 @@ app.get('/api/wb/finance-ledger/:id', authRequired, async (req, res) => {
   try {
     const backfill = await backfillFinanceLedgerFromStreamItems(pool,{ connectionId:connection.id })
     const period = reportPeriod(30)
+    const requestedRange = analyticsPeriodRange(req.query)
+    const selectedFrom = requestedRange?.from || period.dateFrom
+    const selectedTo = requestedRange?.to || period.dateTo
     const result = await queryFinanceLedger(pool,{
       connectionId:connection.id,
-      from:String(req.query.from || period.dateFrom),
-      to:String(req.query.to || period.dateTo),
+      from:selectedFrom,
+      to:selectedTo,
       group:String(req.query.group || 'all'),
       mode:['FBS','FBO'].includes(String(req.query.mode || '').toUpperCase()) ? String(req.query.mode).toUpperCase() : 'all',
       role:String(req.query.role || 'all'),
@@ -4877,23 +5123,30 @@ app.get('/api/wb/finance-ledger/:id', authRequired, async (req, res) => {
     const streamRows = await pool.query(`SELECT stream,payload,row_count,updated_at FROM wb_stream_data WHERE connection_id=$1 AND stream=ANY($2::text[])`,[connection.id,supportingStreams])
     const payloadByStream = Object.fromEntries(streamRows.rows.map(row => [row.stream,{payload:row.payload||{},rowCount:Number(row.row_count||0),updatedAt:row.updated_at||null}]))
     const financePayload = payloadByStream.finance?.payload || {}
-    const compactRows = stream => Array.isArray(payloadByStream[stream]?.payload?.rows) ? payloadByStream[stream].payload.rows : []
+    const rowOverlapsPeriod = row => {
+      const rowFrom=dateKey(row?.dateFrom || row?.from || row?.periodFrom || row?.operationDate || row?.rrDate || row?.rr_dt || row?.dtBonus || row?.dt || row?.date || row?.createdAt || row?.createDate)
+      const rowTo=dateKey(row?.dateTo || row?.to || row?.periodTo || rowFrom)
+      if (!rowFrom && !rowTo) return false
+      return (rowFrom || rowTo) <= selectedTo && (rowTo || rowFrom) >= selectedFrom
+    }
+    const compactRows = stream => (Array.isArray(payloadByStream[stream]?.payload?.rows) ? payloadByStream[stream].payload.rows : []).filter(rowOverlapsPeriod)
     res.json({
+      period:{from:selectedFrom,to:selectedTo,days:requestedRange?.days || 30},
       ...result,
       backfill,
       balance:financePayload.balance || null,
       reportPeriod:financePayload.period || null,
       financeUpdatedAt:payloadByStream.finance?.updatedAt || null,
       reports:{
-        sales:{ rows:compactRows('financeReports'),totalRows:Number(payloadByStream.financeReports?.payload?.totalRows || payloadByStream.financeReports?.rowCount || 0),period:payloadByStream.financeReports?.payload?.period || null,updatedAt:payloadByStream.financeReports?.updatedAt || null },
-        acquiring:{ rows:compactRows('acquiringReports'),totalRows:Number(payloadByStream.acquiringReports?.payload?.totalRows || payloadByStream.acquiringReports?.rowCount || 0),period:payloadByStream.acquiringReports?.payload?.period || null,updatedAt:payloadByStream.acquiringReports?.updatedAt || null },
+        sales:{ rows:compactRows('financeReports'),totalRows:compactRows('financeReports').length,period:{from:selectedFrom,to:selectedTo},updatedAt:payloadByStream.financeReports?.updatedAt || null },
+        acquiring:{ rows:compactRows('acquiringReports'),totalRows:compactRows('acquiringReports').length,period:{from:selectedFrom,to:selectedTo},updatedAt:payloadByStream.acquiringReports?.updatedAt || null },
       },
       riskDetails:{
-        measurementPenalties:{rows:compactRows('measurementPenalties'),totalRows:Number(payloadByStream.measurementPenalties?.payload?.totalRows || payloadByStream.measurementPenalties?.rowCount || 0),updatedAt:payloadByStream.measurementPenalties?.updatedAt || null},
-        deductions:{rows:compactRows('deductionsReport'),totalRows:Number(payloadByStream.deductionsReport?.payload?.totalRows || payloadByStream.deductionsReport?.rowCount || 0),updatedAt:payloadByStream.deductionsReport?.updatedAt || null},
-        warehouseMeasurements:{rows:compactRows('warehouseMeasurements'),totalRows:Number(payloadByStream.warehouseMeasurements?.payload?.totalRows || payloadByStream.warehouseMeasurements?.rowCount || 0),updatedAt:payloadByStream.warehouseMeasurements?.updatedAt || null},
-        antifraud:{rows:compactRows('antifraudRetention'),totalRows:Number(payloadByStream.antifraudRetention?.payload?.totalRows || payloadByStream.antifraudRetention?.rowCount || 0),updatedAt:payloadByStream.antifraudRetention?.updatedAt || null},
-        labeling:{rows:compactRows('labelingRetention'),totalRows:Number(payloadByStream.labelingRetention?.payload?.totalRows || payloadByStream.labelingRetention?.rowCount || 0),updatedAt:payloadByStream.labelingRetention?.updatedAt || null},
+        measurementPenalties:{rows:compactRows('measurementPenalties'),totalRows:compactRows('measurementPenalties').length,updatedAt:payloadByStream.measurementPenalties?.updatedAt || null},
+        deductions:{rows:compactRows('deductionsReport'),totalRows:compactRows('deductionsReport').length,updatedAt:payloadByStream.deductionsReport?.updatedAt || null},
+        warehouseMeasurements:{rows:compactRows('warehouseMeasurements'),totalRows:compactRows('warehouseMeasurements').length,updatedAt:payloadByStream.warehouseMeasurements?.updatedAt || null},
+        antifraud:{rows:compactRows('antifraudRetention'),totalRows:compactRows('antifraudRetention').length,updatedAt:payloadByStream.antifraudRetention?.updatedAt || null},
+        labeling:{rows:compactRows('labelingRetention'),totalRows:compactRows('labelingRetention').length,updatedAt:payloadByStream.labelingRetention?.updatedAt || null},
       },
       coverage:{
         financeReady,
