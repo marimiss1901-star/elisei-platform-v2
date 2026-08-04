@@ -7,6 +7,7 @@ README_5_6_3.md
 README_5_6_4.md
 README_5_7_0.md
 README_5_7_1.md
+README_5_7_2.md
 RELEASE_NOTES_V5_4_9.txt
 RELEASE_NOTES_V5_5_0.txt
 RELEASE_NOTES_V5_6_0.txt
@@ -16,6 +17,7 @@ RELEASE_NOTES_V5_6_3.txt
 RELEASE_NOTES_V5_6_4.txt
 RELEASE_NOTES_V5_7_0.txt
 RELEASE_NOTES_V5_7_1.txt
+RELEASE_NOTES_V5_7_2.txt
 backend/package.json
 backend/src/routes/elCore.cjs
 backend/src/server.js
@@ -36,6 +38,7 @@ backend/src/wb/product-master.js
 backend/src/wb/snapshot-store.js
 backend/src/wb/stream-store.js
 backend/tests/el-personality.test.mjs
+backend/tests/el-stream-availability.test.mjs
 backend/tests/warehouse-remains-parser.test.mjs
 backend/tests/wb-analytics-period.test.mjs
 backend/tests/wb-api-policy.test.mjs

@@ -31,7 +31,7 @@ const defaultElPlan = {
 
 const defaultElPersonality = {
   character:'insider', humor:'light', support:true, celebrations:true,
-  address:'auto', noHumorInCritical:true,
+  address:'auto', preferredName:'', noHumorInCritical:true,
 }
 
 const elCharacterMeta = {
@@ -59,6 +59,7 @@ function normalizeElSettings(value = {}) {
     address:['auto','formal','informal'].includes(value.address) ? value.address : defaultElPersonality.address,
     support:value.support !== false,
     celebrations:value.celebrations !== false,
+    preferredName:String(value.preferredName || value.userName || '').replace(/[^\p{L}\p{M} .'-]+/gu,'').replace(/\s+/g,' ').trim().slice(0,60),
     noHumorInCritical:true,
     allowWeb:Boolean(value.allowWeb),
   }
@@ -327,6 +328,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [chatBusy, setChatBusy] = useState(false)
   const [elConversationId, setElConversationId] = useState(() => localStorage.getItem(EL_CHAT_CONVERSATION_KEY) || createElConversationId())
   const [elSettings, setElSettings] = useState(() => normalizeElSettings(readStoredJson(EL_CHAT_SETTINGS_KEY, {})))
+  const preferredElName = elSettings.preferredName || displayName
   const [elPlan, setElPlan] = useState(defaultElPlan)
   const [elProfileSaving, setElProfileSaving] = useState(false)
   const [showElPersonality, setShowElPersonality] = useState(false)
@@ -337,7 +339,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     const storedSettings = normalizeElSettings(readStoredJson(EL_CHAT_SETTINGS_KEY, {}))
     return Array.isArray(stored) && stored.length ? stored.slice(-50) : [{
       role:'el',
-      text:initialElGreeting(greeting, displayName, storedSettings),
+      text:initialElGreeting(greeting, storedSettings.preferredName || displayName, storedSettings),
       reaction:{ mood:'happy',label:'На связи' },
     }]
   })
@@ -505,10 +507,9 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
   useEffect(() => {
     if (!elApi?.status) return
-    Promise.all([elApi.status(), elApi.profile().catch(() => null)]).then(([result, profileResult]) => {
+    elApi.status().then(result => {
       const plan = result?.plan || defaultElPlan
       setElPlan({ ...defaultElPlan, ...plan, features:{ ...defaultElPlan.features, ...(plan.features || {}) } })
-      if (profileResult?.profile) setElSettings(current => normalizeElSettings({ ...current, ...profileResult.profile }))
       setElMode(current => {
         if (current === 'pro' && !plan?.features?.pro) return plan?.features?.gpt ? 'gpt' : 'analyst'
         if (current === 'gpt' && !plan?.features?.gpt) return 'analyst'
@@ -516,6 +517,13 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       })
     }).catch(() => setElPlan(defaultElPlan))
   }, [])
+
+  useEffect(() => {
+    const cabinetId = connection.connectionId || 'main'
+    elApi.profile(cabinetId).then(profileResult => {
+      if (profileResult?.profile) setElSettings(current => normalizeElSettings({ ...current, ...profileResult.profile }))
+    }).catch(() => {})
+  }, [connection.connectionId])
 
   useEffect(() => {
     if (active !== 'Спросить ЭЛа') lastBusinessSectionRef.current = active
@@ -890,8 +898,9 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         celebrations:elSettings.celebrations,
         address:elSettings.address,
         noHumorInCritical:true,
-        userName:displayName,
-      })
+        preferredName:elSettings.preferredName,
+        userName:preferredElName,
+      }, connection.connectionId || 'main', user?.company || 'Основной кабинет WB')
       if (result?.profile) setElSettings(current => normalizeElSettings({ ...current, ...result.profile }))
       notify('Характер Эла сохранён для этого кабинета.')
     } catch (error) { notify(error.message, 8000) }
@@ -966,7 +975,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     const previous = elConversationId
     const next = createElConversationId()
     setElConversationId(next)
-    setMessages([{ role:'el', text:elSettings.character === 'professional' ? 'Новый диалог начат. Какой вопрос по кабинету проверим?' : `Новый диалог начат. Я на связи${displayName ? `, ${displayName}` : ''} — о чём думаем?`, reaction:{ mood:'happy',label:'На связи' } }])
+    setMessages([{ role:'el', text:elSettings.character === 'professional' ? 'Новый диалог начат. Какой вопрос по кабинету проверим?' : `Новый диалог начат. Я на связи${preferredElName ? `, ${preferredElName}` : ''} — о чём думаем?`, reaction:{ mood:'happy',label:'На связи' } }])
     setElMood('happy')
     setChat('')
     if (previous) elApi.clearConversation(previous).catch(() => {})
@@ -998,9 +1007,10 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         tone:elSettings.humor === 'off' ? 'professional' : 'adaptive_playful',
         personality:{
           character:elSettings.character, humor:elSettings.humor, support:elSettings.support,
-          celebrations:elSettings.celebrations, address:elSettings.address, noHumorInCritical:true,
+          celebrations:elSettings.celebrations, address:elSettings.address,
+          preferredName:elSettings.preferredName, noHumorInCritical:true,
         },
-        userName:displayName,
+        userName:preferredElName,
         cabinetId:connection.connectionId || 'main',
         cabinetName:user?.company || 'Основной кабинет WB',
         period,
@@ -1811,6 +1821,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         ><strong>{meta.title}</strong><span>{meta.text}</span></button>)}
       </div>
       <div className="el-personality-fields">
+        <label>Как Эл будет обращаться<input type="text" value={elSettings.preferredName} placeholder={displayName || 'Например, Мария'} onChange={event => updateElSetting('preferredName', event.target.value)}/></label>
         <label>Юмор<select value={elSettings.humor} onChange={event => updateElSetting('humor', event.target.value)}>
           {Object.entries(elHumorMeta).map(([key,label]) => <option key={key} value={key}>{label}</option>)}
         </select></label>

@@ -110,8 +110,11 @@ export const elApi = {
   plan: () => request('/api/el/plan'),
   setPlan: (payload) => request('/api/el/plan', { method:'PUT', body:JSON.stringify(payload) }),
   capabilities: () => request('/api/el/capabilities'),
-  profile: () => request('/api/el/profile'),
-  saveProfile: (profile) => request('/api/el/profile', { method:'PUT', body:JSON.stringify(profile) }),
+  profile: (cabinetId = 'main') => request(`/api/el/profile?cabinetId=${encodeURIComponent(cabinetId || 'main')}`),
+  saveProfile: (profile, cabinetId = 'main', cabinetName = 'Основной кабинет') => request('/api/el/profile', {
+    method:'PUT',
+    body:JSON.stringify({ ...profile, cabinetId: cabinetId || 'main', cabinetName }),
+  }),
   chat: (payload) => request('/api/el/chat', {
     method: 'POST',
     body: JSON.stringify(payload),

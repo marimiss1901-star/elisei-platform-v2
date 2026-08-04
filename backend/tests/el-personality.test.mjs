@@ -125,3 +125,19 @@ assert.match(prompt, /не повторяй одну и ту же шутку/i)
 assert.match(prompt, /имя: Мария/i)
 
 console.log('ELISEI living El personality tests passed')
+
+const preferredProfile = normalizeElProfile({ character:'insider', preferredName:'  Мария 123 ' })
+assert.equal(preferredProfile.preferredName, 'Мария')
+
+const screenFallbackAnalyst = await runElAnalyst({
+  message:'Сколько у нас продаж и заказов?', history:[],
+  context:{ screen:{ period:{from:'2026-08-01',to:'2026-08-04'}, summary:{ revenue:6511633,orders:9022,sales:9573,returns:107,returnRate:1.1 } } },
+  identity:{userId:'u',cabinetId:'c',userName:'Мария'},
+  personality:{character:'insider',humor:'off',support:true,address:'informal'},
+  classification:{reason:'cabinet-question',modules:['sales']},
+  dataBridge:{ async getMany(){ return { sales:{ok:false,warning:'Внутренний мост временно недоступен'} } } },
+})
+assert.match(screenFallbackAnalyst.text, /9[\s\u00a0]?573|9573/)
+assert.match(screenFallbackAnalyst.text, /9[\s\u00a0]?022|9022/)
+assert.doesNotMatch(screenFallbackAnalyst.text, /Продажи и заказы.*недоступны/i)
+assert.match(screenFallbackAnalyst.text, /текущего экрана ELISEI/i)

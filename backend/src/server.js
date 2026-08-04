@@ -568,7 +568,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.17.0 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.17.2 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -1468,6 +1468,13 @@ async function canonicalConnectionData(connection, { repair = true, persistManif
   return { ...hydrated, data, recovered, recoveryQueued }
 }
 
+function streamDataAvailable(stageStatus = {}, stage = '', rowCount = 0) {
+  // Реально сохранённые строки всегда важнее устаревшего false в stageStatus.
+  // После восстановления из wb_stream_data старый флаг подключения может ещё
+  // оставаться отрицательным, хотя данные уже доступны аналитике и Элу.
+  return Number(rowCount || 0) > 0 || stageStatus?.[stage]?.available === true
+}
+
 function buildCoreAnalytics(data = {}, rawSettings = {}) {
   const settings = sanitizeBusinessSettings({ ...DEFAULT_BUSINESS_SETTINGS, ...rawSettings })
   const rawProducts = Array.isArray(data.products) ? data.products : []
@@ -1493,23 +1500,23 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
   const acquiringRows = Array.isArray(acquiringData.rows) ? acquiringData.rows : []
   const stageStatus = data?.stageStatus && typeof data.stageStatus === 'object' ? data.stageStatus : {}
   const availability = {
-    products: stageStatus.products?.available ?? rawProducts.length > 0,
-    orders: stageStatus.orders?.available ?? orders.length > 0,
-    sales: stageStatus.sales?.available ?? salesRows.length > 0,
-    stocks: Boolean((trustedStocks && (stageStatus.stocks?.available ?? true)) || (stageStatus.sellerStocks?.available ?? sellerStocks.length > 0)),
-    fboStocks: trustedStocks && Boolean(stageStatus.stocks?.available ?? true),
-    sellerStocks: stageStatus.sellerStocks?.available ?? sellerStocks.length > 0,
+    products: streamDataAvailable(stageStatus, 'products', rawProducts.length),
+    orders: streamDataAvailable(stageStatus, 'orders', orders.length),
+    sales: streamDataAvailable(stageStatus, 'sales', salesRows.length),
+    stocks: Boolean((trustedStocks && streamDataAvailable(stageStatus, 'stocks', fboStocks.length)) || streamDataAvailable(stageStatus, 'sellerStocks', sellerStocks.length)),
+    fboStocks: trustedStocks && streamDataAvailable(stageStatus, 'stocks', fboStocks.length),
+    sellerStocks: streamDataAvailable(stageStatus, 'sellerStocks', sellerStocks.length),
     stockDetails: stocks.length > 0,
-    advertising: stageStatus.advertising?.available ?? (Array.isArray(advertisingData.campaigns) && advertisingData.campaigns.length > 0),
-    finance: stageStatus.finance?.available ?? financeRows.length > 0,
-    paidStorage: stageStatus.paidStorage?.available ?? paidStorageRows.length > 0,
-    acceptance: stageStatus.acceptance?.available ?? acceptanceRows.length > 0,
-    acquiring: stageStatus.acquiring?.available ?? acquiringRows.length > 0,
-    searchQueries: stageStatus.searchQueries?.available ?? Number(data?.searchQueries?.totalRows || 0) > 0,
-    stockHistory: stageStatus.stockHistory?.available ?? Number(data?.stockHistory?.totalRows || 0) > 0,
-    reviews: stageStatus.reviews?.available ?? Number(data?.reviews?.totalRows || 0) > 0,
-    questions: stageStatus.questions?.available ?? Number(data?.questions?.totalRows || 0) > 0,
-    chats: stageStatus.chats?.available ?? Number(data?.chats?.totalRows || 0) > 0,
+    advertising: streamDataAvailable(stageStatus, 'advertising', Array.isArray(advertisingData.campaigns) ? advertisingData.campaigns.length : 0),
+    finance: streamDataAvailable(stageStatus, 'finance', financeRows.length),
+    paidStorage: streamDataAvailable(stageStatus, 'paidStorage', paidStorageRows.length),
+    acceptance: streamDataAvailable(stageStatus, 'acceptance', acceptanceRows.length),
+    acquiring: streamDataAvailable(stageStatus, 'acquiring', acquiringRows.length),
+    searchQueries: streamDataAvailable(stageStatus, 'searchQueries', Number(data?.searchQueries?.totalRows || 0)),
+    stockHistory: streamDataAvailable(stageStatus, 'stockHistory', Number(data?.stockHistory?.totalRows || 0)),
+    reviews: streamDataAvailable(stageStatus, 'reviews', Number(data?.reviews?.totalRows || 0)),
+    questions: streamDataAvailable(stageStatus, 'questions', Number(data?.questions?.totalRows || 0)),
+    chats: streamDataAvailable(stageStatus, 'chats', Number(data?.chats?.totalRows || 0)),
   }
   const periodDays = Math.max(1, Math.min(366, Number(data?.__periodDays || 30)))
   const productMap = new Map()
@@ -4617,7 +4624,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.17.0',
+    version: '2.17.2',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -5568,6 +5575,11 @@ async function buildElModuleData({ req, identity, period, module, focus }) {
   const core = buildCoreAnalytics(filtered.data, settings)
   const products = Array.isArray(core.products) ? core.products : []
   const syncStates = (await getSyncStates(connection.id)).map(publicSyncState)
+  const sourceCounts = {
+    products:Number(canonical.sources?.products?.count || (Array.isArray(canonical.data?.products) ? canonical.data.products.length : 0)),
+    orders:Number(canonical.sources?.orders?.count || (Array.isArray(canonical.data?.orders) ? canonical.data.orders.length : 0)),
+    sales:Number(canonical.sources?.sales?.count || (Array.isArray(canonical.data?.sales) ? canonical.data.sales.length : 0)),
+  }
   const base = {
     available: true,
     module,
@@ -5576,6 +5588,7 @@ async function buildElModuleData({ req, identity, period, module, focus }) {
     period: filtered.range ? { from: filtered.range.from, to: filtered.range.to, days: filtered.range.days } : { days: core.periodDays },
     coverage: elDataCoverage(connection, core, filtered.range),
     availability: core.availability,
+    sourceCounts,
     lastSync: connection.last_sync_at || null,
   }
 
@@ -5592,8 +5605,11 @@ async function buildElModuleData({ req, identity, period, module, focus }) {
     }
   }
   if (module === 'sales') {
+    const salesAvailable = Boolean(core.availability?.orders || core.availability?.sales || sourceCounts.orders > 0 || sourceCounts.sales > 0)
     return {
       ...base,
+      available:salesAvailable,
+      warning:salesAvailable ? null : 'Продажи и заказы ещё не синхронизированы для выбранного кабинета.',
       summary: {
         revenue: core.summary.revenue, orders: core.summary.orders, sales: core.summary.sales,
         returns: core.summary.returns, returnRate: core.summary.returnRate,

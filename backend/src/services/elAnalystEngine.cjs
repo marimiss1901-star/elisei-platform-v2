@@ -48,6 +48,27 @@ function coverageWarnings(data) {
   return [...new Set(warnings.filter(Boolean))];
 }
 
+function screenFallback(moduleName, context = {}) {
+  const screen = context?.screen && typeof context.screen === 'object' ? context.screen : {};
+  const summary = screen?.summary && typeof screen.summary === 'object' ? screen.summary : null;
+  if (!summary) return null;
+  const has = (...keys) => keys.some((key) => summary[key] != null && Number.isFinite(Number(summary[key])));
+  const period = screen.period || context.period || null;
+  if (moduleName === 'sales' && has('revenue','orders','sales','returns')) {
+    return { available:true, summary, period, topByRevenue:[], topBySales:[], warning:'Использованы подтверждённые показатели текущего экрана ELISEI; товарная детализация через внутренний мост временно недоступна.' };
+  }
+  if (moduleName === 'overview' && has('revenue','orders','sales','stockUnits','operatingProfit')) {
+    return { available:true, summary, period, criticalProducts:[], topRecommendations:[], warning:'Использованы подтверждённые показатели текущего экрана ELISEI.' };
+  }
+  if (moduleName === 'stocks' && has('stockUnits','zeroStock','lowStock','slowStock')) {
+    return { available:true, summary, period, lowStockProducts:[], slowStockProducts:[], warning:'Использован текущий сводный снимок остатков ELISEI; детализация товаров временно недоступна.' };
+  }
+  if (moduleName === 'finance' && has('revenue','operatingProfit','margin')) {
+    return { available:true, summary, period, missingCostProducts:[], lossMakingProducts:[], warning:'Использованы подтверждённые финансовые показатели текущего экрана ELISEI; построчная детализация временно недоступна.' };
+  }
+  return null;
+}
+
 function formatOverview(data, tone) {
   const s = data?.summary || {};
   const critical = Array.isArray(data?.criticalProducts) ? data.criticalProducts : [];
@@ -307,10 +328,15 @@ async function runElAnalyst(options = {}) {
   const warnings = [];
   for (const moduleName of modules) {
     const result = results[moduleName];
-    const data = moduleData(result);
+    let data = moduleData(result);
     if (!result?.ok || !data?.available) {
-      warnings.push(data?.warning || result?.warning || `Данные раздела «${MODULES[moduleName]?.title || moduleName}» пока недоступны.`);
-      continue;
+      const fallback = screenFallback(moduleName, options.context);
+      if (fallback) {
+        data = fallback;
+      } else {
+        warnings.push(data?.warning || result?.warning || `Данные раздела «${MODULES[moduleName]?.title || moduleName}» пока недоступны.`);
+        continue;
+      }
     }
     const formatter = FORMATTERS[moduleName] || formatOverview;
     sections.push(formatter(data, voice));

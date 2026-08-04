@@ -6,6 +6,7 @@ const DEFAULT_EL_PROFILE = Object.freeze({
   support: true,
   celebrations: true,
   address: 'auto',
+  preferredName: '',
   noHumorInCritical: true,
 });
 
@@ -123,12 +124,18 @@ function normalizeElProfile(input = {}) {
   if (humorInput === false) humorInput = 'off';
   const humor = HUMOR_VALUES.has(String(humorInput || '')) ? String(humorInput) : DEFAULT_EL_PROFILE.humor;
   const address = ADDRESS_VALUES.has(String(input.address || '')) ? String(input.address) : DEFAULT_EL_PROFILE.address;
+  const preferredName = String(input.preferredName || input.userName || '')
+    .replace(/[^\p{L}\p{M} .'-]+/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60);
   return {
     character,
     humor,
     support: input.support !== false,
     celebrations: input.celebrations !== false,
     address,
+    preferredName,
     noHumorInCritical: true,
   };
 }
