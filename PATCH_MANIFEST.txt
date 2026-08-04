@@ -1,13 +1,13 @@
-ELISEI 5.8.0 PATCH FROM 5.7.6
+ELISEI 5.9.0 PATCH FROM 5.8.0
 
 Purpose:
-- restore the Base-token financial detail stream and balance as the primary accounting source;
-- preserve exact rrdId cursor pagination, partial pages and automatic continuation after WB limits;
-- add the WB document registry, categories and protected downloads through the backend;
-- classify logistics, storage, acceptance, acquiring, penalties, compensation, promotion and subscriptions in one ledger;
-- treat Jam charges as confirmed only when a financial operation or document provides evidence;
-- derive Base-token acquiring from the finance ledger while keeping privileged official summaries optional;
-- show partial coverage and next retry instead of false zeroes.
+- add safe frequent WB polling through the existing API token without seller-cabinet browser automation;
+- prepare OAuth readiness without enabling an unverified OAuth code exchange;
+- add official WB webhook storage, secret verification, seller validation and event idempotency for registered catalog services;
+- process up to 100 webhook events with one PostgreSQL batch and acknowledge before heavy synchronization;
+- keep webhook-triggered work paused when the user disables live mode;
+- recover STOCK_HISTORY_DAILY_CSV tasks after deploy, timeout or a duplicate report UUID;
+- preserve finance/document limits and all 5.8.0 financial behavior.
 
-Install over: ELISEI 5.7.6
-Changed project files: 19
+Install over: ELISEI 5.8.0
+Changed project files: 14

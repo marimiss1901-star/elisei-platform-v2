@@ -353,6 +353,8 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [serviceTokenLabel, setServiceTokenLabel] = useState('')
   const [showServiceToken, setShowServiceToken] = useState(false)
   const [checkingServiceToken, setCheckingServiceToken] = useState(false)
+  const [liveSync, setLiveSync] = useState({ enabled:false,mode:'polling',intervals:{},webhooksEnabled:false,webhookCount:0,oauth:{},webhookSetupReady:false })
+  const [liveSyncBusy, setLiveSyncBusy] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [savingSettings, setSavingSettings] = useState(false)
   const [dashboardData, setDashboardData] = useState(null)
@@ -494,6 +496,36 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     if (coreResult.core?.settings) setSettingsDraft(coreResult.core.settings)
   }
 
+  const loadLiveSync = async (connectionId = connection.connectionId) => {
+    if (!connectionId) return
+    try {
+      const result = await wbApi.live(connectionId)
+      setLiveSync({ ...(result?.status || {}),webhooks:result?.webhooks || [] })
+    } catch { /* live sync is optional and must not block the cabinet */ }
+  }
+
+  const updateLiveSync = async patch => {
+    if (!connection.connectionId || liveSyncBusy) return
+    setLiveSyncBusy(true)
+    try {
+      const result=await wbApi.updateLive(connection.connectionId,patch)
+      setLiveSync(current=>({ ...current,...(result?.status || {}) }))
+      notify(result?.status?.enabled ? 'Живое обновление включено. ELISEI будет обновлять оперативные данные автоматически.' : 'Живое обновление приостановлено.')
+    } catch(error){ notify(error.message,9000) }
+    finally{ setLiveSyncBusy(false) }
+  }
+
+  const setupLiveWebhooks = async () => {
+    if (!connection.connectionId || liveSyncBusy) return
+    setLiveSyncBusy(true)
+    try {
+      const result=await wbApi.setupWebhooks(connection.connectionId)
+      setLiveSync({ ...(result?.status || {}),webhooks:result?.webhooks || [] })
+      notify(result?.created?.length ? `Подключено вебхуков: ${result.created.length}. События WB будут приходить автоматически.` : 'Вебхуки уже подключены или для них пока нет подходящих прав.',8000)
+    } catch(error){ notify(error.message,10000) }
+    finally{ setLiveSyncBusy(false) }
+  }
+
   const loadAdvertisingData = async (connectionId = connection.connectionId, period = analyticsPeriod) => {
     if (!connectionId || !period?.from || !period?.to) return
     const result = await wbApi.advertising(connectionId,{ from:period.from,to:period.to })
@@ -581,7 +613,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       syncRevisionRef.current = syncDataRevision(normalized)
       setConnection(normalized)
       setSyncHistory(status.syncHistory || [])
-      await loadConnectionData(status.connectionId)
+      await Promise.all([loadConnectionData(status.connectionId),loadLiveSync(status.connectionId)])
     }).catch(error => notify(error.message, 8000))
   }, [])
 
@@ -614,6 +646,11 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     loadConnectionData(connection.connectionId).catch(() => {})
   }, [active, connection.connected, connection.connectionId])
 
+
+  useEffect(() => {
+    if (active !== 'Подключения' || !connection.connected || !connection.connectionId) return
+    loadLiveSync(connection.connectionId).catch(() => {})
+  }, [active,connection.connected,connection.connectionId])
 
   useEffect(() => {
     localStorage.setItem(ANALYTICS_PERIOD_KEY, JSON.stringify(analyticsPeriod))
@@ -1786,6 +1823,12 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         <div><ShieldCheck size={24}/></div>
         <div><strong>{connection.serviceFinanceReady ? 'Сервисный финансовый доступ готов' : connection.serviceTokenConnected ? 'Сервисный токен сохранён, но доступ не готов' : 'Сервисный токен ещё не подключён'}</strong><p>{connection.serviceFinanceReady ? 'Сводки реализации и эквайринга будут запрашиваться только этим токеном.' : serviceSecretText}</p></div>
       </div>
+
+      {connection.connected && <div className={`live-sync-card ${liveSync.enabled?'enabled':'disabled'}`}>
+        <div className="live-sync-head"><div className="live-sync-icon"><RefreshCw className={liveSync.enabled?'live-spin':''} size={24}/></div><div><span>Живое обновление</span><h3>{liveSync.enabled ? (liveSync.webhooksEnabled ? 'Гибридный режим включён' : 'Частая синхронизация включена') : 'Автоматическое обновление выключено'}</h3><p>{liveSync.webhooksEnabled ? 'События карточек, отзывов и готовых отчётов приходят через вебхуки; заказы и продажи обновляются инкрементально, остатки — свежим снимком.' : 'Заказы обновляются примерно раз в 2 минуты, продажи — инкрементально раз в 5 минут, остатки — свежим снимком по расписанию. Жёсткие лимиты финансов и документов сохраняются.'}</p></div><button className={liveSync.enabled?'secondary-btn':'primary-btn'} disabled={liveSyncBusy} onClick={()=>updateLiveSync({enabled:!liveSync.enabled})}>{liveSyncBusy?<RefreshCw className="spin" size={17}/>:<PlugZap size={17}/>} {liveSync.enabled?'Приостановить':'Включить'}</button></div>
+        <div className="live-sync-grid"><div><small>Заказы</small><strong>≈ 2 мин.</strong><span>инкрементально</span></div><div><small>Продажи и остатки</small><strong>≈ 5 мин.</strong><span>продажи — инкрементально, остатки — снимком</span></div><div><small>Вебхуки WB</small><strong>{liveSync.webhookCount || 0}</strong><span>{liveSync.webhooksEnabled?'активны':'ожидают регистрацию сервиса'}</span></div><div><small>Последнее событие</small><strong>{liveSync.lastEventAt?new Date(liveSync.lastEventAt).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}):'—'}</strong><span>{liveSync.lastEventAt?new Date(liveSync.lastEventAt).toLocaleDateString('ru-RU'):'событий пока нет'}</span></div></div>
+        <div className="live-sync-actions"><div><strong>OAuth и вебхуки</strong><p>{liveSync.oauth?.message || 'OAuth станет доступен после регистрации ELISEI в Каталоге решений WB. До этого живой режим работает через текущий токен.'}</p></div>{liveSync.webhookSetupReady?<button className="secondary-btn" disabled={liveSyncBusy} onClick={setupLiveWebhooks}><PlugZap size={17}/> Подключить вебхуки</button>:liveSync.oauth?.connectUrl?<button className="secondary-btn" onClick={()=>window.open(liveSync.oauth.connectUrl,'_blank','noopener,noreferrer')}><PlugZap size={17}/> Подключить через WB</button>:liveSync.oauth?.catalogUrl?<button className="secondary-btn" onClick={()=>window.open(liveSync.oauth.catalogUrl,'_blank','noopener,noreferrer')}><FileText size={17}/> Регистрация сервиса</button>:<span className="live-sync-wait">{liveSync.oauth?.catalogRegistered?'OAuth ожидает финальную активацию':'Нужна регистрация в Каталоге WB'}</span>}</div>
+      </div>}
 
       <div className="wb-coverage-grid">{requirements.map(item => {
         const state = item.stage ? syncStatus(item.stage) : null

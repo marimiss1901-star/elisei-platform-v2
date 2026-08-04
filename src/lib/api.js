@@ -62,6 +62,10 @@ export const wbApi = {
   connect: (token, label = '', purpose = 'general') => request('/api/wb/connect', { method: 'POST', body: JSON.stringify({ token, label, purpose }) }),
   connectService: (token, label = '') => request('/api/wb/connect', { method: 'POST', body: JSON.stringify({ token, label, purpose:'service' }) }),
   status: (connectionId) => request(`/api/wb/status/${encodeURIComponent(connectionId)}`),
+  live: (connectionId) => request(`/api/wb/live/${encodeURIComponent(connectionId)}`),
+  updateLive: (connectionId, settings = {}) => request(`/api/wb/live/${encodeURIComponent(connectionId)}`, { method:'PUT',body:JSON.stringify(settings) }),
+  setupWebhooks: (connectionId) => request(`/api/wb/live/${encodeURIComponent(connectionId)}/webhooks/setup`, { method:'POST' }),
+  oauthReadiness: () => request('/api/wb/oauth/readiness'),
   sync: (connectionId, stages = null, options = {}) => request('/api/wb/sync', {
     method: 'POST',
     body: JSON.stringify({

@@ -1,0 +1,24 @@
+ELISEI 5.9.0 — LIVE WB UPDATE
+Install over: ELISEI 5.8.0
+
+Included:
+- safe frequent polling with independent per-stream intervals;
+- incremental orders and sales continuation;
+- fresh stock snapshots without pretending they are incremental rows;
+- PostgreSQL live-sync settings;
+- prepared OAuth readiness state without enabling an unverified callback exchange;
+- WB webhook creation for registered catalog services;
+- encrypted webhook secrets and Authorization verification;
+- seller validation, event idempotency and test-event protection;
+- one batch INSERT for up to 100 webhook events to meet the 10-second acknowledgement window;
+- webhook events do not queue work while live mode is paused;
+- report_generation_complete wakes persisted asynchronous report tasks;
+- stock-history report recovery after deploy, timeout or duplicate report ID;
+- automatic replacement of a genuinely unusable report UUID;
+- backend health exposes live integration readiness;
+- frontend connection workspace shows live mode, webhook count and last event.
+
+Not included yet:
+- active OAuth code exchange before ELISEI is approved in the WB Business Solutions Catalog and receives the official service parameters;
+- login/password or browser-session automation for the WB seller cabinet;
+- artificial acceleration of finance and document methods beyond WB limits.

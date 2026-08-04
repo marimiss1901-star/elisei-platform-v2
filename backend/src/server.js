@@ -41,6 +41,9 @@ import {
   normalizeDocumentCategories, normalizeDocumentRow, summarizeDocuments, deriveAcquiringFromLedgerRows, jamEvidenceFromFinanceRows,
   isPrivilegedFinanceToken,
 } from './wb/finance-core.js'
+import {
+  LIVE_SYNC_STAGES, defaultLiveSyncSettings, normalizeLiveSyncSettings, dueLiveStages, eventStages, safeEqualSecret, publicLiveSyncStatus,
+} from './wb/live-sync.js'
 
 const { Pool } = pg
 const app = express()
@@ -59,6 +62,11 @@ const pool = databaseUrl ? new Pool({
 const encryptionSecret = process.env.ENCRYPTION_KEY || jwtSecret
 const encryptionKey = encryptionSecret ? crypto.createHash('sha256').update(encryptionSecret).digest() : null
 const staleRunningMinutes = Math.max(2, Math.min(30, Number(process.env.WB_STALE_RUNNING_MINUTES || 3)))
+const publicBackendUrl = String(process.env.PUBLIC_BACKEND_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/$/,'')
+const wbOauthConnectUrl = String(process.env.WB_OAUTH_CONNECT_URL || '').trim()
+const wbServiceCatalogUrl = String(process.env.WB_SERVICE_CATALOG_URL || 'https://seller.wildberries.ru/auth-services/application').trim()
+const wbCatalogServiceEnabled = /^(?:1|true|yes)$/i.test(String(process.env.WB_CATALOG_SERVICE_ENABLED || '').trim())
+const liveSyncBatchLimit = Math.max(1,Math.min(6,Number(process.env.WB_LIVE_SYNC_BATCH_LIMIT || 3)))
 
 const databaseState = {
   ready: !pool,
@@ -212,6 +220,7 @@ function kickBackgroundWorkers(reason = 'timer') {
     // не стартовали в одну секунду и не провоцировали глобальный лимитер.
     await processPendingStockReports()
     await processPendingGeneratedReports()
+    await scheduleDueLiveSyncStages()
     await Promise.all([processDueDeferredStages(),processDueArchiveStages()])
   })().catch(error => {
     backgroundWorkerState.lastError = error.message
@@ -312,6 +321,44 @@ async function initDatabase() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY(connection_id, stage)
     );
+    CREATE TABLE IF NOT EXISTS wb_live_sync_settings (
+      connection_id UUID PRIMARY KEY REFERENCES marketplace_connections(id) ON DELETE CASCADE,
+      settings JSONB NOT NULL DEFAULT '{}'::jsonb,
+      last_event_at TIMESTAMPTZ,
+      last_poll_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS wb_webhooks (
+      id UUID PRIMARY KEY,
+      connection_id UUID NOT NULL REFERENCES marketplace_connections(id) ON DELETE CASCADE,
+      wb_webhook_id TEXT,
+      name TEXT NOT NULL,
+      receiver_key_hash TEXT NOT NULL UNIQUE,
+      secret_encrypted TEXT,
+      subscriptions JSONB NOT NULL DEFAULT '[]'::jsonb,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      status TEXT NOT NULL DEFAULT 'local_ready',
+      last_event_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS wb_webhooks_connection_idx ON wb_webhooks(connection_id);
+    CREATE TABLE IF NOT EXISTS wb_webhook_events (
+      id UUID PRIMARY KEY,
+      connection_id UUID NOT NULL REFERENCES marketplace_connections(id) ON DELETE CASCADE,
+      webhook_id UUID REFERENCES wb_webhooks(id) ON DELETE SET NULL,
+      wb_event_id TEXT,
+      idempotency_key TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      event_scope TEXT,
+      event_time TIMESTAMPTZ,
+      is_test BOOLEAN NOT NULL DEFAULT FALSE,
+      payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      processed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(connection_id,idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS wb_webhook_events_pending_idx ON wb_webhook_events(processed_at,created_at);
     CREATE TABLE IF NOT EXISTS el_conversations (
       user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       cabinet_id TEXT NOT NULL,
@@ -576,7 +623,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.18.0 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.19.0 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -1055,6 +1102,104 @@ async function getConnection(userId, id = null) {
   if (id) { params.push(id); sql += ' AND id = $2' }
   const result = await pool.query(sql, params)
   return result.rows[0] || null
+}
+
+const WEBHOOK_GROUPS = Object.freeze([
+  { key:'content', stage:'products', name:'ELISEI карточки', subscriptions:[{scope:'content',event:'card_changed'},{scope:'content',event:'card_creation_error'}] },
+  { key:'feedbacks', stage:'reviews', name:'ELISEI отзывы', subscriptions:[{scope:'questionsandfeedback',event:'feedback_updated'}] },
+  { key:'analytics', stage:'stockHistory', name:'ELISEI отчёты', subscriptions:[{scope:'contentanalytics',event:'report_generation_complete'}] },
+])
+
+function receiverKeyHash(value) {
+  return crypto.createHash('sha256').update(String(value || '')).digest('hex')
+}
+
+function oauthReadiness() {
+  const secret = publicServiceSecretStatus()
+  const callbackUrl = publicBackendUrl ? `${publicBackendUrl}/api/wb/oauth/callback` : null
+  const configurationPrepared = Boolean(wbCatalogServiceEnabled && secret.valid && wbOauthConnectUrl && callbackUrl)
+  // Обмен OAuth-кода намеренно не включается до получения и проверки
+  // окончательного контракта конкретного зарегистрированного сервиса WB.
+  // Наличие URL в env само по себе не означает, что авторизация готова.
+  const oauthActive = false
+  let message = 'До регистрации ELISEI в Каталоге решений WB живой режим работает через текущий API-токен и безопасную фоновую синхронизацию.'
+  if (wbCatalogServiceEnabled && !secret.valid) message = 'Регистрация сервиса отмечена, но для OAuth и вебхуков не настроен корректный WB_CLIENT_SECRET.'
+  else if (wbCatalogServiceEnabled && !callbackUrl) message = 'Регистрация сервиса отмечена, но не указан публичный PUBLIC_BACKEND_URL для callback и вебхуков.'
+  else if (wbCatalogServiceEnabled && secret.valid && callbackUrl && !wbOauthConnectUrl) message = 'Вебхуки можно подключить, а OAuth останется выключенным до получения официальных параметров подключения WB.'
+  else if (configurationPrepared) message = 'Параметры OAuth сохранены, но кнопка подключения будет включена только после финальной проверки callback-контракта WB.'
+  return {
+    configured:false,
+    oauthActive,
+    configurationPrepared,
+    catalogRegistered:wbCatalogServiceEnabled,
+    serviceSecretReady:Boolean(secret.valid),
+    connectUrl:null,
+    catalogUrl:wbServiceCatalogUrl || null,
+    callbackPrepared:Boolean(callbackUrl),
+    callbackActive:false,
+    callbackUrl,
+    message,
+  }
+}
+
+async function liveSyncRow(connectionId) {
+  const result = await pool.query('SELECT * FROM wb_live_sync_settings WHERE connection_id=$1',[connectionId])
+  return result.rows[0] || null
+}
+
+async function liveSyncStatus(connectionId) {
+  const [rowResult,webhookResult] = await Promise.all([
+    pool.query('SELECT * FROM wb_live_sync_settings WHERE connection_id=$1',[connectionId]),
+    pool.query("SELECT COUNT(*)::int AS count FROM wb_webhooks WHERE connection_id=$1 AND enabled=TRUE AND status IN ('active','local_ready')",[connectionId]),
+  ])
+  return {
+    ...publicLiveSyncStatus(rowResult.rows[0] || null,webhookResult.rows[0]?.count || 0),
+    oauth:oauthReadiness(),
+    webhookSetupReady:Boolean(wbCatalogServiceEnabled && publicServiceSecretStatus().valid && publicBackendUrl),
+  }
+}
+
+async function saveLiveSyncSettings(connectionId, patch = {}) {
+  const current = await liveSyncRow(connectionId)
+  const settings = normalizeLiveSyncSettings({ ...(current?.settings || defaultLiveSyncSettings()), ...(patch || {}), intervals:{...((current?.settings || {}).intervals || {}),...((patch || {}).intervals || {})} })
+  const result = await pool.query(`
+    INSERT INTO wb_live_sync_settings(connection_id,settings,updated_at)
+    VALUES($1,$2::jsonb,NOW())
+    ON CONFLICT(connection_id) DO UPDATE SET settings=EXCLUDED.settings,updated_at=NOW()
+    RETURNING *
+  `,[connectionId,JSON.stringify(settings)])
+  const webhookCount = await pool.query("SELECT COUNT(*)::int AS count FROM wb_webhooks WHERE connection_id=$1 AND enabled=TRUE AND status IN ('active','local_ready')",[connectionId])
+  return { ...publicLiveSyncStatus(result.rows[0],webhookCount.rows[0]?.count || 0),oauth:oauthReadiness(),webhookSetupReady:Boolean(wbCatalogServiceEnabled && publicServiceSecretStatus().valid && publicBackendUrl) }
+}
+
+async function publicWebhookRows(connectionId) {
+  const result = await pool.query(`
+    SELECT id,wb_webhook_id,name,subscriptions,enabled,status,last_event_at,created_at,updated_at
+    FROM wb_webhooks WHERE connection_id=$1 ORDER BY created_at
+  `,[connectionId])
+  return result.rows.map(row=>({
+    id:row.id,wbWebhookId:row.wb_webhook_id,name:row.name,subscriptions:row.subscriptions || [],enabled:row.enabled,
+    status:row.status,lastEventAt:row.last_event_at,createdAt:row.created_at,updatedAt:row.updated_at,
+  }))
+}
+
+async function createWbWebhook(connection, tokens, group) {
+  const selected = chooseTokenForStage(tokens,group.stage)
+  const receiverKey = crypto.randomBytes(24).toString('base64url')
+  const localId = crypto.randomUUID()
+  const callbackUrl = `${publicBackendUrl}/api/wb/webhooks/inbound/${connection.id}/${receiverKey}`
+  const payload = await wbFetch('https://webhooks-api.wildberries.ru/api/v1/webhooks',selected.token,{
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:true,url:callbackUrl,name:group.name,subscriptions:group.subscriptions}),
+    label:`Создание вебхука WB «${group.name}»`,timeoutMs:30000,maxAttempts:1,maxRetryDelayMs:0,
+  })
+  const wbWebhookId = String(payload?.id || payload?.webhookId || '')
+  const secret = String(payload?.secret || '')
+  if (!wbWebhookId || !secret) throw Object.assign(new Error(`WB не вернул id или секрет вебхука «${group.name}».`),{status:502})
+  await pool.query(`
+    INSERT INTO wb_webhooks(id,connection_id,wb_webhook_id,name,receiver_key_hash,secret_encrypted,subscriptions,enabled,status,updated_at)
+    VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,TRUE,'active',NOW())
+  `,[localId,connection.id,wbWebhookId,group.name,receiverKeyHash(receiverKey),encryptToken(secret),JSON.stringify(group.subscriptions)])
+  return { id:localId,wbWebhookId,name:group.name,subscriptions:group.subscriptions,status:'active' }
 }
 
 function publicConnection(row, tokens = [], syncStates = []) {
@@ -4083,6 +4228,21 @@ function sanitizeChatObject(value) {
   return safe
 }
 
+async function findStockHistoryReport(token, reportId, { deadlineAt = 0 } = {}) {
+  if (!reportId) return null
+  const filter = new URLSearchParams()
+  filter.append('filter[downloadIds]',String(reportId))
+  const payload = await wbFetch(`https://seller-analytics-api.wildberries.ru/api/v2/nm-report/downloads?${filter.toString()}`,token,{
+    label:'Проверка существующего задания истории остатков WB',timeoutMs:30000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+  })
+  const reports = extractExtendedRows(payload,['data'])
+  return reports.find(item=>String(item?.id || item?.downloadId || '') === String(reportId)) || null
+}
+
+function stockHistoryDuplicateIdError(error) {
+  return /(?:id\s+is\s+already\s+exists|already\s+exists|уже\s+существ)/i.test(String(error?.message || ''))
+}
+
 async function advanceStockHistoryTask(connectionId, token, state, { deadlineAt = 0, tokenInfo = null } = {}) {
   const period = state?.metadata?.period || reportPeriod(90)
   const syncId = String(state?.metadata?.syncId || crypto.randomUUID())
@@ -4092,24 +4252,54 @@ async function advanceStockHistoryTask(connectionId, token, state, { deadlineAt 
   const cooldown = streamCooldownMs('stockHistory',tokenInfo)
 
   if (phase === 'create') {
-    await wbFetch(base,token,{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        id:reportId,
-        reportType:'STOCK_HISTORY_DAILY_CSV',
-        userReportName:`ELISEI — история остатков ${period.dateFrom}–${period.dateTo}`,
-        params:{
-          nmIds:[],subjectIds:[],brandNames:[],tagIds:[],
-          currentPeriod:{start:period.dateFrom,end:period.dateTo},
-          stockType:'',skipDeletedNm:true,
-        },
-      }),
-      label:'Создание ежедневной истории остатков WB',timeoutMs:45000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
-    })
+    // После deploy WB мог уже принять POST, а локальный state ещё остался в phase=create.
+    // Сначала проверяем сохранённый reportId и продолжаем его вместо повторного создания.
+    if (state?.task_id || state?.metadata?.createAttempted) {
+      const existing = await findStockHistoryReport(token,reportId,{deadlineAt})
+      if (existing) {
+        return {
+          pending:true,status:'pending',taskId:reportId,
+          nextAllowedAt:new Date(Date.now()+cooldown).toISOString(),
+          metadata:{...(state?.metadata||{}),period,syncId,reportId,phase:'poll',pollAttempts:0,persistedCount:Number(state?.metadata?.persistedCount||0),reportType:'STOCK_HISTORY_DAILY_CSV',recoveredExistingTask:true},
+        }
+      }
+    }
+    try {
+      await wbFetch(base,token,{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          id:reportId,
+          reportType:'STOCK_HISTORY_DAILY_CSV',
+          userReportName:`ELISEI — история остатков ${period.dateFrom}–${period.dateTo}`,
+          params:{
+            nmIds:[],subjectIds:[],brandNames:[],tagIds:[],
+            currentPeriod:{start:period.dateFrom,end:period.dateTo},
+            stockType:'',skipDeletedNm:true,
+          },
+        }),
+        label:'Создание ежедневной истории остатков WB',timeoutMs:45000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+      })
+    } catch (error) {
+      if (!stockHistoryDuplicateIdError(error)) throw error
+      const existing = await findStockHistoryReport(token,reportId,{deadlineAt})
+      if (existing) {
+        return {
+          pending:true,status:'pending',taskId:reportId,
+          nextAllowedAt:new Date(Date.now()+cooldown).toISOString(),
+          metadata:{...(state?.metadata||{}),period,syncId,reportId,phase:'poll',pollAttempts:0,persistedCount:Number(state?.metadata?.persistedCount||0),reportType:'STOCK_HISTORY_DAILY_CSV',recoveredDuplicateId:true},
+        }
+      }
+      const nextReportId = crypto.randomUUID()
+      return {
+        pending:true,status:'queued',taskId:nextReportId,
+        nextAllowedAt:new Date(Date.now()+cooldown).toISOString(),
+        metadata:{...(state?.metadata||{}),period,syncId,reportId:nextReportId,phase:'create',pollAttempts:0,persistedCount:Number(state?.metadata?.persistedCount||0),reportType:'STOCK_HISTORY_DAILY_CSV',createAttempted:false,replacedDuplicateReportId:reportId},
+      }
+    }
     return {
       pending:true,status:'pending',taskId:reportId,
       nextAllowedAt:new Date(Date.now()+cooldown).toISOString(),
-      metadata:{period,syncId,reportId,phase:'poll',pollAttempts:0,persistedCount:0,reportType:'STOCK_HISTORY_DAILY_CSV'},
+      metadata:{period,syncId,reportId,phase:'poll',pollAttempts:0,persistedCount:0,reportType:'STOCK_HISTORY_DAILY_CSV',createAttempted:true},
     }
   }
 
@@ -4833,13 +5023,22 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.17.5',
+    version: '2.19.0',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
       lastError: databaseState.lastError,
       lastConnectedAt: databaseState.lastConnectedAt,
       nextRetryAt: databaseState.nextRetryAt,
+    },
+    wbLiveIntegration: {
+      pollingAvailable:true,
+      catalogRegistered:wbCatalogServiceEnabled,
+      publicBackendReady:Boolean(publicBackendUrl),
+      serviceSecretReady:Boolean(publicServiceSecretStatus().valid),
+      oauthConfigured:Boolean(oauthReadiness().configurationPrepared),
+      oauthActive:false,
+      webhookSetupReady:Boolean(wbCatalogServiceEnabled && publicBackendUrl && publicServiceSecretStatus().valid),
     },
     wbApiPolicy: {
       fbsArchive: 'GET /api/marketplace/v3/fbs/orders/archive',
@@ -4886,6 +5085,145 @@ app.get('/api/auth/me', authRequired, async (req, res) => {
   const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.auth.sub])
   if (!result.rowCount) return res.status(404).json({ error: 'Пользователь не найден' })
   res.json({ user: publicUser(result.rows[0]) })
+})
+
+async function queueStagesFromWebhook(connectionId, events = []) {
+  const stages = [...new Set(events.flatMap(eventStages).filter(stage=>WB_SYNC_STAGES[stage]))]
+  for (const stage of stages) {
+    const current = (await pool.query('SELECT * FROM wb_sync_states WHERE connection_id=$1 AND stage=$2',[connectionId,stage])).rows[0]
+    if (current?.status === 'running' || current?.status === 'pending') continue
+    await updateSyncState(connectionId,stage,{
+      status:'queued',nextAllowedAt:new Date().toISOString(),lastError:null,
+      metadata:{...(current?.metadata || {}),trigger:'webhook',webhookQueuedAt:new Date().toISOString()},
+    })
+  }
+  if (stages.length) setTimeout(()=>kickBackgroundWorkers('webhook'),10).unref?.()
+  return stages
+}
+
+async function persistWebhookEvents(connectionId, webhookId, incoming = []) {
+  const events = (Array.isArray(incoming) ? incoming : []).slice(0,100).map(event=>({
+    event,
+    idempotencyKey:String(event?.idempotencyKey || event?.id || '').trim(),
+    eventType:String(event?.type || '').trim(),
+  })).filter(item=>item.idempotencyKey && item.eventType)
+  if (!events.length) return []
+  const params=[]
+  const values=[]
+  for (const item of events) {
+    const event=item.event
+    const row=[crypto.randomUUID(),connectionId,webhookId,String(event?.id || '') || null,item.idempotencyKey,item.eventType,String(event?.scope || '') || null,event?.time || null,Boolean(event?.test),JSON.stringify(event?.payload || {})]
+    const placeholders=row.map(value=>{params.push(value);return `$${params.length}`})
+    values.push(`(${placeholders.slice(0,9).join(',')},${placeholders[9]}::jsonb)`)
+  }
+  const result=await pool.query(`
+    INSERT INTO wb_webhook_events(id,connection_id,webhook_id,wb_event_id,idempotency_key,event_type,event_scope,event_time,is_test,payload)
+    VALUES ${values.join(',')}
+    ON CONFLICT(connection_id,idempotency_key) DO NOTHING
+    RETURNING idempotency_key,is_test
+  `,params)
+  const inserted=new Set(result.rows.filter(row=>!row.is_test).map(row=>String(row.idempotency_key)))
+  return events.filter(item=>inserted.has(item.idempotencyKey)).map(item=>item.event)
+}
+
+app.post('/api/wb/webhooks/inbound/:connectionId/:receiverKey', async (req,res) => {
+  try {
+    const connectionId = String(req.params.connectionId || '')
+    const receiverHash = receiverKeyHash(req.params.receiverKey)
+    const webhookResult = await pool.query(`
+      SELECT w.*,c.seller_id FROM wb_webhooks w
+      JOIN marketplace_connections c ON c.id=w.connection_id
+      WHERE w.connection_id=$1 AND w.receiver_key_hash=$2 AND w.enabled=TRUE
+      LIMIT 1
+    `,[connectionId,receiverHash])
+    const webhook = webhookResult.rows[0]
+    if (!webhook) return res.status(404).json({ok:false})
+    const suppliedSecret = String(req.headers.authorization || '')
+    const expectedSecret = webhook.secret_encrypted ? decryptToken(webhook.secret_encrypted) : ''
+    if (!safeEqualSecret(suppliedSecret,expectedSecret)) return res.status(401).json({ok:false})
+    const body = req.body && typeof req.body === 'object' ? req.body : {}
+    if (webhook.seller_id && body.sellerId && String(webhook.seller_id) !== String(body.sellerId)) return res.status(403).json({ok:false})
+    const accepted = await persistWebhookEvents(connectionId,webhook.id,body.events)
+    await Promise.all([
+      pool.query('UPDATE wb_webhooks SET last_event_at=NOW(),updated_at=NOW() WHERE id=$1',[webhook.id]),
+      pool.query(`INSERT INTO wb_live_sync_settings(connection_id,settings,last_event_at,updated_at)
+        VALUES($1,$2::jsonb,NOW(),NOW())
+        ON CONFLICT(connection_id) DO UPDATE SET last_event_at=NOW(),updated_at=NOW()`,[connectionId,JSON.stringify(defaultLiveSyncSettings())]),
+    ])
+    const liveRow=await liveSyncRow(connectionId)
+    const liveEnabled=normalizeLiveSyncSettings(liveRow?.settings || {}).enabled
+    // WB ждёт 200 не более 10 секунд. События сохраняются одним batch INSERT,
+    // а тяжёлая синхронизация запускается уже после ответа.
+    res.json({ok:true,accepted:accepted.length,queued:liveEnabled})
+    ;(async()=>{
+      if (liveEnabled) {
+        await queueStagesFromWebhook(connectionId,accepted)
+        // Для события готовности отчёта payload может не содержать тип отчёта.
+        // В этом случае не создаём новый отчёт, а просто будим processors уже
+        // сохранённых taskId — они сами заберут готовый файл.
+        if (accepted.some(event=>String(event?.type || '').toLowerCase()==='report_generation_complete')) {
+          setTimeout(()=>kickBackgroundWorkers('webhook-report-ready'),10).unref?.()
+        }
+      }
+      const keys=accepted.map(event=>String(event?.idempotencyKey || event?.id || '')).filter(Boolean)
+      if(keys.length) await pool.query('UPDATE wb_webhook_events SET processed_at=NOW() WHERE connection_id=$1 AND idempotency_key=ANY($2::text[])',[connectionId,keys])
+    })().catch(error=>console.warn('Webhook stage queue failed:',error.message))
+  } catch (error) {
+    console.warn('WB webhook receiver failed:',error.message)
+    res.status(500).json({ok:false})
+  }
+})
+
+app.get('/api/wb/live/:id',authRequired,async(req,res)=>{
+  const connection=await getConnection(req.auth.sub,req.params.id)
+  if(!connection) return res.status(404).json({error:'Подключение не найдено'})
+  const [status,webhooks]=await Promise.all([liveSyncStatus(connection.id),publicWebhookRows(connection.id)])
+  res.json({status,webhooks})
+})
+
+app.put('/api/wb/live/:id',authRequired,async(req,res)=>{
+  const connection=await getConnection(req.auth.sub,req.params.id)
+  if(!connection) return res.status(404).json({error:'Подключение не найдено'})
+  const status=await saveLiveSyncSettings(connection.id,req.body || {})
+  if(status.enabled) setTimeout(()=>kickBackgroundWorkers('live-enabled'),10).unref?.()
+  res.json({status})
+})
+
+app.post('/api/wb/live/:id/webhooks/setup',authRequired,async(req,res)=>{
+  try {
+    const connection=await getConnection(req.auth.sub,req.params.id)
+    if(!connection) return res.status(404).json({error:'Подключение не найдено'})
+    const secret=publicServiceSecretStatus()
+    if(!wbCatalogServiceEnabled) return res.status(409).json({error:'Вебхуки доступны только после регистрации ELISEI в Каталоге решений WB. После одобрения установите WB_CATALOG_SERVICE_ENABLED=true.'})
+    if(!secret.valid) return res.status(409).json({error:secret.error || 'Для вебхуков нужен WB_CLIENT_SECRET зарегистрированного сервиса.'})
+    if(!publicBackendUrl) return res.status(409).json({error:'Укажите PUBLIC_BACKEND_URL в backend Render, чтобы WB мог отправлять вебхуки.'})
+    const tokens=await getWbTokens(req.auth.sub,connection.id)
+    const existing=await publicWebhookRows(connection.id)
+    const created=[]
+    const skipped=[]
+    for(const group of WEBHOOK_GROUPS){
+      if(existing.some(item=>item.name===group.name && item.enabled)){skipped.push(group.name);continue}
+      if(!selectTokenRowForStage(tokens,group.stage)){skipped.push(`${group.name}: нет категории ${WB_SCOPE_BITS[WB_SYNC_STAGES[group.stage].scope]?.label || WB_SYNC_STAGES[group.stage].scope}`);continue}
+      created.push(await createWbWebhook(connection,tokens,group))
+      await sleep(1100)
+    }
+    const current=await liveSyncRow(connection.id)
+    await saveLiveSyncSettings(connection.id,{...(current?.settings || {}),enabled:true,mode:'hybrid',webhooksEnabled:created.length>0 || existing.some(item=>item.enabled && ['active','local_ready'].includes(item.status))})
+    res.json({ok:true,created,skipped,status:await liveSyncStatus(connection.id),webhooks:await publicWebhookRows(connection.id)})
+  }catch(error){
+    res.status(error.status || 502).json({error:error.message})
+  }
+})
+
+app.get('/api/wb/oauth/readiness',authRequired,async(req,res)=>{
+  res.json(oauthReadiness())
+})
+
+app.all('/api/wb/oauth/callback',(req,res)=>{
+  res.status(409).json({
+    error:'OAuth callback зарезервирован, но обмен кодом ещё не активирован. Нужны регистрация ELISEI в Каталоге решений WB и официальные параметры OAuth, выданные Wildberries.',
+    code:'WB_OAUTH_REGISTRATION_REQUIRED',
+  })
 })
 
 app.get('/api/wb/connection', authRequired, async (req, res) => {
@@ -6406,6 +6744,40 @@ async function processPendingGeneratedReports() {
       console.warn(`Generated WB report ${row.stage} failed:`,error.message)
     } finally {
       generatedReportLocks.delete(row.connection_id)
+    }
+  }
+}
+
+async function scheduleDueLiveSyncStages() {
+  if (!pool) return
+  let rows=[]
+  try {
+    const result=await pool.query(`
+      SELECT l.connection_id,l.settings,c.user_id
+      FROM wb_live_sync_settings l
+      JOIN marketplace_connections c ON c.id=l.connection_id
+      WHERE COALESCE((l.settings->>'enabled')::boolean,FALSE)=TRUE
+      ORDER BY l.updated_at
+      LIMIT 20
+    `)
+    rows=result.rows
+  } catch(error) {
+    console.warn('Live sync schedule scan failed:',error.message)
+    return
+  }
+  for(const row of rows){
+    try{
+      const states=await getSyncStates(row.connection_id)
+      const due=dueLiveStages({settings:row.settings,states,now:Date.now()}).slice(0,liveSyncBatchLimit)
+      for(const stage of due){
+        const current=states.find(item=>item.stage===stage) || null
+        const metadata={...(current?.metadata || {}),trigger:'live_poll',liveQueuedAt:new Date().toISOString()}
+        if(stage==='advertising') metadata.period=boundedSyncPeriod(analyticsPeriodRange({from:isoDaysAgo(30).slice(0,10),to:new Date().toISOString().slice(0,10)}),31)
+        await updateSyncState(row.connection_id,stage,{status:'queued',nextAllowedAt:new Date().toISOString(),lastError:null,metadata})
+      }
+      if(due.length) await pool.query('UPDATE wb_live_sync_settings SET last_poll_at=NOW(),updated_at=NOW() WHERE connection_id=$1',[row.connection_id])
+    }catch(error){
+      console.warn(`Live sync scheduler failed for ${row.connection_id}:`,error.message)
     }
   }
 }

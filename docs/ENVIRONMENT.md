@@ -46,3 +46,24 @@ ELISEI_AI_MODEL=...
 ELISEI_AUTH_STRICT=true
 ELISEI_TOKEN_MODE=database
 ```
+
+## Живое обновление Wildberries
+
+Оперативный режим через текущий API-токен включается в интерфейсе и не требует новых переменных Render.
+
+После регистрации ELISEI в Каталоге решений WB для вебхуков нужны:
+
+```env
+WB_CATALOG_SERVICE_ENABLED=true
+WB_CLIENT_SECRET=...
+PUBLIC_BACKEND_URL=https://<backend-service>.onrender.com
+WB_SERVICE_CATALOG_URL=https://seller.wildberries.ru/auth-services/application
+```
+
+Допустимый размер одной волны планировщика:
+
+```env
+WB_LIVE_SYNC_BATCH_LIMIT=3
+```
+
+OAuth нельзя активировать только по самостоятельно придуманному URL. `WB_OAUTH_CONNECT_URL` добавляется после получения официальных параметров зарегистрированного сервиса; до этого ELISEI показывает готовность архитектуры, но не запускает обмен кодом.

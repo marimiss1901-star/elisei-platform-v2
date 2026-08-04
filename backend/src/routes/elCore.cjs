@@ -46,7 +46,7 @@ function createRouter(express) {
     const plan = await resolveElPlan(req, identity);
     res.json({
       ok: true,
-      version: '5.8.0',
+      version: '5.9.0',
       name: 'El Tiered Intelligence',
       configured: Boolean(process.env.OPENAI_API_KEY && (process.env.ELISEI_GPT_MODEL || process.env.ELISEI_PRO_MODEL || process.env.ELISEI_AI_MODEL)),
       models: {
@@ -97,7 +97,7 @@ function createRouter(express) {
   router.get('/capabilities', asyncRoute(async (req, res) => {
     const identity = identityFromRequest(req);
     const plan = await resolveElPlan(req, identity);
-    res.json({ ok: true, version: '5.8.0', modules: publicCapabilities(), plan, writeActions: false });
+    res.json({ ok: true, version: '5.9.0', modules: publicCapabilities(), plan, writeActions: false });
   }));
 
   router.post('/chat', asyncRoute(async (req, res) => {
