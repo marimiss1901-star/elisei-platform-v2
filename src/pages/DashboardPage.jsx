@@ -218,7 +218,9 @@ const defaultSettings = {
 
 const emptyConnection = {
   connected:false, connectionId:'', scopes:[], tokens:[], syncStates:[], lastSync:null,
-  primaryToken:null, primaryTokenId:null, tokenMode:'none', coverageByStage:{}
+  primaryToken:null, primaryTokenId:null, tokenMode:'none', coverageByStage:{},
+  serviceToken:null, serviceTokenConnected:false, serviceFinanceReady:false,
+  serviceSecret:{ configured:false,valid:false,expiresAt:null,error:null }
 }
 
 const normalizeConnection = (value = {}, current = {}) => ({
@@ -297,6 +299,10 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [tokenLabel, setTokenLabel] = useState('')
   const [showToken, setShowToken] = useState(false)
   const [checking, setChecking] = useState(false)
+  const [serviceTokenDraft, setServiceTokenDraft] = useState('')
+  const [serviceTokenLabel, setServiceTokenLabel] = useState('')
+  const [showServiceToken, setShowServiceToken] = useState(false)
+  const [checkingServiceToken, setCheckingServiceToken] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [savingSettings, setSavingSettings] = useState(false)
   const [dashboardData, setDashboardData] = useState(null)
@@ -765,6 +771,20 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       notify(result.tokenMode === 'universal' ? 'Основной токен подключён и назначен всем доступным потокам.' : 'Токен подключён. ELISEI использует его только для доступных категорий.')
     } catch (error) { notify(error.message, 9000) }
     finally { setChecking(false) }
+  }
+
+  const saveServiceConnection = async event => {
+    event.preventDefault()
+    if (!wbApi.configured) return notify('Добавьте VITE_API_BASE_URL в Render')
+    if (serviceTokenDraft.trim().length < 40) return notify('Сервисный токен выглядит слишком коротким')
+    setCheckingServiceToken(true)
+    try {
+      const result = await wbApi.connectService(serviceTokenDraft.trim(),serviceTokenLabel.trim())
+      setConnection(current => normalizeConnection(result,current))
+      setServiceTokenDraft(''); setServiceTokenLabel('')
+      notify(result.serviceFinanceReady ? 'Сервисный токен подключён. Финансовые сводки WB готовы к загрузке.' : 'Сервисный токен сохранён. Проверьте WB_CLIENT_SECRET в backend Render.')
+    } catch (error) { notify(error.message,10000) }
+    finally { setCheckingServiceToken(false) }
   }
 
   const removeToken = async tokenId => {
@@ -1453,11 +1473,11 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       { scope:'promotion', stage:'advertising', title:'Реклама', text:'Кампании и эффективность' },
       { scope:'feedbacks', title:'Отзывы', text:'Вопросы, отзывы и рейтинг' },
       { scope:'finance', stage:'finance', title:'Финансы', text:'Комиссия, логистика, удержания и выплаты' },
-      { scope:'finance', stage:'financeReports', title:'Сводки реализации', text:'Официальные отчёты для сверки выплат · Сервисный токен' },
+      { scope:'finance', stage:'financeReports', title:'Сводки реализации', text:'Официальные отчёты для сверки выплат · только Сервисный токен' },
       { scope:'analytics', stage:'paidStorage', title:'Хранение', text:'Платное хранение по товарам' },
       { scope:'analytics', stage:'acceptance', title:'Приёмка', text:'Платные операции при приёмке' },
       { scope:'finance', stage:'acquiring', title:'Эквайринг', text:'Издержки на приём платежей' },
-      { scope:'finance', stage:'acquiringReports', title:'Сводки эквайринга', text:'Контроль комиссии и НДС по отчётам · Сервисный токен' },
+      { scope:'finance', stage:'acquiringReports', title:'Сводки эквайринга', text:'Контроль комиссии и НДС · только Сервисный токен' },
       { scope:'marketplace', stage:'fbsArchive', title:'Архив FBS', text:'Сборочные задания старше трёх месяцев' },
       { scope:'analytics', stage:'measurementPenalties', title:'Штрафы за габариты', text:'Удержания и замеры упаковки' },
       { scope:'analytics', stage:'deductionsReport', title:'Подмены и вложения', text:'Детализация специальных удержаний' },
@@ -1480,27 +1500,52 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       if (state.status === 'success') return `Загружено: ${formatNumber(state.lastCount)}`
       if (state.status === 'pending') return 'Формируется в фоне'
       if (state.status === 'queued') return 'Поставлено в фоновую очередь'
+      if (state.status === 'retry_scheduled') return state.nextAllowedAt ? `Автоповтор после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : 'Автоповтор запланирован'
       if (state.status === 'rate_limited') return state.nextAllowedAt ? `Пауза до ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : 'Лимит WB'
+      if (['service_token_required','service_secret_required','service_token_invalid','service_permission_required'].includes(state.status)) return 'Нужен сервисный доступ'
       if (state.status === 'missing_token') return 'Нет подходящего токена'
       if (state.status === 'running') return 'Загрузка'
       return state.lastError || 'Не загружено'
     }
     const primary = connection.primaryToken || connection.tokens?.find(item => item.isPrimary)
     const modeCopy = connection.tokenMode === 'universal'
-      ? { tone:'universal', title:'Один основной токен покрывает все рабочие потоки', text:'Товары, заказы, продажи, FBS/FBO-остатки, реклама и финансы будут синхронизироваться через один API-ключ. Дополнительные токены не требуются.' }
+      ? { tone:'universal', title:'Основной токен покрывает обычные потоки кабинета', text:'Товары, заказы, продажи, остатки, реклама и основная финансовая детализация работают через Базовый токен. Сводки реализации и эквайринга подключаются отдельно сервисным токеном.' }
       : connection.tokenMode === 'combined'
-        ? { tone:'combined', title:'Потоки собраны из нескольких токенов', text:'ELISEI использует основной токен в первую очередь, а дополнительный — только для отсутствующих в нём категорий.' }
-        : connection.tokens?.length
-          ? { tone:'partial', title:'Основной токен подключён не ко всем потокам', text:'Добавьте дополнительный токен только для категорий, которые отмечены ниже как недоступные.' }
-          : { tone:'empty', title:'Подключите один основной API-ключ WB', text:'Если в нём есть все нужные категории, этого ключа будет достаточно для всех потоков.' }
+        ? { tone:'combined', title:'Обычные потоки собраны из нескольких токенов', text:'ELISEI использует основной Базовый токен в первую очередь, а дополнительные обычные ключи — только для недостающих категорий.' }
+        : connection.tokens?.some(item => !item.isServiceToken)
+          ? { tone:'partial', title:'Основной токен подключён не ко всем обычным потокам', text:'Добавьте обычный токен только для категорий, отмеченных ниже как недоступные. Сервисный токен не заменяет основной.' }
+          : { tone:'empty', title:'Подключите основной Базовый API-ключ WB', text:'Сначала подключается токен кабинета. Сервисный токен для двух официальных финансовых сводок добавляется отдельным полем.' }
+    const serviceSecretText = connection.serviceSecret?.valid
+      ? `Секрет сервиса настроен${connection.serviceSecret?.expiresAt ? ` до ${new Date(connection.serviceSecret.expiresAt).toLocaleDateString('ru-RU')}` : ''}`
+      : connection.serviceSecret?.configured
+        ? connection.serviceSecret?.error || 'WB_CLIENT_SECRET требует обновления'
+        : 'WB_CLIENT_SECRET ещё не настроен в backend Render'
 
-    return <section className="app-page glass-panel connections-page"><div className="page-title"><span>Интеграции</span><h1>Подключение Wildberries</h1><p>ELISEI предпочитает один универсальный токен. Дополнительный ключ используется только когда в основном нет нужной категории.</p></div>
-      <div className={`token-mode-banner ${modeCopy.tone}`}><div className="token-mode-icon">{connection.tokenMode === 'universal' ? <CheckCircle2 size={24}/> : <ShieldCheck size={24}/>}</div><div><strong>{modeCopy.title}</strong><p>{modeCopy.text}</p>{primary && <small>Основной: {primary.label} · {primary.stageCoverageCount || 0}/{connection.stageTotal || primary.stageTotal || 27} рабочих потоков</small>}</div></div>
-      <div className="wb-coverage-grid">{requirements.map(item => { const covered=connection.scopes?.includes(item.scope); const state=item.stage?syncStatus(item.stage):null; const source=item.stage?connection.coverageByStage?.[item.stage]:connection.tokens?.find(token => token.scopes?.includes(item.scope)); return <div className={`wb-coverage-card ${covered?'covered':'missing'}`} key={`${item.scope}:${item.stage || item.title}`}><span className="coverage-icon">{covered?<CheckCircle2 size={20}/>:<AlertTriangle size={20}/>}</span><div><strong>{item.title}</strong><p>{item.text}</p><small>{covered ? `${source?.isPrimary ? 'Основной токен' : source?.label || 'Токен подключён'}${item.stage ? ` · ${stageLabel(state)}` : ''}` : 'Нужна категория доступа'}</small></div></div>})}</div>
-      {connection.tokens?.length > 0 && <div className="token-manager"><div className="section-title-row"><div><span>Безопасное хранилище</span><h2>API-токены кабинета</h2></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Синхронизация':'Синхронизировать доступные разделы'}</button></div><div className="token-card-grid">{connection.tokens.map(item => <div className={`saved-token-card ${item.isPrimary?'primary-token-card':''}`} key={item.id}><div className="saved-token-head"><div className="token-shield"><ShieldCheck size={20}/></div><div><div className="token-title-line"><strong>{item.label}</strong>{item.isPrimary && <b className="primary-token-badge">Основной</b>}</div><span>{item.tokenType} · {item.readOnly?'только чтение':'чтение и запись'}</span></div><button className="token-remove" onClick={() => removeToken(item.id)} title="Удалить токен"><X size={17}/></button></div><div className="token-flow-coverage"><strong>{item.stageCoverageCount || 0}/{connection.stageTotal || item.stageTotal || 27} потоков</strong><span>{item.coversAllCoreFlows ? 'Покрывает всё рабочее ядро' : 'Используется только по своим категориям'}</span></div><div className="token-scopes">{item.scopeLabels?.map(scope => <b key={scope}>{scope}</b>)}</div><div className="token-card-foot"><small>До: {item.expiresAt?new Date(item.expiresAt).toLocaleDateString('ru-RU'):'не указано'} · код {item.fingerprint}</small>{!item.isPrimary && <button className="token-primary-btn" onClick={() => setPrimaryToken(item.id)}>Сделать основным</button>}</div></div>)}</div></div>}
-      <div className="connection-card add-token-card"><div className="connection-logo">WB</div><div className="connection-copy"><div className="connection-title"><h3>{connection.tokens?.length ? (connection.tokenMode === 'universal' ? 'Добавить резервный токен' : 'Дополнить недостающие категории') : 'Подключить основной токен'}</h3><span className={connection.tokens?.length?'connection-status connected':'connection-status'}>{connection.tokenMode === 'universal' ? 'Основной покрывает всё' : connection.tokens?.length ? `${connection.tokens.length} токен(а)` : 'Не подключён'}</span></div><p>{connection.tokenMode === 'universal' ? 'Основной токен уже покрывает рабочие потоки. Новый ключ добавляйте только как резервный или для будущих категорий — финансы, отзывы, чат и документы.' : 'Можно вставить один токен сразу со всеми нужными категориями. ELISEI автоматически сделает наиболее полный ключ основным и не будет дублировать запросы через остальные.'}</p><form className="token-form multi-token-form" onSubmit={saveConnection}><label>Название токена — необязательно<input type="text" value={tokenLabel} onChange={e => setTokenLabel(e.target.value)} placeholder={connection.tokens?.length ? 'Например: Резервный или Отзывы' : 'Например: Основной токен WB'} maxLength="80"/></label><label>API-ключ Wildberries</label><div className="token-input"><input type={showToken?'text':'password'} value={tokenDraft} onChange={e => setTokenDraft(e.target.value)} placeholder="Вставьте официальный API-ключ" autoComplete="off"/><button type="button" onClick={() => setShowToken(value => !value)}>{showToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>Категории определятся автоматически. Если ключ покрывает больше потоков, он станет основным. Сам токен обратно в браузер не возвращается.</small><button className="primary-btn" disabled={checking}>{checking?<><RefreshCw className="spin" size={17}/> Проверяем</>:<><PlugZap size={17}/> Проверить и добавить</>}</button></form></div></div>
-      <div className="security-note"><ShieldCheck size={22}/><div><strong>Один токен — один набор запросов</strong><p>ELISEI не дублирует обращения к WB через запасные ключи. Для каждого потока выбирается основной токен, а дополнительный включается только при отсутствии нужной категории.</p></div></div>
-      <div className="security-note"><Warehouse size={22}/><div><strong>СГТ-склады — только чтение</strong><p>После 5 августа 2026 года ELISEI показывает уже созданные СГТ-склады и их остатки, но не создаёт и не редактирует такие склады через API. Управление выполняется в личном кабинете Wildberries.</p></div></div>
+    return <section className="app-page glass-panel connections-page">
+      <div className="page-title"><span>Интеграции</span><h1>Подключение Wildberries</h1><p>Обычный токен и сервисный токен разделены. Сервисный ключ никогда не становится основным и используется только для официальных сводок реализации и эквайринга.</p></div>
+      <div className={`token-mode-banner ${modeCopy.tone}`}><div className="token-mode-icon">{connection.tokenMode === 'universal' ? <CheckCircle2 size={24}/> : <ShieldCheck size={24}/>}</div><div><strong>{modeCopy.title}</strong><p>{modeCopy.text}</p>{primary && <small>Основной: {primary.label} · {primary.stageCoverageCount || 0} обычных потоков</small>}</div></div>
+
+      <div className={`service-access-banner ${connection.serviceFinanceReady ? 'ready' : connection.serviceTokenConnected ? 'warning' : 'missing'}`}>
+        <div><ShieldCheck size={24}/></div>
+        <div><strong>{connection.serviceFinanceReady ? 'Сервисный финансовый доступ готов' : connection.serviceTokenConnected ? 'Сервисный токен сохранён, но доступ не готов' : 'Сервисный токен ещё не подключён'}</strong><p>{connection.serviceFinanceReady ? 'Сводки реализации и эквайринга будут запрашиваться только этим токеном.' : serviceSecretText}</p></div>
+      </div>
+
+      <div className="wb-coverage-grid">{requirements.map(item => {
+        const state = item.stage ? syncStatus(item.stage) : null
+        const source = item.stage ? connection.coverageByStage?.[item.stage] : connection.tokens?.find(token => !token.isServiceToken && token.scopes?.includes(item.scope))
+        const covered = item.stage ? Boolean(source) : Boolean(source)
+        return <div className={`wb-coverage-card ${covered?'covered':'missing'}`} key={`${item.scope}:${item.stage || item.title}`}><span className="coverage-icon">{covered?<CheckCircle2 size={20}/>:<AlertTriangle size={20}/>}</span><div><strong>{item.title}</strong><p>{item.text}</p><small>{covered ? `${source?.isServiceToken ? 'Сервисный токен' : source?.isPrimary ? 'Основной токен' : source?.label || 'Токен подключён'}${item.stage ? ` · ${stageLabel(state)}` : ''}` : item.stage && ['financeReports','acquiringReports'].includes(item.stage) ? 'Нужен отдельный Сервисный токен' : 'Нужна категория доступа'}</small></div></div>
+      })}</div>
+
+      {connection.tokens?.length > 0 && <div className="token-manager"><div className="section-title-row"><div><span>Безопасное хранилище</span><h2>API-токены кабинета</h2></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Синхронизация':'Синхронизировать доступные разделы'}</button></div><div className="token-card-grid">{connection.tokens.map(item => <div className={`saved-token-card ${item.isPrimary?'primary-token-card':''} ${item.isServiceToken?'service-token-card':''}`} key={item.id}><div className="saved-token-head"><div className="token-shield"><ShieldCheck size={20}/></div><div><div className="token-title-line"><strong>{item.label}</strong>{item.isPrimary && <b className="primary-token-badge">Основной</b>}{item.isServiceToken && <b className="service-token-badge">Сервисный</b>}</div><span>{item.tokenType} · {item.readOnly?'только чтение':'чтение и запись'}</span></div><button className="token-remove" onClick={() => removeToken(item.id)} title="Удалить токен"><X size={17}/></button></div><div className="token-flow-coverage"><strong>{item.stageCoverageCount || 0}/{connection.stageTotal || item.stageTotal || 27} потоков</strong><span>{item.isServiceToken ? 'Только сводки реализации и эквайринга' : item.coversAllCoreFlows ? 'Покрывает обычное рабочее ядро' : 'Используется только по своим категориям'}</span></div><div className="token-scopes">{item.scopeLabels?.map(scope => <b key={scope}>{scope}</b>)}</div><div className="token-card-foot"><small>До: {item.expiresAt?new Date(item.expiresAt).toLocaleDateString('ru-RU'):'не указано'} · код {item.fingerprint}</small>{!item.isPrimary && !item.isServiceToken && <button className="token-primary-btn" onClick={() => setPrimaryToken(item.id)}>Сделать основным</button>}</div></div>)}</div></div>}
+
+      <div className="connection-card add-token-card"><div className="connection-logo">WB</div><div className="connection-copy"><div className="connection-title"><h3>{connection.connected ? 'Добавить обычный резервный токен' : 'Подключить основной токен'}</h3><span className={connection.connected?'connection-status connected':'connection-status'}>{connection.connected ? 'Основной подключён' : 'Не подключён'}</span></div><p>Здесь принимаются Базовые токены кабинета. Сервисный токен в это поле не добавляется и не сможет случайно стать основным.</p><form className="token-form multi-token-form" onSubmit={saveConnection}><label>Название токена — необязательно<input type="text" value={tokenLabel} onChange={e => setTokenLabel(e.target.value)} placeholder={connection.connected ? 'Например: Резервный или Отзывы' : 'Например: Основной токен WB'} maxLength="80"/></label><label>Базовый API-ключ Wildberries</label><div className="token-input"><input type={showToken?'text':'password'} value={tokenDraft} onChange={e => setTokenDraft(e.target.value)} placeholder="Вставьте Базовый API-ключ" autoComplete="off"/><button type="button" onClick={() => setShowToken(value => !value)}>{showToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>Категории определятся автоматически. Сам токен обратно в браузер не возвращается.</small><button className="primary-btn" disabled={checking}>{checking?<><RefreshCw className="spin" size={17}/> Проверяем</>:<><PlugZap size={17}/> Проверить и добавить</>}</button></form></div></div>
+
+      {connection.connected && <div className="connection-card service-token-connect-card"><div className="connection-logo service-logo"><ShieldCheck size={28}/></div><div className="connection-copy"><div className="connection-title"><h3>Сервисный токен для финансовых сводок</h3><span className={`connection-status ${connection.serviceFinanceReady?'connected':''}`}>{connection.serviceFinanceReady ? 'Готов' : connection.serviceTokenConnected ? 'Проверить секрет' : 'Не подключён'}</span></div><p>Этот токен используется только для «Сводок реализации» и «Сводок эквайринга». Он не участвует в товарах, заказах, остатках, рекламе, документах и обычных финансах.</p><form className="token-form multi-token-form" onSubmit={saveServiceConnection}><label>Название — необязательно<input type="text" value={serviceTokenLabel} onChange={e => setServiceTokenLabel(e.target.value)} placeholder="Например: Финансовые сводки WB" maxLength="80"/></label><label>Сервисный токен Wildberries</label><div className="token-input"><input type={showServiceToken?'text':'password'} value={serviceTokenDraft} onChange={e => setServiceTokenDraft(e.target.value)} placeholder="Вставьте Сервисный токен" autoComplete="off"/><button type="button" onClick={() => setShowServiceToken(value => !value)}>{showServiceToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>{serviceSecretText}. Токен проверяется на backend и никогда не возвращается в браузер.</small><button className="primary-btn" disabled={checkingServiceToken}>{checkingServiceToken?<><RefreshCw className="spin" size={17}/> Проверяем сервисный доступ</>:<><PlugZap size={17}/> Проверить и подключить</>}</button></form></div></div>}
+
+      <div className="security-note"><RefreshCw size={22}/><div><strong>Автоповторы без сброса прогресса</strong><p>После 429, 502, 503 или 504 ELISEI сохраняет taskId, страницу и курсор, назначает время следующей попытки и продолжает тот же этап автоматически.</p></div></div>
+      <div className="security-note"><ShieldCheck size={22}/><div><strong>Один токен — один набор запросов</strong><p>Обычные потоки не переключаются на сервисный токен. Финансовые сводки, наоборот, никогда не запускаются Базовым ключом.</p></div></div>
+      <div className="security-note"><Warehouse size={22}/><div><strong>СГТ-склады — только чтение</strong><p>После 5 августа 2026 года ELISEI показывает уже созданные СГТ-склады и их остатки, но не создаёт и не редактирует такие склады через API.</p></div></div>
       {connection.connected && <div className="connection-danger-zone"><div><strong>Отключить магазин полностью</strong><p>Удалятся токены и загруженные данные этого магазина.</p></div><button className="danger-btn" onClick={disconnect}>Отключить Wildberries</button></div>}
     </section>
   }
@@ -1575,13 +1620,25 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
           ? { tone:'pending', title:'Автоповтор запускается', text:'Срок паузы закончился. Интерфейс разбудил фоновую очередь; статус обновится автоматически.' }
           : { tone:'warning', title:'Пауза Wildberries', text:state.nextAllowedAt ? `Автоповтор после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : state.lastError }
       }
+      if (state.status === 'retry_scheduled') {
+        const due = state.nextAllowedAt && new Date(state.nextAllowedAt).getTime() <= Date.now()
+        const attempt = Number(state.metadata?.automaticRetryAttempt || 0)
+        return due
+          ? { tone:'pending', title:'Повтор запускается автоматически', text:`Прогресс сохранён${state.taskId ? ' вместе с taskId' : ''}. Очередь продолжает этап с прежней страницы.` }
+          : { tone:'warning', title:'Временная ошибка WB', text:`Прогресс не потерян. Автоповтор${attempt ? ` №${attempt}` : ''}${state.nextAllowedAt ? ` после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : ' запланирован'}.` }
+      }
+      if (state.status === 'service_token_required') return { tone:'danger', title:'Требуется сервисный токен', text:state.lastError || 'Подключите отдельный Сервисный токен в разделе «Подключения».' }
+      if (state.status === 'service_secret_required') return { tone:'danger', title:'Не настроен секрет сервиса', text:state.lastError || 'Добавьте действующий WB_CLIENT_SECRET в backend Render.' }
+      if (state.status === 'service_token_invalid') return { tone:'danger', title:'Сервисный токен недействителен', text:state.lastError || 'Замените сервисный токен в разделе «Подключения».' }
+      if (state.status === 'service_permission_required') return { tone:'danger', title:'WB не дал доступ к сводке', text:state.lastError || 'Проверьте тип токена, категорию «Финансы» и принадлежность сервису.' }
+      if (state.status === 'token_invalid') return { tone:'danger', title:'Токен недействителен', text:state.lastError || 'Обновите токен кабинета.' }
       if (state.status === 'missing_token') return { tone:'danger', title:'Нет подходящего токена', text:state.lastError || 'Добавьте нужную категорию доступа.' }
       if (state.status === 'running') return { tone:'pending', title:'Загрузка', text:'Запрос выполняется.' }
       return { tone:'danger', title:'Не загружено', text:state.lastError || 'Запустите этап повторно.' }
     }
     return <section className="app-page glass-panel"><div className="page-title"><span>Контроль данных</span><h1>Журнал синхронизаций</h1><p>Каждый поток работает независимо. Лимит одного метода больше не останавливает остальные разделы.</p></div>{integrationDiagnostics && <div className="data-integrity-strip"><div><strong>Единое ядро товаров</strong><span>{formatNumber(integrationDiagnostics.productMaster?.products)} карточек · {formatNumber(integrationDiagnostics.productMaster?.withBarcodes)} со ШК</span></div><div><strong>Остатки</strong><span>{integrationDiagnostics.stockAllocation?`${formatNumber(integrationDiagnostics.stockAllocation.matchedQuantity)} шт. сопоставлено`:'снимок ожидается'}</span></div><div><strong>Реклама</strong><span>{formatNumber(integrationDiagnostics.advertisingMeta?.campaigns)} кампаний · {formatNumber(integrationDiagnostics.advertisingMeta?.campaignsWithStats)} со статистикой</span></div></div>}{!connection.connected ? <div className="empty-state"><RefreshCw size={38}/><h3>Wildberries не подключён</h3><button className="primary-btn" onClick={() => setActive('Подключения')}>Подключить</button></div> : <>
       <div className="sync-summary"><div><span>Последнее успешное обновление</span><strong>{connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : 'Ещё не выполнялось'}</strong></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Запускаем этапы':'Запустить доступные этапы'}</button></div>
-      <div className="sync-stage-grid">{stages.map(([stage,label]) => { const state=stateFor(stage); const copy=statusCopy(state,stage); const blocked=syncing || state?.status === 'pending' || (state?.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now()); return <div className={`sync-stage-card ${copy.tone}`} key={stage}><div className="sync-stage-head"><span>{copy.tone==='success'?<CheckCircle2 size={19}/>:copy.tone==='pending'?<RefreshCw className="spin" size={19}/>:<AlertTriangle size={19}/>}</span><div><small>{label}</small><strong>{copy.title}</strong></div></div><p>{copy.text}</p><button disabled={blocked} onClick={() => syncConnection(connection.connectionId,[stage])}>{blocked ? (state?.status === 'pending' ? 'Ожидаем WB' : 'Повтор будет автоматически') : (state?.status === 'rate_limited' ? 'Повторить сейчас' : 'Обновить отдельно')}</button></div> })}</div>
+      <div className="sync-stage-grid">{stages.map(([stage,label]) => { const state=stateFor(stage); const copy=statusCopy(state,stage); const serviceBlocked=['service_token_required','service_secret_required','service_token_invalid','service_permission_required'].includes(state?.status); const blocked=syncing || state?.status === 'pending' || (state?.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now()); const buttonText=serviceBlocked?'Открыть подключения':blocked?(state?.status==='pending'?'Ожидаем WB':'Повтор будет автоматически'):(['rate_limited','retry_scheduled'].includes(state?.status)?'Повторить сейчас':'Обновить отдельно'); return <div className={`sync-stage-card ${copy.tone}`} key={stage}><div className="sync-stage-head"><span>{copy.tone==='success'?<CheckCircle2 size={19}/>:copy.tone==='pending'?<RefreshCw className="spin" size={19}/>:<AlertTriangle size={19}/>}</span><div><small>{label}</small><strong>{copy.title}</strong></div></div><p>{copy.text}</p><button disabled={blocked && !serviceBlocked} onClick={() => serviceBlocked ? setActive('Подключения') : syncConnection(connection.connectionId,[stage])}>{buttonText}</button></div> })}</div>
       {coreData?.syncWarnings?.length > 0 && <div className="warning-stack">{coreData.syncWarnings.map((warning,index) => <div key={index}><AlertTriangle size={17}/>{warning}</div>)}</div>}
       <div className="sync-log">{syncHistory.length === 0 ? <div className="sync-empty">В журнале пока нет записей.</div> : syncHistory.map(item => { const warnings=Boolean(item.warnings?.length); const counts=item.counts || {}; return <div className={`sync-log-row ${warnings?'warning':item.status}`} key={item.id}><div className="sync-log-icon">{item.status==='success'&&!warnings?<CheckCircle2 size={18}/>:<AlertTriangle size={18}/>}</div><div><strong>{item.automatic?'Автоматический повтор':item.status==='success'?(warnings?'Завершено частично':'Завершено успешно'):'Не все этапы завершены'}</strong><span>{new Date(item.at).toLocaleString('ru-RU')}</span></div><div className="sync-log-details"><span>{counts.products ?? 0} товаров</span><span>{counts.orders ?? 0} заказов</span><span>{counts.sales ?? 0} продаж</span><span>{counts.stocks ?? 0} строк остатков</span><span>{counts.advertising ?? 0} кампаний</span>{warnings&&<span className="sync-warning-text">{item.warnings[0]}</span>}</div></div>})}</div>
     </>}</section>

@@ -43,7 +43,8 @@ export const authApi = {
 
 export const wbApi = {
   current: () => request('/api/wb/connection'),
-  connect: (token, label = '') => request('/api/wb/connect', { method: 'POST', body: JSON.stringify({ token, label }) }),
+  connect: (token, label = '', purpose = 'general') => request('/api/wb/connect', { method: 'POST', body: JSON.stringify({ token, label, purpose }) }),
+  connectService: (token, label = '') => request('/api/wb/connect', { method: 'POST', body: JSON.stringify({ token, label, purpose:'service' }) }),
   status: (connectionId) => request(`/api/wb/status/${encodeURIComponent(connectionId)}`),
   sync: (connectionId, stages = null, options = {}) => request('/api/wb/sync', {
     method: 'POST',

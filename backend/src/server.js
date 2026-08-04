@@ -164,6 +164,26 @@ async function recoverStaleSyncStates({ connectionId = null, reason = 'watchdog'
   return result.rows
 }
 
+async function recoverRetryableErrorStates() {
+  if (!pool) return []
+  const result = await pool.query(`
+    UPDATE wb_sync_states
+    SET status='retry_scheduled',next_allowed_at=NOW(),
+        last_error=CASE WHEN COALESCE(last_error,'')='' THEN 'Временная ошибка WB. Автоповтор восстановлен после обновления ELISEI.' ELSE last_error END,
+        metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('automaticRetryRecovered',true,'automaticRetryRecoveredAt',NOW()),
+        updated_at=NOW()
+    WHERE status='error'
+      AND (
+        COALESCE(last_error,'') ILIKE '%504%'
+        OR COALESCE(last_error,'') ILIKE '%таймаут%'
+        OR COALESCE(last_error,'') ILIKE '%временно недоступ%'
+        OR COALESCE(last_error,'') ILIKE '%gateway%'
+      )
+    RETURNING connection_id,stage
+  `)
+  return result.rows
+}
+
 
 const backgroundWorkerState = {
   running: false,
@@ -186,7 +206,7 @@ function kickBackgroundWorkers(reason = 'timer') {
     // не стартовали в одну секунду и не провоцировали глобальный лимитер.
     await processPendingStockReports()
     await processPendingGeneratedReports()
-    await processDueDeferredStages()
+    await Promise.all([processDueDeferredStages(),processDueArchiveStages()])
   })().catch(error => {
     backgroundWorkerState.lastError = error.message
     console.warn('WB background worker kick failed:', error.message)
@@ -323,6 +343,7 @@ async function initDatabase() {
   await migrateLegacyWbTokens()
   await ensurePrimaryTokens()
   await recoverStaleSyncStates({ reason:'startup' })
+  await recoverRetryableErrorStates()
 }
 
 function requireBackendConfig() {
@@ -402,11 +423,16 @@ const WB_SYNC_STAGES = Object.freeze({
   questions: { label: 'Вопросы покупателей', scope: 'feedbacks' },
   chats: { label: 'Чаты с покупателями', scope: 'chat' },
 })
-const CORE_SYNC_SCOPES = [...new Set(Object.values(WB_SYNC_STAGES).map(item => item.scope))]
+const SERVICE_TOKEN_STAGES = new Set(['financeReports','acquiringReports'])
+const GENERAL_SYNC_STAGE_NAMES = Object.keys(WB_SYNC_STAGES).filter(stage => !SERVICE_TOKEN_STAGES.has(stage))
+const CORE_SYNC_SCOPES = [...new Set(GENERAL_SYNC_STAGE_NAMES.map(stage => WB_SYNC_STAGES[stage].scope))]
 const STOCK_DATA_SCHEMA_VERSION = 5
 const STOCK_DATA_SOURCE = 'wb_warehouse_remains'
 const STOCK_REPORT_PROFILE = 'article_barcode_size_v1'
-const HEAVY_SYNC_STAGES = Object.freeze(['finance','paidStorage','acceptance','acquiring','financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','searchQueries','stockHistory','reviews','questions','chats'])
+const ARCHIVE_SYNC_STAGES = Object.freeze(['fbsArchive'])
+const HEAVY_SYNC_STAGES = Object.freeze(['finance','paidStorage','acceptance','acquiring','financeReports','acquiringReports','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','searchQueries','stockHistory','reviews','questions','chats'])
+const RETRYABLE_HTTP_STATUSES = new Set([408,425,500,502,503,504])
+const MAX_AUTOMATIC_RETRY_ATTEMPTS = Math.max(3,Math.min(12,Number(process.env.WB_MAX_AUTOMATIC_RETRY_ATTEMPTS || 8)))
 const HEAVY_PAGE_LIMIT = Math.max(500, Math.min(5000, Number(process.env.WB_HEAVY_PAGE_LIMIT || 2500)))
 const HEAVY_DB_BATCH_SIZE = Math.max(100, Math.min(500, Number(process.env.WB_HEAVY_DB_BATCH_SIZE || 250)))
 const HEAVY_STAGE_COOLDOWN_MS = Math.max(5000, Number(process.env.WB_HEAVY_STAGE_COOLDOWN_MS || 65000))
@@ -439,6 +465,16 @@ function inspectServiceSecret() {
   }
 }
 
+function publicServiceSecretStatus() {
+  if (!wbClientSecret) return { configured:false, valid:false, expiresAt:null, error:'WB_CLIENT_SECRET не настроен в backend Render.' }
+  try {
+    const info = inspectServiceSecret()
+    return { configured:true, valid:true, expiresAt:info?.expiresAt || null, error:null }
+  } catch (error) {
+    return { configured:true, valid:false, expiresAt:null, error:error.message }
+  }
+}
+
 function inspectWbToken(token) {
   const payload = decodeWbToken(token)
   const scopeMask = Number(payload.s || 0)
@@ -459,7 +495,7 @@ function inspectWbToken(token) {
   if (typeId === 3) {
     throw Object.assign(new Error('Персональный токен предназначен только для локальных программ продавца. Для облачного ELISEI используйте Базовый токен, а после регистрации сервиса — Сервисный токен или OAuth 2.0.'), { status: 403 })
   }
-  const serviceSecret = inspectServiceSecret()
+  const serviceSecret = typeId === 4 ? inspectServiceSecret() : null
   if (typeId === 4 && !serviceSecret) {
     throw Object.assign(new Error('Сервисный токен WB работает только у зарегистрированного сервиса с WB_CLIENT_SECRET. Для текущей версии ELISEI используйте Базовый токен.'), { status: 403 })
   }
@@ -499,16 +535,36 @@ function humanWait(seconds) {
   return `${Math.max(1, Math.ceil(seconds))} сек.`
 }
 
+function transientRetryPlan(state, stage, error) {
+  const previous = Math.max(0,Number(state?.metadata?.automaticRetryAttempt || 0))
+  const attempt = Math.min(MAX_AUTOMATIC_RETRY_ATTEMPTS,previous + 1)
+  const baseSeconds = SERVICE_TOKEN_STAGES.has(stage) ? 120 : stage === 'fbsArchive' ? 90 : 60
+  const seconds = Math.min(6 * 3600,baseSeconds * (2 ** Math.max(0,attempt - 1)))
+  const jitter = 0.85 + Math.random() * 0.3
+  const delaySeconds = Math.max(30,Math.round(seconds * jitter))
+  return {
+    attempt,
+    nextAllowedAt:new Date(Date.now()+delaySeconds*1000).toISOString(),
+    delaySeconds,
+    reason:Number(error?.status) === 504 ? 'timeout_504' : `http_${Number(error?.status || 502)}`,
+  }
+}
+
+function isRetryableWbError(error) {
+  return RETRYABLE_HTTP_STATUSES.has(Number(error?.status || 0))
+}
+
 function authHeaders(token) {
   const info = inspectWbToken(token)
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.15.0 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.16.0 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
-  if (wbClientSecret && (info.typeId === 1 || info.typeId === 4)) headers['X-Client-Secret'] = wbClientSecret
+  const serviceSecret = publicServiceSecretStatus()
+  if (serviceSecret.valid && (info.typeId === 1 || info.typeId === 4)) headers['X-Client-Secret'] = wbClientSecret
   return headers
 }
 
@@ -706,8 +762,17 @@ function parseZipCsvRows(buffer) {
     .flatMap(entry=>parseCsvRows(entry.data.toString('utf8')).map(row=>({ sourceFile:entry.name,...row })))
 }
 
-async function probeToken(token) {
+async function probeToken(token, { purpose='general' } = {}) {
   const info = inspectWbToken(token)
+  if (purpose === 'service' && info.typeId !== 4) {
+    throw Object.assign(new Error('В это поле нужен именно Сервисный токен Wildberries (тип acc=4). Базовый токен оставьте в основном подключении.'), { status:400, code:'WB_SERVICE_TOKEN_REQUIRED' })
+  }
+  if (purpose !== 'service' && info.typeId === 4) {
+    throw Object.assign(new Error('Сервисный токен подключается отдельно в блоке «Сервисный токен для финансовых сводок».'), { status:400, code:'WB_SERVICE_TOKEN_SEPARATE_FIELD' })
+  }
+  if (purpose === 'service' && !info.scopes.includes('finance')) {
+    throw Object.assign(new Error('В сервисном токене не включена категория «Финансы».'), { status:403, code:'WB_SERVICE_FINANCE_SCOPE_REQUIRED' })
+  }
   // Лёгкий официальный /ping подтверждает, что токен активен и принимается WB.
   await wbFetch('https://common-api.wildberries.ru/ping', token, {
     label: 'Проверка токена WB',
@@ -745,21 +810,33 @@ function rowScopes(row) {
   return []
 }
 
+function rowTokenType(row) {
+  return Number(row?.token_type || 0)
+}
+
+function isServiceTokenRow(row) {
+  return rowTokenType(row) === 4
+}
+
+function tokenEligibleForStage(row, stage) {
+  const definition = WB_SYNC_STAGES[stage]
+  if (!definition || !rowScopes(row).includes(definition.scope)) return false
+  if (SERVICE_TOKEN_STAGES.has(stage)) return isServiceTokenRow(row)
+  return !isServiceTokenRow(row)
+}
+
 function tokenStageCoverage(row) {
-  const scopes = rowScopes(row)
   return Object.entries(WB_SYNC_STAGES)
-    .filter(([, definition]) => scopes.includes(definition.scope))
+    .filter(([stage]) => tokenEligibleForStage(row,stage))
     .map(([stage, definition]) => ({ stage, label: definition.label }))
 }
 
 function tokenCoreCoverage(row) {
-  const scopes = rowScopes(row)
-  return CORE_SYNC_SCOPES.filter(scope => scopes.includes(scope)).length
+  return GENERAL_SYNC_STAGE_NAMES.filter(stage => tokenEligibleForStage(row,stage)).length
 }
 
 function coversAllCoreFlows(row) {
-  const scopes = rowScopes(row)
-  return CORE_SYNC_SCOPES.every(scope => scopes.includes(scope))
+  return GENERAL_SYNC_STAGE_NAMES.every(stage => tokenEligibleForStage(row,stage))
 }
 
 function publicWbToken(row) {
@@ -771,6 +848,9 @@ function publicWbToken(row) {
     scopes,
     scopeLabels: scopes.map(scope => WB_SCOPE_BITS[scope]?.label || scope),
     tokenType: row.token_type_label,
+    tokenTypeId: rowTokenType(row),
+    isServiceToken: isServiceTokenRow(row),
+    purpose: isServiceTokenRow(row) ? 'service' : 'general',
     readOnly: Boolean(row.read_only),
     isPrimary: Boolean(row.is_primary),
     coversAllCoreFlows: coversAllCoreFlows(row),
@@ -838,22 +918,35 @@ function unionTokenScopes(tokens) {
   return [...new Set(tokens.flatMap(row => rowScopes(row)))]
 }
 
+function tokenSort(a,b) {
+  const primaryDiff = Number(Boolean(b.is_primary)) - Number(Boolean(a.is_primary))
+  if (primaryDiff) return primaryDiff
+  const coreDiff = tokenCoreCoverage(b) - tokenCoreCoverage(a)
+  if (coreDiff) return coreDiff
+  const scopeDiff = rowScopes(b).length - rowScopes(a).length
+  if (scopeDiff) return scopeDiff
+  return new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()
+}
+
 function selectTokenRow(tokens, scope) {
   return [...tokens]
-    .filter(item => rowScopes(item).includes(scope))
-    .sort((a, b) => {
-      const primaryDiff = Number(Boolean(b.is_primary)) - Number(Boolean(a.is_primary))
-      if (primaryDiff) return primaryDiff
-      const coreDiff = tokenCoreCoverage(b) - tokenCoreCoverage(a)
-      if (coreDiff) return coreDiff
-      const scopeDiff = rowScopes(b).length - rowScopes(a).length
-      if (scopeDiff) return scopeDiff
-      return new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()
-    })[0] || null
+    .filter(item => rowScopes(item).includes(scope) && !isServiceTokenRow(item))
+    .sort(tokenSort)[0] || null
+}
+
+function selectTokenRowForStage(tokens, stage) {
+  return [...tokens].filter(item => tokenEligibleForStage(item,stage)).sort(tokenSort)[0] || null
 }
 
 function chooseToken(tokens, scope) {
   const row = selectTokenRow(tokens, scope)
+  if (!row) return null
+  const token = decryptToken(row.token_encrypted)
+  return { row, token, info: inspectWbToken(token) }
+}
+
+function chooseTokenForStage(tokens, stage) {
+  const row = selectTokenRowForStage(tokens,stage)
   if (!row) return null
   const token = decryptToken(row.token_encrypted)
   return { row, token, info: inspectWbToken(token) }
@@ -864,19 +957,13 @@ async function recomputePrimaryToken(connectionId) {
   try {
     await client.query('BEGIN')
     const result = await client.query(`SELECT * FROM wb_tokens WHERE connection_id=$1 AND status='active' ORDER BY created_at`, [connectionId])
-    if (!result.rows.length) {
+    const generalTokens = result.rows.filter(row => !isServiceTokenRow(row))
+    if (!generalTokens.length) {
+      await client.query('UPDATE wb_tokens SET is_primary=FALSE,updated_at=NOW() WHERE connection_id=$1 AND is_primary=TRUE', [connectionId])
       await client.query('COMMIT')
       return null
     }
-    const selected = [...result.rows].sort((a, b) => {
-      const coreDiff = tokenCoreCoverage(b) - tokenCoreCoverage(a)
-      if (coreDiff) return coreDiff
-      const scopeDiff = rowScopes(b).length - rowScopes(a).length
-      if (scopeDiff) return scopeDiff
-      const primaryDiff = Number(Boolean(b.is_primary)) - Number(Boolean(a.is_primary))
-      if (primaryDiff) return primaryDiff
-      return new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()
-    })[0]
+    const selected = [...generalTokens].sort(tokenSort)[0]
     await client.query('UPDATE wb_tokens SET is_primary=FALSE,updated_at=NOW() WHERE connection_id=$1 AND is_primary=TRUE', [connectionId])
     await client.query('UPDATE wb_tokens SET is_primary=TRUE,updated_at=NOW() WHERE id=$1 AND connection_id=$2', [selected.id, connectionId])
     await client.query('UPDATE marketplace_connections SET token_encrypted=$1,updated_at=NOW() WHERE id=$2', [selected.token_encrypted, connectionId])
@@ -940,14 +1027,16 @@ function publicConnection(row, tokens = [], syncStates = []) {
   const scopes = tokens.length ? unionTokenScopes(tokens) : rowScopes(row)
   const primaryRow = tokens.find(item => item.is_primary) || [...tokens].sort((a,b) => tokenCoreCoverage(b) - tokenCoreCoverage(a))[0] || null
   const primaryToken = primaryRow ? publicWbToken(primaryRow) : null
-  const allCoreCovered = CORE_SYNC_SCOPES.every(scope => scopes.includes(scope))
+  const allCoreCovered = GENERAL_SYNC_STAGE_NAMES.every(stage => Boolean(selectTokenRowForStage(tokens,stage)))
   const universal = Boolean(primaryRow && coversAllCoreFlows(primaryRow))
-  const coverageByStage = Object.fromEntries(Object.entries(WB_SYNC_STAGES).map(([stage, definition]) => {
-    const selected = selectTokenRow(tokens, definition.scope)
-    return [stage, selected ? { tokenId:selected.id, label:selected.label, isPrimary:Boolean(selected.is_primary) } : null]
+  const coverageByStage = Object.fromEntries(Object.entries(WB_SYNC_STAGES).map(([stage]) => {
+    const selected = selectTokenRowForStage(tokens,stage)
+    return [stage, selected ? { tokenId:selected.id, label:selected.label, isPrimary:Boolean(selected.is_primary), isServiceToken:isServiceTokenRow(selected) } : null]
   }))
+  const serviceTokenRow = tokens.find(isServiceTokenRow) || null
+  const serviceSecret = publicServiceSecretStatus()
   return {
-    connected: Boolean(row && tokens.length),
+    connected: Boolean(row && tokens.some(token => !isServiceTokenRow(token))),
     hasConnection: Boolean(row),
     connectionId: row?.id || null,
     sellerId: row?.seller_id || null,
@@ -958,6 +1047,10 @@ function publicConnection(row, tokens = [], syncStates = []) {
     primaryTokenId: primaryToken?.id || null,
     tokenMode: universal ? 'universal' : allCoreCovered ? 'combined' : tokens.length ? 'partial' : 'none',
     coverageByStage,
+    serviceToken: serviceTokenRow ? publicWbToken(serviceTokenRow) : null,
+    serviceTokenConnected:Boolean(serviceTokenRow),
+    serviceSecret,
+    serviceFinanceReady:Boolean(serviceTokenRow && serviceSecret.valid && SERVICE_TOKEN_STAGES.every(stage => tokenEligibleForStage(serviceTokenRow,stage))),
     stageTotal:Object.keys(WB_SYNC_STAGES).length,
     syncStates: syncStates.map(publicSyncState),
     status: row?.status || 'disconnected',
@@ -4198,10 +4291,30 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       return { stage,status:'queued',value:fallback,warning:`${definition.label}: поставлено в очередь, чтобы не перегружать память сервера.`,state }
     }
   }
-  const selected = chooseToken(tokens, definition.scope)
-  if (!selected) {
-    state = await updateSyncState(connection.id, stage, { status:'missing_token', lastAttemptAt:new Date().toISOString(), lastError:`Нужен токен с категорией «${WB_SCOPE_BITS[definition.scope].label}»`, nextAllowedAt:null })
-    return { stage, status:'missing_token', value:fallback, warning:`${definition.label}: добавьте токен с категорией «${WB_SCOPE_BITS[definition.scope].label}».`, state }
+  const selectedRow = selectTokenRowForStage(tokens,stage)
+  if (!selectedRow) {
+    const serviceOnly = SERVICE_TOKEN_STAGES.has(stage)
+    const status = serviceOnly ? 'service_token_required' : 'missing_token'
+    const message = serviceOnly
+      ? 'Для этого метода нужен отдельный Сервисный токен WB с категорией «Финансы».'
+      : `Нужен токен с категорией «${WB_SCOPE_BITS[definition.scope].label}»`
+    state = await updateSyncState(connection.id, stage, { status, lastAttemptAt:new Date().toISOString(), lastError:message, nextAllowedAt:null })
+    return { stage, status, value:fallback, warning:`${definition.label}: ${message}`, state }
+  }
+  if (SERVICE_TOKEN_STAGES.has(stage)) {
+    const secret = publicServiceSecretStatus()
+    if (!secret.valid) {
+      state = await updateSyncState(connection.id,stage,{ status:'service_secret_required',lastAttemptAt:new Date().toISOString(),lastError:secret.error || 'WB_CLIENT_SECRET не настроен.',nextAllowedAt:null,metadata:{ ...(state?.metadata || {}),tokenId:selectedRow.id,tokenLabel:selectedRow.label } })
+      return { stage,status:'service_secret_required',value:fallback,warning:`${definition.label}: ${secret.error || 'WB_CLIENT_SECRET не настроен в backend.'}`,state }
+    }
+  }
+  let selected
+  try {
+    selected = chooseTokenForStage(tokens,stage)
+  } catch (error) {
+    const status = SERVICE_TOKEN_STAGES.has(stage) ? 'service_token_invalid' : 'token_invalid'
+    state = await updateSyncState(connection.id,stage,{ status,lastAttemptAt:new Date().toISOString(),lastError:error.message,nextAllowedAt:null,metadata:{ ...(state?.metadata || {}),tokenId:selectedRow.id,tokenLabel:selectedRow.label } })
+    return { stage,status,value:fallback,warning:`${definition.label}: ${error.message}`,state }
   }
 
   state = await updateSyncState(connection.id, stage, { status:'running', lastAttemptAt:new Date().toISOString(), lastError:null, nextAllowedAt:null })
@@ -4381,6 +4494,9 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       tokenId:selected.row.id,
       tokenLabel:selected.row.label,
       primary:Boolean(selected.row.is_primary),
+      automaticRetryAttempt:0,
+      automaticRetryReason:null,
+      lastTransientError:null,
       ...(meta || {}),
       ...(snapshot?.validation ? { validation:snapshot.validation } : {}),
     }
@@ -4401,14 +4517,36 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
     if (stage === 'searchQueries' && [402,403].includes(Number(error?.status))) {
       error.message = 'Поисковые запросы WB доступны только при активной подписке «Джем» и токене категории «Аналитика».'
     }
-    const nextAllowedAt = error?.nextAllowedAt || (error?.retryAfterSeconds ? new Date(Date.now()+Number(error.retryAfterSeconds)*1000).toISOString() : null)
-    const status = Number(error?.status) === 429 ? 'rate_limited' : stage === 'searchQueries' && [402,403].includes(Number(error?.status)) ? 'subscription_required' : Number(error?.status) === 403 ? 'forbidden' : 'error'
+    const retryable = isRetryableWbError(error)
+    const retryPlan = retryable ? transientRetryPlan(state,stage,error) : null
+    const nextAllowedAt = error?.nextAllowedAt
+      || (error?.retryAfterSeconds ? new Date(Date.now()+Number(error.retryAfterSeconds)*1000).toISOString() : null)
+      || retryPlan?.nextAllowedAt
+      || null
+    const status = Number(error?.status) === 429
+      ? 'rate_limited'
+      : retryable
+        ? 'retry_scheduled'
+        : stage === 'searchQueries' && [402,403].includes(Number(error?.status))
+          ? 'subscription_required'
+          : Number(error?.status) === 403
+            ? (SERVICE_TOKEN_STAGES.has(stage) ? 'service_permission_required' : 'forbidden')
+            : 'error'
+    const retryMessage = retryable
+      ? `${Number(error?.status) === 504 ? 'Wildberries не ответил вовремя' : 'Временная ошибка Wildberries'}. Прогресс сохранён; автоматический повтор после ${new Date(nextAllowedAt).toLocaleString('ru-RU')}.`
+      : error.message
     state = await updateSyncState(connection.id, stage, {
-      status, lastAttemptAt:new Date().toISOString(), nextAllowedAt, lastError:error.message,
+      status, lastAttemptAt:new Date().toISOString(), nextAllowedAt, lastError:retryMessage,
       taskId:error?.resetTask ? null : state?.task_id,
-      metadata:{ ...(state?.metadata || {}), requestId:error?.requestId || null, code:error?.code || null, details:error?.details || null },
+      metadata:{
+        ...(state?.metadata || {}),
+        requestId:error?.requestId || null,
+        code:error?.code || null,
+        details:error?.details || null,
+        ...(retryPlan ? { automaticRetryAttempt:retryPlan.attempt,automaticRetryReason:retryPlan.reason,lastTransientError:error.message } : {}),
+      },
     })
-    return { stage, status, value:fallback, warning:`${definition.label}: ${error.message}${stageCount(stage, fallback) ? ' Сохранены предыдущие данные.' : ''}`, state }
+    return { stage, status, value:fallback, warning:`${definition.label}: ${retryMessage}${stageCount(stage, fallback) ? ' Сохранены предыдущие данные.' : ''}`, state }
   }
 }
 
@@ -4470,7 +4608,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.15.0',
+    version: '2.16.0',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -4541,10 +4679,14 @@ app.post('/api/wb/connect', authRequired, async (req, res) => {
   try {
     const token = String(req.body?.token || '').trim()
     const requestedLabel = String(req.body?.label || '').trim().slice(0, 80)
+    const purpose = String(req.body?.purpose || 'general') === 'service' ? 'service' : 'general'
     if (token.length < 40) return res.status(400).json({ error: 'API-ключ выглядит слишком коротким' })
-    const info = await probeToken(token)
-    const label = requestedLabel || (CORE_SYNC_SCOPES.every(scope => info.scopes.includes(scope)) ? 'Основной токен WB' : 'Дополнительный токен WB')
+    const info = await probeToken(token,{ purpose })
+    const label = requestedLabel || (purpose === 'service' ? 'Сервисный токен WB' : (CORE_SYNC_SCOPES.every(scope => info.scopes.includes(scope)) ? 'Основной токен WB' : 'Дополнительный токен WB'))
     let connection = await getConnection(req.auth.sub)
+    if (purpose === 'service' && !connection) {
+      return res.status(409).json({ error:'Сначала подключите основной Базовый токен кабинета, затем добавьте сервисный токен для финансовых сводок.' })
+    }
     if (connection?.seller_id && info.sellerId && connection.seller_id !== info.sellerId) {
       return res.status(409).json({ error: 'Этот токен относится к другому кабинету продавца. Для другого кабинета потребуется отдельный магазин ELISEI.' })
     }
@@ -4566,7 +4708,7 @@ app.post('/api/wb/connect', authRequired, async (req, res) => {
         token_type=EXCLUDED.token_type,token_type_label=EXCLUDED.token_type_label,scopes=EXCLUDED.scopes,
         read_only=EXCLUDED.read_only,expires_at=EXCLUDED.expires_at,status='active',last_checked_at=NOW(),updated_at=NOW()
     `, [crypto.randomUUID(), connection.id, req.auth.sub, label, encrypted, fingerprint, info.sellerId || null, info.typeId, info.tokenType, JSON.stringify(info.scopes), info.readOnly, info.expiresAt])
-    await recomputePrimaryToken(connection.id)
+    if (purpose === 'general') await recomputePrimaryToken(connection.id)
     const tokens = await getWbTokens(req.auth.sub, connection.id)
     const scopes = unionTokenScopes(tokens)
     const updated = await pool.query(`UPDATE marketplace_connections SET seller_id=COALESCE(seller_id,$1),scopes=$2::jsonb,status='connected',updated_at=NOW() WHERE id=$3 AND user_id=$4 RETURNING *`, [info.sellerId || null, JSON.stringify(scopes), connection.id, req.auth.sub])
@@ -4585,7 +4727,8 @@ app.delete('/api/wb/tokens/:tokenId', authRequired, async (req, res) => {
   if (remaining.rows.length) await recomputePrimaryToken(connection.id)
   const tokens = await getWbTokens(req.auth.sub, connection.id)
   const scopes = unionTokenScopes(tokens)
-  const updated = await pool.query(`UPDATE marketplace_connections SET scopes=$1::jsonb,status=$2,updated_at=NOW() WHERE id=$3 AND user_id=$4 RETURNING *`, [JSON.stringify(scopes), tokens.length ? 'connected' : 'needs_token', connection.id, req.auth.sub])
+  const hasGeneralToken = tokens.some(token => !isServiceTokenRow(token))
+  const updated = await pool.query(`UPDATE marketplace_connections SET scopes=$1::jsonb,status=$2,updated_at=NOW() WHERE id=$3 AND user_id=$4 RETURNING *`, [JSON.stringify(scopes), hasGeneralToken ? 'connected' : 'needs_token', connection.id, req.auth.sub])
   const states = await getSyncStates(connection.id)
   res.json(publicConnection(updated.rows[0], tokens, states))
 })
@@ -4596,6 +4739,7 @@ app.post('/api/wb/tokens/:tokenId/primary', authRequired, async (req, res) => {
     if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
     const tokenResult = await pool.query(`SELECT * FROM wb_tokens WHERE id=$1 AND user_id=$2 AND connection_id=$3 AND status='active'`, [req.params.tokenId, req.auth.sub, connection.id])
     if (!tokenResult.rows[0]) return res.status(404).json({ error: 'API-токен не найден' })
+    if (isServiceTokenRow(tokenResult.rows[0])) return res.status(409).json({ error:'Сервисный токен закреплён только за финансовыми сводками и не может быть основным токеном кабинета.' })
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
@@ -4753,11 +4897,13 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, String(req.body?.connectionId || '') || null)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено. Подключите Wildberries.' })
   await recoverStaleSyncStates({ connectionId:connection.id, reason:'manual-sync' })
-  const requestedStages = Array.isArray(req.body?.stages) ? req.body.stages.filter(stage => WB_SYNC_STAGES[stage]) : Object.keys(WB_SYNC_STAGES)
-  if (!requestedStages.length) return res.status(400).json({ error: 'Не выбраны этапы синхронизации' })
+  const allRequestedStages = Array.isArray(req.body?.stages) ? req.body.stages.filter(stage => WB_SYNC_STAGES[stage]) : Object.keys(WB_SYNC_STAGES)
+  if (!allRequestedStages.length) return res.status(400).json({ error: 'Не выбраны этапы синхронизации' })
+  const backgroundArchiveStages = allRequestedStages.length > 1 ? allRequestedStages.filter(stage => ARCHIVE_SYNC_STAGES.includes(stage)) : []
+  const requestedStages = allRequestedStages.filter(stage => !backgroundArchiveStages.includes(stage))
   const requestedRange = analyticsPeriodRange(req.body?.period || {})
   if (requestedRange) {
-    for (const stage of requestedStages.filter(item => ['advertising','searchQueries','stockHistory'].includes(item))) {
+    for (const stage of allRequestedStages.filter(item => ['advertising','searchQueries','stockHistory'].includes(item))) {
       const period = syncPeriodForStage(stage,requestedRange)
       await updateSyncState(connection.id,stage,{
         status:'queued',lastAttemptAt:null,nextAllowedAt:null,lastError:null,lastCount:0,taskId:null,
@@ -4780,6 +4926,19 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
     const stageStatus = { ...(data.stageStatus || {}) }
     const warnings = []
     const results = []
+
+    for (const stage of backgroundArchiveStages) {
+      const queuedState = await updateSyncState(connection.id,stage,{
+        status:'queued',nextAllowedAt:new Date().toISOString(),lastError:'Архив FBS вынесен в отдельную фоновую полосу и не блокирует оперативные потоки.',
+      })
+      const value = previousStageValue(data,stage)
+      results.push({ stage,status:'queued',value,state:queuedState })
+      stageStatus[stage] = {
+        status:'queued',available:stageCount(stage,value)>0,count:stageCount(stage,value),
+        lastSuccessAt:queuedState.last_success_at||null,nextAllowedAt:queuedState.next_allowed_at||null,error:queuedState.last_error||null,
+      }
+      warnings.push('Архив FBS: продолжение поставлено в отдельную фоновую полосу и не задерживает финансы, документы и другие потоки.')
+    }
 
     for (const stage of requestedStages) {
       if (Date.now() >= deadlineAt - 1500) {
@@ -5779,7 +5938,7 @@ async function processPendingStockReports() {
       SELECT s.*, c.user_id, c.data, c.sync_history
       FROM wb_sync_states s
       JOIN marketplace_connections c ON c.id=s.connection_id
-      WHERE s.stage='stocks' AND s.status IN ('pending','rate_limited','queued')
+      WHERE s.stage='stocks' AND s.status IN ('pending','rate_limited','queued','retry_scheduled')
         AND (s.next_allowed_at IS NULL OR s.next_allowed_at <= NOW())
       ORDER BY s.updated_at
       LIMIT 10
@@ -5825,8 +5984,15 @@ async function processPendingStockReports() {
         metadata:{ taskStatus:'done', ...stockMeta, persistedRows:persisted.persistedRows, persistedQuantity:persisted.persistedQuantity },
       })
     } catch (error) {
-      const nextAllowedAt = error?.nextAllowedAt || new Date(Date.now() + 60000).toISOString()
-      await updateSyncState(row.connection_id, 'stocks', { status:Number(error?.status)===429?'rate_limited':'pending', nextAllowedAt, lastError:error.message, taskId:error?.resetTask?null:row.task_id })
+      const retryable = isRetryableWbError(error)
+      const plan = retryable ? transientRetryPlan(row,'stocks',error) : null
+      const nextAllowedAt = error?.nextAllowedAt || plan?.nextAllowedAt || new Date(Date.now() + 60000).toISOString()
+      const status = Number(error?.status)===429 ? 'rate_limited' : retryable ? 'retry_scheduled' : 'pending'
+      await updateSyncState(row.connection_id, 'stocks', {
+        status,nextAllowedAt,lastError:retryable ? `Временная ошибка WB. Прогресс отчёта сохранён; автоповтор после ${new Date(nextAllowedAt).toLocaleString('ru-RU')}.` : error.message,
+        taskId:error?.resetTask?null:row.task_id,
+        metadata:{ ...(row.metadata || {}),...(plan ? {automaticRetryAttempt:plan.attempt,automaticRetryReason:plan.reason,lastTransientError:error.message} : {}) },
+      })
     } finally {
       backgroundStockLocks.delete(row.connection_id)
     }
@@ -5845,7 +6011,7 @@ async function processPendingGeneratedReports() {
       FROM wb_sync_states s
       JOIN marketplace_connections c ON c.id=s.connection_id
       WHERE s.stage IN ('paidStorage','acceptance')
-        AND s.status IN ('pending','queued','rate_limited')
+        AND s.status IN ('pending','queued','rate_limited','retry_scheduled')
         AND (s.next_allowed_at IS NULL OR s.next_allowed_at <= NOW())
       ORDER BY (s.task_id IS NOT NULL) DESC, s.next_allowed_at NULLS FIRST, s.updated_at
       LIMIT 6
@@ -5899,7 +6065,7 @@ async function processDueDeferredStages() {
       SELECT s.*, c.user_id, c.data, c.sync_history, c.id AS connection_id
       FROM wb_sync_states s
       JOIN marketplace_connections c ON c.id=s.connection_id
-      WHERE s.stage NOT IN ('stocks','paidStorage','acceptance') AND s.status IN ('rate_limited','queued')
+      WHERE s.stage NOT IN ('stocks','paidStorage','acceptance','fbsArchive') AND s.status IN ('rate_limited','queued','retry_scheduled')
         AND s.next_allowed_at IS NOT NULL AND s.next_allowed_at <= NOW()
       ORDER BY s.next_allowed_at
       LIMIT 10
@@ -5956,6 +6122,49 @@ async function processDueDeferredStages() {
       console.warn(`Deferred WB stage ${row.stage} failed:`, error.message)
     } finally {
       deferredStageLocks.delete(row.connection_id)
+    }
+  }
+}
+
+const archiveStageLocks = new Set()
+async function processDueArchiveStages() {
+  if (!pool) return
+  let due = []
+  try {
+    const result = await pool.query(`
+      SELECT s.*,c.user_id,c.id AS connection_id
+      FROM wb_sync_states s
+      JOIN marketplace_connections c ON c.id=s.connection_id
+      WHERE s.stage='fbsArchive'
+        AND s.status IN ('rate_limited','queued','retry_scheduled')
+        AND s.next_allowed_at IS NOT NULL AND s.next_allowed_at <= NOW()
+      ORDER BY s.next_allowed_at
+      LIMIT 4
+    `)
+    due = result.rows
+  } catch (error) {
+    console.warn('FBS archive lane scan failed:',error.message)
+    return
+  }
+
+  for (const row of due) {
+    const syncKey = `${row.user_id}:${row.connection_id}`
+    if (archiveStageLocks.has(row.connection_id) || activeSyncs.has(syncKey)) continue
+    archiveStageLocks.add(row.connection_id)
+    try {
+      const connectionResult = await pool.query('SELECT * FROM marketplace_connections WHERE id=$1 AND user_id=$2',[row.connection_id,row.user_id])
+      const connection = connectionResult.rows[0]
+      if (!connection) continue
+      const tokens = await getWbTokens(row.user_id,row.connection_id)
+      const canonical = await canonicalConnectionData(connection,{ repair:true,persistManifest:false,queueMissing:false })
+      await runSyncStage({ connection,tokens,data:canonical.data,stage:'fbsArchive',deadlineAt:Date.now()+85000 })
+      // Архив хранится в wb_stream_items/wb_stream_data и обновляет свой sync-state.
+      // Полный JSON подключения здесь не переписывается, поэтому архивная полоса
+      // может работать параллельно и не затирает результаты финансов/документов.
+    } catch (error) {
+      console.warn(`FBS archive lane failed for ${row.connection_id}:`,error.message)
+    } finally {
+      archiveStageLocks.delete(row.connection_id)
     }
   }
 }

@@ -1,0 +1,14 @@
+bebc4f373584b35c1816d8c286b95634dbcc22edbd4b772b61725fdc97adfb1c  ./FILES.txt
+08269174ab7470f006aec741b2ebaf268ba880f6d5bd80814b2c0abd6314ba21  ./PATCH_FILES.txt
+3b2a1da82d59ae5aa1a7d70f61e4bdb23fcee60bf4f8ba9efd7c75a15037a9d8  ./PATCH_MANIFEST.txt
+fe23b56ea2b0ba3462a5370632d9deffa0db1b167ac6ee5302810e2889fa2b30  ./README.md
+e9962f57cc5fd86d9527c5156a21a02f305faeed601d73b52453f28e909d57bc  ./README_5_6_4.md
+271e9c206662e8c2023969f028ad23d7aaf70642f5444cebd93eeb3340dd2389  ./RELEASE_NOTES_V5_6_4.txt
+ca2e9fdc4678ed671f09a6d7ce9fda3ae5a2c1f3a7a80759507d1dfe56c32ed2  ./backend/package.json
+8d687f38670c33c7a5aacbc45fb89d9e2c7c6de356b365cff7104420971e37eb  ./backend/src/server.js
+3fb3fb42abb056be1168e886f06fe383946f72b7704673bb2a5a6446b7bf92ce  ./backend/tests/wb-global-period.test.mjs
+63fd7563fa69ba312d1070b223318a5006e251e156a0dc98d627395dc28e88ca  ./backend/tests/wb-service-token-retry.test.mjs
+1c5e8da069bca385f751ac5e4792f4a132428b1dc069a76acab6bf62c2a43bc8  ./package.json
+06afca2ac1b75dfe401de60ed04ba46324cb79679c343a4af721f36ac8f12a90  ./src/lib/api.js
+b30344719a03c9326fb800940cc10e35656016cfa88133a44d0f9df9a7feeb56  ./src/pages/DashboardPage.jsx
+ab9f85ba3d996619b8f8d00c79f6261b510afc4b7b96d744a84e1a016a73a129  ./src/styles/app.css
