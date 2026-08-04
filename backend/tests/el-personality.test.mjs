@@ -45,6 +45,33 @@ assert.equal(support.reaction.mood, 'supportive')
 assert.match(support.text, /Мария/i)
 assert.match(support.text, /без героизма/i)
 
+
+const playfulGreeting = socialResponse({
+  message:'приветики', profile:{character:'insider',humor:'light',support:true,address:'informal'},
+  history:[], context:{screen:{localHour:11}}, identity:{userName:'Мария'},
+})
+assert.equal(playfulGreeting.kind, 'social')
+assert.equal(playfulGreeting.reaction.mood, 'happy')
+assert.match(playfulGreeting.text, /Приветики, Мария/i)
+assert.doesNotMatch(playfulGreeting.text, /подтверждённых данных/i)
+
+const presence = socialResponse({
+  message:'ты тут?', profile:{character:'friendly',humor:'off',support:true,address:'informal'},
+  history:[], context:{}, identity:{userName:'Мария'},
+})
+assert.equal(presence.kind, 'social')
+assert.match(presence.text, /здесь|на связи/i)
+
+const noDataInsider = await runElAnalyst({
+  message:'Проверь прибыль', history:[],context:{},identity:{userId:'u',cabinetId:'c',userName:'Мария'},
+  personality:{character:'insider',humor:'light',support:true,address:'informal'},
+  classification:{reason:'cabinet-question',modules:['finance']},
+  dataBridge:{ async getMany(){ return { finance:{ok:false,warning:'Финансы ожидают синхронизацию'} } } },
+})
+assert.match(noDataInsider.text, /Мария/i)
+assert.match(noDataInsider.text, /не буду изображать ясновидящего/i)
+assert.doesNotMatch(noDataInsider.text, /^Я понял вопрос, но подтверждённых данных/i)
+
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'elisei-el-profile-'))
 const previousDataDir = process.env.ELISEI_DATA_DIR
 process.env.ELISEI_DATA_DIR = tmp

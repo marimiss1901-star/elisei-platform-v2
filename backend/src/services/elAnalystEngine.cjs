@@ -3,7 +3,7 @@
 const crypto = require('node:crypto');
 const { detectModules, MODULES } = require('./elModuleRegistry.cjs');
 const { BUSINESS_RE } = require('./elModeRouter.cjs');
-const { normalizeElProfile, createVoiceContext, humorLine, socialResponse, reactionFor } = require('./elPersonality.cjs');
+const { normalizeElProfile, createVoiceContext, humorLine, socialResponse, noDataResponse, reactionFor } = require('./elPersonality.cjs');
 
 const money = (value) => value == null || !Number.isFinite(Number(value)) ? 'нет данных' : `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(Number(value))} ₽`;
 const number = (value) => value == null || !Number.isFinite(Number(value)) ? 'нет данных' : new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 }).format(Number(value));
@@ -318,7 +318,7 @@ async function runElAnalyst(options = {}) {
   }
 
   if (!sections.length) {
-    sections.push('Я понял вопрос, но подтверждённых данных выбранного кабинета пока недостаточно. Проверь подключение WB и журнал синхронизаций — гадать вместо цифр не буду.');
+    sections.push(noDataResponse(voice, options.identity));
   }
   if (voice.support && ['tired','frustrated','worried'].includes(voice.emotion)) {
     sections.unshift(voice.address === 'formal'

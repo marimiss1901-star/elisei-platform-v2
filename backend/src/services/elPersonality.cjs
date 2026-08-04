@@ -25,7 +25,8 @@ const EMOTION_RULES = [
   ['thanks', /(?:спасибо|благодарю|ты\s+молодец)/i],
   ['joke', /(?:пошути|расскажи\s+шутк|развесели|что-нибудь\s+смешн)/i],
   ['praise', /(?:похвали|что\s+у\s+меня\s+хорошо|я\s+молодец|поддержи\s+меня)/i],
-  ['greeting', /^(?:эл[,!]?\s*)?(?:привет|доброе\s+утро|добрый\s+день|добрый\s+вечер|здравствуй|как\s+дела)[!?.\s]*$/i],
+  ['greeting', /^(?:эл[,!?:\s-]*)?(?:привет(?:ик(?:и)?|ики|ствую)?|прив|здравствуй(?:те)?|здрасьте|салют|хай|hello|доброе\s+утро|добрый\s+(?:день|вечер)|как\s+(?:дела|ты)|есть\s+кто)[!?.…,:;\s-]*$/i],
+  ['presence', /^(?:эл[,!?:\s-]*)?(?:ты\s+(?:тут|здесь)|что\s+делаешь|чем\s+занят|как\s+настроение|ты\s+живой|отзовись)[!?.…,:;\s-]*$/i],
 ];
 
 const HUMOR = {
@@ -205,6 +206,7 @@ function createVoiceContext({ profile, message, history, context, seed } = {}) {
     history: Array.isArray(history) ? history : [],
     context: context || {},
     seed: seed || `${message || ''}:${Date.now()}`,
+    message: String(message || ''),
     humorAllowed,
   };
 }
@@ -222,10 +224,34 @@ function greetingFor(voice, identity = {}) {
   const daypart = hour < 12 ? 'Доброе утро' : hour < 18 ? 'Добрый день' : 'Добрый вечер';
   const name = String(identity.userName || '').trim().split(/\s+/)[0];
   const address = name ? `, ${name}` : '';
-  if (voice.character === 'professional') return `${daypart}${address}. Готов проверить данные кабинета и помочь с решением.`;
-  if (voice.character === 'friendly') return `${daypart}${address}. Я рядом — давай спокойно разберём, что сейчас важнее всего.`;
+  const playfulGreeting = /приветик|приветики|хай|салют|прив/i.test(String(voice?.message || ''));
+  if (voice.character === 'professional') return `${daypart}${address}. Я на связи и готов проверить данные кабинета.`;
+  if (voice.character === 'friendly') return `${playfulGreeting ? 'Привет' : daypart}${address}! Я рядом. Что сегодня разберём первым?`;
   const joke = humorLine(voice, 'neutral');
-  return `${daypart}${address}. Я на месте и готов разбирать кабинет${joke ? ` — ${joke.charAt(0).toLowerCase()}${joke.slice(1)}` : '.'}`;
+  const hello = playfulGreeting ? 'Приветики' : daypart;
+  return `${hello}${address} 😄 Я тут и уже мысленно открыл таблицы.${joke ? ` ${joke}` : ' Что разбираем?'}`;
+}
+
+function presenceResponse(voice, identity = {}) {
+  const name = String(identity.userName || '').trim().split(/\s+/)[0];
+  const address = name ? `, ${name}` : '';
+  if (voice.character === 'professional') return `Да${address}, я на связи. Готов перейти к вопросу по кабинету.`;
+  if (voice.character === 'friendly') return `Я здесь${address}. Не пропал — просто ждал, с чего начнём.`;
+  const joke = humorLine(voice, 'neutral');
+  return `Тут${address} 😄 Не сплю, не завис — караулю цифры.${joke ? ` ${joke}` : ''}`;
+}
+
+function noDataResponse(voice, identity = {}) {
+  const name = String(identity?.userName || '').trim().split(/\s+/)[0];
+  const prefix = name ? `${name}, ` : '';
+  if (voice.character === 'professional') {
+    return `${prefix}я понял вопрос, но подтверждённых данных выбранного кабинета пока недостаточно. Проверьте подключение WB и журнал синхронизаций — вывод без фактов делать не буду.`;
+  }
+  if (voice.character === 'friendly') {
+    return `${prefix}я понял, что нужно проверить, но WB пока не дал достаточно подтверждённых данных. Давай заглянем в подключение и синхронизации — после загрузки разберу всё нормально, без догадок.`;
+  }
+  const joke = humorLine(voice, 'sync');
+  return `${prefix}вопрос понял, но цифр пока маловато. Не буду изображать ясновидящего: сначала проверим подключение WB и синхронизации.${joke ? ` ${joke}` : ''}`;
 }
 
 function supportResponse(voice, identity = {}) {
@@ -272,6 +298,7 @@ function jokeResponse(voice) {
 function socialResponse({ message, profile, history, context, identity } = {}) {
   const voice = createVoiceContext({ profile, message, history, context, seed: message });
   if (voice.emotion === 'greeting') return { text: greetingFor(voice, identity), reaction: reactionFor({ voice, kind: 'greeting' }), kind: 'social' };
+  if (voice.emotion === 'presence') return { text: presenceResponse(voice, identity), reaction: reactionFor({ voice, kind: 'greeting' }), kind: 'social' };
   if (['tired', 'frustrated', 'worried'].includes(voice.emotion)) return { text: supportResponse(voice, identity), reaction: reactionFor({ voice, kind: 'support' }), kind: 'support' };
   if (voice.emotion === 'praise') return { text: praiseResponse(voice, identity), reaction: reactionFor({ voice, kind: 'praise' }), kind: 'support' };
   if (voice.emotion === 'joke') return { text: jokeResponse(voice), reaction: reactionFor({ voice, kind: 'joke' }), kind: 'social' };
@@ -300,6 +327,7 @@ module.exports = {
   createVoiceContext,
   humorLine,
   socialResponse,
+  noDataResponse,
   reactionFor,
   isCriticalSituation,
   detectEmotion,

@@ -1,23 +1,15 @@
-Файлы проекта, которые обновляет патч ELISEI 5.7.0 поверх 5.6.4:
+Файлы проекта, которые обновляет патч ELISEI 5.7.1 поверх 5.7.0:
 
 FILES.txt
 PATCH_FILES.txt
 PATCH_MANIFEST.txt
 README.md
-README_5_7_0.md
-RELEASE_NOTES_V5_7_0.txt
-SHA256SUMS_5_7_0.txt
+README_5_7_1.md
+RELEASE_NOTES_V5_7_1.txt
+SHA256SUMS_5_7_1.txt
 backend/package.json
 backend/src/routes/elCore.cjs
-backend/src/server.js
-backend/src/services/elAgent.cjs
 backend/src/services/elAnalystEngine.cjs
-backend/src/services/elContext.cjs
-backend/src/services/elMemoryStore.cjs
 backend/src/services/elPersonality.cjs
-backend/src/services/elPrompt.cjs
 backend/tests/el-personality.test.mjs
 package.json
-src/lib/api.js
-src/pages/DashboardPage.jsx
-src/styles/app.css
