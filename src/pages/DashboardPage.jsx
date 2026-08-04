@@ -995,6 +995,9 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
     try {
       const period = readElPeriod()
+      const clientNow = new Date()
+      const clientLocalDate = `${clientNow.getFullYear()}-${String(clientNow.getMonth()+1).padStart(2,'0')}-${String(clientNow.getDate()).padStart(2,'0')}`
+      const clientTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || ''
       const result = await elApi.chat({
         message:question,
         conversationId:elConversationId,
@@ -1011,6 +1014,11 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
           preferredName:elSettings.preferredName, noHumorInCritical:true,
         },
         userName:preferredElName,
+        clientContext:{
+          localDate:clientLocalDate,
+          timeZone:clientTimeZone,
+          utcOffsetMinutes:-clientNow.getTimezoneOffset(),
+        },
         cabinetId:connection.connectionId || 'main',
         cabinetName:user?.company || 'Основной кабинет WB',
         period,
@@ -1027,7 +1035,9 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         } : null,
         screenContext:{
           section:lastBusinessSectionRef.current,
-          localHour:new Date().getHours(),
+          localHour:clientNow.getHours(),
+          localDate:clientLocalDate,
+          timeZone:clientTimeZone,
           period,
           summary,
           advertising:advertisingSnapshot?.totals || advertisingSnapshot || null,

@@ -10,6 +10,7 @@ const { createBusinessDataBridge } = require('../services/elBusinessDataBridge.c
 const { publicCapabilities } = require('../services/elModuleRegistry.cjs');
 const { resolveElPlan, normalizeMode, canUseMode, publicPlan, modeLabel } = require('../services/elPlans.cjs');
 const { DEFAULT_EL_PROFILE, normalizeElProfile } = require('../services/elPersonality.cjs');
+const { parseElTemporalRange } = require('../services/elTemporal.cjs');
 
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 
@@ -44,7 +45,7 @@ function createRouter(express) {
     const plan = await resolveElPlan(req, identity);
     res.json({
       ok: true,
-      version: '5.7.2',
+      version: '5.7.3',
       name: 'El Tiered Intelligence',
       configured: Boolean(process.env.OPENAI_API_KEY && (process.env.ELISEI_GPT_MODEL || process.env.ELISEI_PRO_MODEL || process.env.ELISEI_AI_MODEL)),
       models: {
@@ -95,7 +96,7 @@ function createRouter(express) {
   router.get('/capabilities', asyncRoute(async (req, res) => {
     const identity = identityFromRequest(req);
     const plan = await resolveElPlan(req, identity);
-    res.json({ ok: true, version: '5.7.2', modules: publicCapabilities(), plan, writeActions: false });
+    res.json({ ok: true, version: '5.7.3', modules: publicCapabilities(), plan, writeActions: false });
   }));
 
   router.post('/chat', asyncRoute(async (req, res) => {
@@ -124,8 +125,18 @@ function createRouter(express) {
     if (!canUseMode(plan, effectiveMode)) throw upgradeError(effectiveMode, plan);
 
     const memories = await memoryStore.listMemories(identity);
-    const context = await collectBusinessContext(req, body, identity);
-    const dataBridge = createBusinessDataBridge({ req, identity, period: body.period, question: message });
+    const temporalIntent = parseElTemporalRange(message, {
+      localDate: body?.clientContext?.localDate || body?.screenContext?.localDate,
+      timeZone: body?.clientContext?.timeZone || body?.screenContext?.timeZone,
+      utcOffsetMinutes: body?.clientContext?.utcOffsetMinutes,
+    });
+    const effectivePeriod = temporalIntent
+      ? { from:temporalIntent.from, to:temporalIntent.to, days:temporalIntent.days }
+      : (body.period || null);
+    const effectiveBody = { ...body, period:effectivePeriod };
+    const context = await collectBusinessContext(req, effectiveBody, identity);
+    context.temporalIntent = temporalIntent;
+    const dataBridge = createBusinessDataBridge({ req, identity, period: effectivePeriod, question: message });
     const prefetched = await dataBridge.prefetchForQuestion(message);
     context.moduleCoverage = { detected: prefetched.detectedModules, prefetched: prefetched.data };
 
@@ -177,6 +188,8 @@ function createRouter(express) {
         grounding: answer.grounding || { facts:answer.modulesUsed || [], assumptions:[] },
         personality,
         detectedModules: prefetched.detectedModules,
+        resolvedPeriod: effectivePeriod,
+        temporalIntent: temporalIntent ? { kind:temporalIntent.kind,matchedText:temporalIntent.matchedText } : null,
       });
     } catch (error) {
       const payload = errorPayload(error);

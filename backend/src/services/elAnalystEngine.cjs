@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { detectModules, MODULES } = require('./elModuleRegistry.cjs');
 const { BUSINESS_RE } = require('./elModeRouter.cjs');
 const { normalizeElProfile, createVoiceContext, humorLine, socialResponse, noDataResponse, reactionFor } = require('./elPersonality.cjs');
+const { formatRuPeriod, validDateKey } = require('./elTemporal.cjs');
 
 const money = (value) => value == null || !Number.isFinite(Number(value)) ? 'нет данных' : `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(Number(value))} ₽`;
 const number = (value) => value == null || !Number.isFinite(Number(value)) ? 'нет данных' : new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 }).format(Number(value));
@@ -16,11 +17,21 @@ function moduleData(result) {
 
 function periodLabel(data, context = {}) {
   const period = data?.period || context?.period;
-  const from = period?.from || period?.dateFrom || period?.date_from;
-  const to = period?.to || period?.dateTo || period?.date_to;
-  if (from && to) return `${from} — ${to}`;
-  if (period?.days) return `${period.days} дн.`;
-  return 'доступный период';
+  return formatRuPeriod(period || {});
+}
+
+function periodKeys(period = {}) {
+  return {
+    from:validDateKey(period?.from || period?.dateFrom || period?.date_from),
+    to:validDateKey(period?.to || period?.dateTo || period?.date_to),
+  };
+}
+
+function samePeriod(left = {}, right = {}) {
+  const a = periodKeys(left);
+  const b = periodKeys(right);
+  if (!a.from || !a.to || !b.from || !b.to) return false;
+  return a.from === b.from && a.to === b.to;
 }
 
 function titleOf(item = {}) {
@@ -54,6 +65,7 @@ function screenFallback(moduleName, context = {}) {
   if (!summary) return null;
   const has = (...keys) => keys.some((key) => summary[key] != null && Number.isFinite(Number(summary[key])));
   const period = screen.period || context.period || null;
+  if (context?.period && (!screen.period || !samePeriod(context.period, screen.period))) return null;
   if (moduleName === 'sales' && has('revenue','orders','sales','returns')) {
     return { available:true, summary, period, topByRevenue:[], topBySales:[], warning:'Использованы подтверждённые показатели текущего экрана ELISEI; товарная детализация через внутренний мост временно недоступна.' };
   }
@@ -86,15 +98,25 @@ function formatOverview(data, tone) {
   return lines.filter(Boolean).join('\n');
 }
 
-function formatSales(data, tone) {
+function formatSales(data, tone, options = {}) {
   const s = data?.summary || {};
   const top = data?.topByRevenue || data?.topBySales || [];
-  const lines = [
-    `Продажи за ${periodLabel(data)}: выручка ${money(s.revenue)}, ${number(s.sales)} продаж из ${number(s.orders)} заказов. Возвраты — ${number(s.returns)} (${percent(s.returnRate)}).`,
-  ];
-  if (top.length) lines.push(`Лидеры по выручке: ${top.slice(0, 5).map((item) => `${titleOf(item)} — ${money(item.revenue)}`).join('; ')}.`);
-  if (!top.length) lines.push('Товарная детализация продаж пока не загружена.');
-  lines.push(mildHumor(tone, 'default'));
+  const message = String(options.message || tone?.message || '');
+  const name = String(options?.identity?.userName || '').trim().split(/\s+/)[0];
+  const prefix = name ? `${name}, ` : '';
+  const asksRevenue = /выручк/i.test(message);
+  const asksProductDetail = /товар|артикул|лидер|топ|что\s+продал|по\s+каким/i.test(message);
+  const asksComparison = /сравн|динамик|рост|паден|измен/i.test(message);
+  const dateLabel = periodLabel(data, options.context);
+  const lines = [];
+  if (asksRevenue && !asksProductDetail && !asksComparison) {
+    lines.push(`${prefix}за ${dateLabel} выручка составила ${money(s.revenue)}. Заказов — ${number(s.orders)}, проданных единиц — ${number(s.sales)}. Возвраты — ${number(s.returns)} шт.`);
+  } else {
+    lines.push(`Продажи за ${dateLabel}: выручка — ${money(s.revenue)}; заказов — ${number(s.orders)}; проданных единиц — ${number(s.sales)}; возвратов — ${number(s.returns)} (${percent(s.returnRate)}).`);
+  }
+  if (top.length && asksProductDetail) lines.push(`Лидеры по выручке: ${top.slice(0, 5).map((item) => `${titleOf(item)} — ${money(item.revenue)}`).join('; ')}.`);
+  if (!top.length && asksProductDetail) lines.push('Товарная детализация продаж за этот период пока не загружена.');
+  if (!asksRevenue || asksProductDetail || asksComparison) lines.push(mildHumor(tone, 'default'));
   return lines.filter(Boolean).join('\n');
 }
 
@@ -339,7 +361,7 @@ async function runElAnalyst(options = {}) {
       }
     }
     const formatter = FORMATTERS[moduleName] || formatOverview;
-    sections.push(formatter(data, voice));
+    sections.push(formatter(data, voice, { message,context:options.context,identity:options.identity }));
     warnings.push(...coverageWarnings(data));
   }
 
