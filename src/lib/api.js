@@ -92,6 +92,13 @@ export const wbApi = {
     return request(`/api/wb/advertising/${encodeURIComponent(connectionId)}${suffix}`)
   },
   diagnostics: (connectionId) => request(`/api/wb/diagnostics/${encodeURIComponent(connectionId)}`),
+  dataQuality: (connectionId, params = {}) => {
+    const query = new URLSearchParams()
+    if (params?.from) query.set('from',String(params.from).slice(0,10))
+    if (params?.to) query.set('to',String(params.to).slice(0,10))
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return request(`/api/wb/data-quality/${encodeURIComponent(connectionId)}${suffix}`)
+  },
   financeLedger: (connectionId, params = {}) => {
     const query = new URLSearchParams()
     for (const [key,value] of Object.entries(params || {})) {

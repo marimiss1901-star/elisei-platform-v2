@@ -1,13 +1,13 @@
 {
   "name": "elisei-wb-backend",
-  "version": "2.19.0",
+  "version": "2.20.0",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test:stocks": "node tests/wb-integration-core.test.mjs",
-    "test": "node tests/wb-integration-core.test.mjs && node tests/wb-stream-store.test.mjs && node tests/wb-stream-recovery.test.mjs && node tests/wb-self-heal.test.mjs && node tests/wb-finance-fbs-fbo.test.mjs && node tests/wb-memory-safe-sync.test.mjs && node tests/wb-extended-coverage.test.mjs && node tests/wb-finance-complete.test.mjs && node tests/wb-analytics-period.test.mjs && node tests/wb-global-period.test.mjs && node tests/wb-api-policy.test.mjs && node tests/wb-fbs-archive.test.mjs && node tests/wb-service-token-retry.test.mjs && node tests/el-personality.test.mjs && node tests/el-stream-availability.test.mjs && node tests/el-temporal.test.mjs && node tests/el-conversation-followup.test.mjs && node tests/el-fbs-direct.test.mjs && node tests/wb-finance-core-580.test.mjs && node tests/wb-live-sync-590.test.mjs"
+    "test": "node tests/wb-integration-core.test.mjs && node tests/wb-stream-store.test.mjs && node tests/wb-stream-recovery.test.mjs && node tests/wb-self-heal.test.mjs && node tests/wb-finance-fbs-fbo.test.mjs && node tests/wb-memory-safe-sync.test.mjs && node tests/wb-extended-coverage.test.mjs && node tests/wb-finance-complete.test.mjs && node tests/wb-analytics-period.test.mjs && node tests/wb-global-period.test.mjs && node tests/wb-api-policy.test.mjs && node tests/wb-fbs-archive.test.mjs && node tests/wb-service-token-retry.test.mjs && node tests/el-personality.test.mjs && node tests/el-stream-availability.test.mjs && node tests/el-temporal.test.mjs && node tests/el-conversation-followup.test.mjs && node tests/el-fbs-direct.test.mjs && node tests/wb-finance-core-580.test.mjs && node tests/wb-live-sync-590.test.mjs && node tests/wb-data-quality-591.test.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",

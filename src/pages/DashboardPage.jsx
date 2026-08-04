@@ -373,6 +373,9 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [advertisingSnapshot, setAdvertisingSnapshot] = useState(null)
   const [advertisingCoverage, setAdvertisingCoverage] = useState(null)
   const [integrationDiagnostics, setIntegrationDiagnostics] = useState(null)
+  const [dataQuality, setDataQuality] = useState(null)
+  const [dataQualityLoading, setDataQualityLoading] = useState(false)
+  const [qualityView, setQualityView] = useState('problems')
   const [financeLedger, setFinanceLedger] = useState(null)
   const [financeLedgerLoading, setFinanceLedgerLoading] = useState(false)
   const [documentsData, setDocumentsData] = useState(null)
@@ -494,6 +497,19 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     setAdvertisingCoverage(advertisingResult.coverage || null)
     setIntegrationDiagnostics(diagnosticsResult || null)
     if (coreResult.core?.settings) setSettingsDraft(coreResult.core.settings)
+  }
+
+  const loadDataQuality = async (connectionId = connection.connectionId, period = analyticsPeriod) => {
+    if (!connectionId) return
+    setDataQualityLoading(true)
+    try {
+      const result=await wbApi.dataQuality(connectionId,{ from:period?.from,to:period?.to })
+      setDataQuality(result?.quality || null)
+    } catch (error) {
+      notify(error.message,8000)
+    } finally {
+      setDataQualityLoading(false)
+    }
   }
 
   const loadLiveSync = async (connectionId = connection.connectionId) => {
@@ -651,6 +667,13 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     if (active !== 'Подключения' || !connection.connected || !connection.connectionId) return
     loadLiveSync(connection.connectionId).catch(() => {})
   }, [active,connection.connected,connection.connectionId])
+
+  useEffect(() => {
+    if (active !== 'Синхронизации' || !connection.connected || !connection.connectionId) return undefined
+    const timer=window.setTimeout(()=>loadDataQuality(connection.connectionId,analyticsPeriod).catch(()=>{}),220)
+    return () => window.clearTimeout(timer)
+  }, [active,connection.connected,connection.connectionId,analyticsPeriod.from,analyticsPeriod.to,
+      (connection.syncStates || []).map(item=>`${item.stage}:${item.status}:${item.lastSuccessAt || item.nextAllowedAt || ''}:${item.lastCount || 0}`).join('|')])
 
   useEffect(() => {
     localStorage.setItem(ANALYTICS_PERIOD_KEY, JSON.stringify(analyticsPeriod))
@@ -1944,9 +1967,52 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       if (state.status === 'running') return { tone:'pending', title:'Загрузка', text:'Запрос выполняется.' }
       return { tone:'danger', title:'Не загружено', text:state.lastError || 'Запустите этап повторно.' }
     }
-    return <section className="app-page glass-panel"><div className="page-title"><span>Контроль данных</span><h1>Журнал синхронизаций</h1><p>Каждый поток работает независимо. Лимит одного метода больше не останавливает остальные разделы.</p></div>{integrationDiagnostics && <div className="data-integrity-strip"><div><strong>Единое ядро товаров</strong><span>{formatNumber(integrationDiagnostics.productMaster?.products)} карточек · {formatNumber(integrationDiagnostics.productMaster?.withBarcodes)} со ШК</span></div><div><strong>Остатки</strong><span>{integrationDiagnostics.stockAllocation?`${formatNumber(integrationDiagnostics.stockAllocation.matchedQuantity)} шт. сопоставлено`:'снимок ожидается'}</span></div><div><strong>Реклама</strong><span>{formatNumber(integrationDiagnostics.advertisingMeta?.campaigns)} кампаний · {formatNumber(integrationDiagnostics.advertisingMeta?.campaignsWithStats)} со статистикой</span></div></div>}{!connection.connected ? <div className="empty-state"><RefreshCw size={38}/><h3>Wildberries не подключён</h3><button className="primary-btn" onClick={() => setActive('Подключения')}>Подключить</button></div> : <>
+    return <section className="app-page glass-panel"><div className="page-title"><span>Контроль данных</span><h1>Журнал синхронизаций</h1><p>Каждый поток работает независимо. Лимит одного метода больше не останавливает остальные разделы.</p></div>{connection.connected && <div className="quality-center">
+      <div className="quality-center-head">
+        <div className={`quality-score ${dataQuality?.overall || 'loading'}`}>
+          <strong>{dataQualityLoading && !dataQuality ? '…' : `${formatNumber(dataQuality?.score || 0)}%`}</strong>
+          <span>готовность данных</span>
+        </div>
+        <div className="quality-center-summary">
+          <span>Выбранный период</span>
+          <h2>{formatDate(dataQuality?.requestedPeriod?.from || analyticsPeriod.from)} — {formatDate(dataQuality?.requestedPeriod?.to || analyticsPeriod.to)}</h2>
+          <p>{dataQuality?.confirmedPeriod ? `Общий подтверждённый период: ${formatDate(dataQuality.confirmedPeriod.from)} — ${formatDate(dataQuality.confirmedPeriod.to)}.` : 'Общий подтверждённый период ещё формируется.'}</p>
+        </div>
+        <div className={`quality-confidence ${dataQuality?.profitConfidence?.status || 'unavailable'}`}>
+          <ShieldCheck size={21}/><div><strong>{dataQuality?.profitConfidence?.label || 'Проверяем качество'}</strong><span>{dataQuality?.profitConfidence?.text || 'Собираем паспорта источников.'}</span></div>
+        </div>
+        <button className="secondary-btn" disabled={dataQualityLoading} onClick={()=>loadDataQuality(connection.connectionId,analyticsPeriod)}><RefreshCw className={dataQualityLoading?'spin':''} size={17}/>Проверить</button>
+      </div>
+      <div className="quality-kpis">
+        <div><span>Подтверждено</span><strong>{formatNumber(dataQuality?.summary?.ready || 0)}</strong></div>
+        <div><span>Догружается</span><strong>{formatNumber(dataQuality?.summary?.partial || 0)}</strong></div>
+        <div><span>Критично</span><strong>{formatNumber(dataQuality?.summary?.critical || 0)}</strong></div>
+        <div><span>Предупреждения</span><strong>{formatNumber(dataQuality?.summary?.warnings || 0)}</strong></div>
+      </div>
+      <div className="quality-tabs">
+        <button className={qualityView==='problems'?'active':''} onClick={()=>setQualityView('problems')}>Проблемы и действия</button>
+        <button className={qualityView==='streams'?'active':''} onClick={()=>setQualityView('streams')}>Паспорта потоков</button>
+        <button className={qualityView==='finance'?'active':''} onClick={()=>setQualityView('finance')}>Финансовая сверка</button>
+      </div>
+      {qualityView==='problems' && <div className="quality-problems">
+        {dataQualityLoading && !dataQuality ? <div className="quality-empty"><RefreshCw className="spin" size={22}/>Собираем покрытие источников…</div> : dataQuality?.issues?.length ? dataQuality.issues.map(item=><div className={`quality-issue ${item.severity}`} key={item.id}><span>{item.severity==='critical'?<AlertTriangle size={19}/>:item.severity==='warning'?<Info size={19}/>:<CheckCircle2 size={19}/>}</span><div><strong>{item.title}</strong><p>{item.text}</p><small>{item.action}</small></div>{item.stage&&<button onClick={()=>document.getElementById(`sync-stage-${item.stage}`)?.scrollIntoView({behavior:'smooth',block:'center'})}>Показать карточку</button>}</div>) : <div className="quality-empty success"><CheckCircle2 size={22}/>Критических разрывов не найдено. Итоги можно использовать в рамках указанного покрытия.</div>}
+      </div>}
+      {qualityView==='streams' && <div className="quality-stream-table">
+        <div className="quality-stream-row head"><span>Источник</span><span>Статус</span><span>Строки</span><span>Покрытие</span><span>Свежесть</span><span>Что дальше</span></div>
+        {(dataQuality?.streams || []).map(item=><div className={`quality-stream-row ${item.status}`} key={item.stage}><span><strong>{item.label}</strong><small>{item.source || item.rawStatus}</small></span><span><b>{item.statusLabel}</b></span><span>{formatNumber(item.rowCount)}</span><span>{item.coverage ? `${formatDate(item.coverage.from)} — ${formatDate(item.coverage.to)}` : item.metadata?.monthsCompleted ? `${formatNumber(item.metadata.monthsCompleted)} мес.` : 'текущий снимок'}</span><span>{item.updatedAt ? new Date(item.updatedAt).toLocaleString('ru-RU') : 'нет даты'}</span><span>{item.action}</span></div>)}
+      </div>}
+      {qualityView==='finance' && <div className="quality-finance-grid">
+        <div><span>Движений в реестре</span><strong>{formatNumber(dataQuality?.finance?.movements || 0)}</strong></div>
+        <div><span>К перечислению</span><strong>{formatMoney(dataQuality?.finance?.movements ? dataQuality.finance.sellerPayable : null)}</strong></div>
+        <div><span>Выручка по строкам</span><strong>{formatMoney(dataQuality?.finance?.movements ? dataQuality.finance.grossRevenue : null)}</strong></div>
+        <div><span>Расходы</span><strong>{formatMoney(dataQuality?.finance?.movements ? dataQuality.finance.expenses : null)}</strong></div>
+        <div><span>Расхождение сверки</span><strong className={dataQuality?.finance?.withinTolerance?'positive':'negative'}>{formatMoney(dataQuality?.finance?.movements ? dataQuality.finance.difference : null)}</strong></div>
+        <div><span>Допуск сверки</span><strong>{formatMoney(dataQuality?.finance?.threshold || 0)}</strong></div>
+        <div className="quality-finance-note"><ShieldCheck size={20}/><p>{dataQuality?.finance?.status==='confirmed'?'Финансовый период покрыт полностью, а расхождение находится в допустимом диапазоне.':dataQuality?.finance?.movements?'Итог предварительный: дождись полного покрытия или устранения расхождения.':'Финансовый реестр ожидает данные WB; нулевые расходы не считаются подтверждёнными.'}</p></div>
+      </div>}
+    </div>}{integrationDiagnostics && <div className="data-integrity-strip"><div><strong>Единое ядро товаров</strong><span>{formatNumber(integrationDiagnostics.productMaster?.products)} карточек · {formatNumber(integrationDiagnostics.productMaster?.withBarcodes)} со ШК</span></div><div><strong>Остатки</strong><span>{integrationDiagnostics.stockAllocation?`${formatNumber(integrationDiagnostics.stockAllocation.matchedQuantity)} шт. сопоставлено`:'снимок ожидается'}</span></div><div><strong>Реклама</strong><span>{formatNumber(integrationDiagnostics.advertisingMeta?.campaigns)} кампаний · {formatNumber(integrationDiagnostics.advertisingMeta?.campaignsWithStats)} со статистикой</span></div></div>}{!connection.connected ? <div className="empty-state"><RefreshCw size={38}/><h3>Wildberries не подключён</h3><button className="primary-btn" onClick={() => setActive('Подключения')}>Подключить</button></div> : <>
       <div className="sync-summary"><div><span>Последнее успешное обновление</span><strong>{connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : 'Ещё не выполнялось'}</strong></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Запускаем этапы':'Запустить доступные этапы'}</button></div>
-      <div className="sync-stage-grid">{stages.map(([stage,label]) => { const state=stateFor(stage); const copy=statusCopy(state,stage); const serviceBlocked=['service_token_required','service_secret_required','service_token_invalid','service_permission_required'].includes(state?.status); const blocked=syncing || state?.status === 'pending' || (state?.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now()); const buttonText=serviceBlocked?'Открыть подключения':blocked?(state?.status==='pending'?'Ожидаем WB':'Повтор будет автоматически'):(['rate_limited','retry_scheduled'].includes(state?.status)?'Повторить сейчас':'Обновить отдельно'); return <div className={`sync-stage-card ${copy.tone}`} key={stage}><div className="sync-stage-head"><span>{copy.tone==='success'?<CheckCircle2 size={19}/>:copy.tone==='pending'?<RefreshCw className="spin" size={19}/>:<AlertTriangle size={19}/>}</span><div><small>{label}</small><strong>{copy.title}</strong></div></div><p>{copy.text}</p><button disabled={blocked && !serviceBlocked} onClick={() => serviceBlocked ? setActive('Подключения') : syncConnection(connection.connectionId,[stage],{period:['advertising','searchQueries','stockHistory','finance','acquiring','documents'].includes(stage)?analyticsPeriod:null})}>{buttonText}</button></div> })}</div>
+      <div className="sync-stage-grid">{stages.map(([stage,label]) => { const state=stateFor(stage); const copy=statusCopy(state,stage); const serviceBlocked=['service_token_required','service_secret_required','service_token_invalid','service_permission_required'].includes(state?.status); const blocked=syncing || state?.status === 'pending' || (state?.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now()); const buttonText=serviceBlocked?'Открыть подключения':blocked?(state?.status==='pending'?'Ожидаем WB':'Повтор будет автоматически'):(['rate_limited','retry_scheduled'].includes(state?.status)?'Повторить сейчас':'Обновить отдельно'); return <div id={`sync-stage-${stage}`} className={`sync-stage-card ${copy.tone}`} key={stage}><div className="sync-stage-head"><span>{copy.tone==='success'?<CheckCircle2 size={19}/>:copy.tone==='pending'?<RefreshCw className="spin" size={19}/>:<AlertTriangle size={19}/>}</span><div><small>{label}</small><strong>{copy.title}</strong></div></div><p>{copy.text}</p><button disabled={blocked && !serviceBlocked} onClick={() => serviceBlocked ? setActive('Подключения') : syncConnection(connection.connectionId,[stage],{period:['advertising','searchQueries','stockHistory','finance','acquiring','documents'].includes(stage)?analyticsPeriod:null})}>{buttonText}</button></div> })}</div>
       {coreData?.syncWarnings?.length > 0 && <div className="warning-stack">{coreData.syncWarnings.map((warning,index) => <div key={index}><AlertTriangle size={17}/>{warning}</div>)}</div>}
       <div className="sync-log">{syncHistory.length === 0 ? <div className="sync-empty">В журнале пока нет записей.</div> : syncHistory.map(item => { const warnings=Boolean(item.warnings?.length); const counts=item.counts || {}; return <div className={`sync-log-row ${warnings?'warning':item.status}`} key={item.id}><div className="sync-log-icon">{item.status==='success'&&!warnings?<CheckCircle2 size={18}/>:<AlertTriangle size={18}/>}</div><div><strong>{item.automatic?'Автоматический повтор':item.status==='success'?(warnings?'Завершено частично':'Завершено успешно'):'Не все этапы завершены'}</strong><span>{new Date(item.at).toLocaleString('ru-RU')}</span></div><div className="sync-log-details"><span>{counts.products ?? 0} товаров</span><span>{counts.orders ?? 0} заказов</span><span>{counts.sales ?? 0} продаж</span><span>{counts.stocks ?? 0} строк остатков</span><span>{counts.advertising ?? 0} кампаний</span>{warnings&&<span className="sync-warning-text">{item.warnings[0]}</span>}</div></div>})}</div>
     </>}</section>

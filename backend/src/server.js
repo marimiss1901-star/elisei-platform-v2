@@ -44,6 +44,7 @@ import {
 import {
   LIVE_SYNC_STAGES, defaultLiveSyncSettings, normalizeLiveSyncSettings, dueLiveStages, eventStages, safeEqualSecret, publicLiveSyncStatus,
 } from './wb/live-sync.js'
+import { buildDataQualityReport } from './wb/data-quality.js'
 
 const { Pool } = pg
 const app = express()
@@ -623,7 +624,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.19.0 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.20.0 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -5023,7 +5024,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.19.0',
+    version: '2.20.0',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -6007,6 +6008,62 @@ app.get('/api/wb/finance-ledger/:id', authRequired, async (req, res) => {
   }
 })
 
+
+async function dataQualityForConnection(connection, requestedRange = null) {
+  const fallback=reportPeriod(30)
+  const period=requestedRange?.from && requestedRange?.to
+    ? {from:requestedRange.from,to:requestedRange.to}
+    : {from:fallback.dateFrom,to:fallback.dateTo}
+  const [{data,sources},states,streamResult,financeResult]=await Promise.all([
+    canonicalConnectionData(connection),
+    getSyncStates(connection.id),
+    pool.query(`SELECT stream,payload,row_count,metadata,source,updated_at FROM wb_stream_data WHERE connection_id=$1`,[connection.id]),
+    pool.query(`
+      SELECT COUNT(*)::int AS movements,
+        COALESCE(SUM(CASE WHEN metric_role='settlement' THEN amount ELSE 0 END),0)::float8 AS "sellerPayable",
+        COALESCE(SUM(CASE WHEN operation_code='gross_sale' THEN amount ELSE 0 END),0)::float8 AS "grossRevenue",
+        COALESCE(SUM(CASE WHEN included_in_pnl=TRUE AND detail_only=FALSE AND amount<0 THEN ABS(amount) ELSE 0 END),0)::float8 AS expenses,
+        COALESCE(SUM(CASE WHEN metric_role='adjustment' AND detail_only=FALSE AND amount>0 THEN amount ELSE 0 END),0)::float8 AS compensations,
+        MIN(operation_date) AS "dateFrom",MAX(operation_date) AS "dateTo"
+      FROM wb_finance_ledger
+      WHERE connection_id=$1 AND operation_date >= $2::date AND operation_date <= $3::date
+    `,[connection.id,period.from,period.to]),
+  ])
+  const financeValue=financeResult.rows[0] || {}
+  const componentNet=Number(financeValue.grossRevenue||0)-Number(financeValue.expenses||0)+Number(financeValue.compensations||0)
+  const financeSummary={
+    ...financeValue,
+    componentNet:Math.round(componentNet*100)/100,
+    reconciliationDifference:Math.round((Number(financeValue.sellerPayable||0)-componentNet)*100)/100,
+  }
+  const master=Array.isArray(data?.productMaster)?data.productMaster:[]
+  const productDiagnostics={
+    products:master.length || Number(sources?.products?.count || 0),
+    withBarcodes:master.filter(item=>Array.isArray(item?.barcodes)&&item.barcodes.length).length,
+    withMappedStock:master.filter(item=>item?.stockMapped || Number(item?.stock || 0)>0).length,
+  }
+  return buildDataQualityReport({
+    states:states.map(publicSyncState),
+    streamRows:streamResult.rows,
+    requestedPeriod:period,
+    financeSummary,
+    productDiagnostics,
+  })
+}
+
+app.get('/api/wb/data-quality/:id', authRequired, async (req,res)=>{
+  try{
+    const connection=await getConnection(req.auth.sub,req.params.id)
+    if(!connection) return res.status(404).json({error:'Подключение не найдено'})
+    const range=analyticsPeriodRange(req.query)
+    const quality=await dataQualityForConnection(connection,range)
+    res.json({quality})
+  }catch(error){
+    console.warn('WB data quality failed:',error.message)
+    res.status(error.status||500).json({error:error.message})
+  }
+})
+
 app.get('/api/wb/diagnostics/:id', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, req.params.id)
   if (!connection) return res.status(404).json({ error:'Подключение не найдено' })
@@ -6361,12 +6418,14 @@ async function buildElModuleData({ req, identity, period, module, focus }) {
     }
   }
   if (module === 'sync') {
+    const quality=await dataQualityForConnection(connection,filtered.range ? {from:filtered.range.from,to:filtered.range.to} : null)
     return {
       ...base,
       syncStates,
       syncWarnings: core.syncWarnings || [],
       stockMeta: core.stockMeta || null,
       stages: core.stageStatus || {},
+      quality,
       history: (connection.sync_history || []).slice(0, 20),
     }
   }
