@@ -29,6 +29,12 @@ import elRouter from './routes/el.js'
 import {
   ensureFinanceLedgerSchema, persistFinanceLedgerBatch, backfillFinanceLedgerFromStreamItems, queryFinanceLedger,
 } from './wb/finance-ledger.js'
+import {
+  WB_API_POLICY, assertWbApiRequestAllowed, sellerWarehouseReadSummary,
+} from './wb/api-policy.js'
+import {
+  buildFbsArchiveUrl, fbsArchiveMonthKey, fbsArchiveOrderKey, normalizeFbsArchivePlan, parseFbsArchivePage,
+} from './wb/fbs-archive.js'
 
 const { Pool } = pg
 const app = express()
@@ -498,7 +504,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.13.0 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.15.0 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -507,6 +513,7 @@ function authHeaders(token) {
 }
 
 async function wbFetch(url, token, options = {}) {
+  assertWbApiRequestAllowed(url, options)
   const {
     maxAttempts = 3,
     timeoutMs = 45000,
@@ -578,6 +585,7 @@ async function wbFetch(url, token, options = {}) {
 
 
 async function wbFetchBuffer(url, token, options = {}) {
+  assertWbApiRequestAllowed(url, options)
   const {
     timeoutMs = 60000,
     deadlineAt = 0,
@@ -2244,9 +2252,17 @@ async function loadSellerStocks(token, products = [], { deadlineAt = 0 } = {}) {
     label:'Склады продавца FBS', timeoutMs:30000, maxAttempts:2, maxRetryDelayMs:3000, deadlineAt,
   })
   const sellerWarehouses = Array.isArray(warehouses) ? warehouses : []
+  // С 05.08.2026 уже созданные СГТ-склады (cargoType=2) остаются доступными на чтение.
+  // ELISEI не сверяет их со справочником /api/v3/offices и не выполняет POST/PUT управления складами.
+  const warehousePolicy = sellerWarehouseReadSummary(sellerWarehouses)
   const chrtIds = uniqueIdentities((Array.isArray(products) ? products : []).flatMap(productChrtIds), cleanNumericIdentity).map(Number).filter(Number.isFinite)
   if (!sellerWarehouses.length || !chrtIds.length) {
-    return { value:[], rawPayload:{ warehouses:sellerWarehouses, stocks:[] }, validation:{ warehouses:sellerWarehouses.length, chrtIds:chrtIds.length, rows:0 }, endpoint:warehouseEndpoint }
+    return {
+      value:[],
+      rawPayload:{ warehouses:sellerWarehouses, stocks:[], warehousePolicy },
+      validation:{ warehouses:sellerWarehouses.length, chrtIds:chrtIds.length, rows:0, ...warehousePolicy },
+      endpoint:warehouseEndpoint,
+    }
   }
   const rows = []
   const rawStocks = []
@@ -2269,6 +2285,8 @@ async function loadSellerStocks(token, products = [], { deadlineAt = 0 } = {}) {
           amount:Math.max(0,Number(stock?.amount || 0)),
           warehouseId,
           warehouseName:String(warehouse?.name || `Склад продавца ${warehouseId}`),
+          warehouseCargoType:Number.isFinite(Number(warehouse?.cargoType)) ? Number(warehouse.cargoType) : null,
+          warehouseManagement:Number(warehouse?.cargoType) === WB_API_POLICY.sellerWarehouses.sgtCargoType ? 'seller-cabinet-only' : 'api-supported',
           fulfillmentMode:'FBS',
           stockScheme:'FBS',
           source:'marketplace_seller_stock',
@@ -2279,8 +2297,12 @@ async function loadSellerStocks(token, products = [], { deadlineAt = 0 } = {}) {
   }
   return {
     value:rows,
-    rawPayload:{ warehouses:sellerWarehouses, stocks:rawStocks },
-    validation:{ warehouses:sellerWarehouses.length, chrtIds:chrtIds.length, rows:rows.length, totalQuantity:rows.reduce((sum,row)=>sum+Number(row.quantity||0),0) },
+    rawPayload:{ warehouses:sellerWarehouses, stocks:rawStocks, warehousePolicy },
+    validation:{
+      warehouses:sellerWarehouses.length, chrtIds:chrtIds.length, rows:rows.length,
+      totalQuantity:rows.reduce((sum,row)=>sum+Number(row.quantity||0),0),
+      ...warehousePolicy,
+    },
     endpoint:'https://marketplace-api.wildberries.ru/api/v3/stocks/{warehouseId}',
   }
 }
@@ -3279,61 +3301,84 @@ function compactExtendedValue({ rows = [], totalRows = 0, syncId = null, period 
   }
 }
 
-function fbsArchiveMonthSequence(totalMonths = FBS_ARCHIVE_MONTHS) {
-  const months = []
-  const cursor = new Date()
-  cursor.setUTCDate(1)
-  cursor.setUTCHours(0,0,0,0)
-  cursor.setUTCMonth(cursor.getUTCMonth() - 3)
-  for (let index = 0; index < totalMonths; index += 1) {
-    months.push({ year:cursor.getUTCFullYear(),month:cursor.getUTCMonth()+1 })
-    cursor.setUTCMonth(cursor.getUTCMonth() - 1)
-  }
-  return months
-}
-
 async function advanceFbsArchiveTask(connectionId, token, state, { deadlineAt = 0 } = {}) {
   const syncId = String(state?.metadata?.syncId || crypto.randomUUID())
-  const months = fbsArchiveMonthSequence()
+  const plan = normalizeFbsArchivePlan(state?.metadata || {}, FBS_ARCHIVE_MONTHS)
+  const months = plan.archiveMonths
   const monthIndex = Math.max(0, Math.min(months.length - 1, Number(state?.metadata?.monthIndex || 0)))
   const selectedMonth = months[monthIndex]
   const cursor = Math.max(0, Number(state?.metadata?.next || 0))
   const pageNumber = Math.max(0, Number(state?.metadata?.pageNumber || 0))
+  const monthPageNumber = Math.max(0, Number(state?.metadata?.monthPageNumber || 0))
   const limit = 1000
-  const params = new URLSearchParams({
-    year:String(selectedMonth.year),month:String(selectedMonth.month),next:String(cursor),limit:String(limit),
-  })
-  const endpoint = `https://marketplace-api.wildberries.ru/api/marketplace/v3/fbs/orders/archive?${params.toString()}`
+  const endpoint = buildFbsArchiveUrl(selectedMonth, cursor, limit)
   const payload = await wbFetch(endpoint, token, {
     label:`Архив заказов FBS · ${String(selectedMonth.month).padStart(2,'0')}.${selectedMonth.year}`,
-    timeoutMs:45000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+    timeoutMs:45000,maxAttempts:2,maxRetryDelayMs:5000,deadlineAt,
   })
-  const rows = extractExtendedRows(payload, ['orders'])
+  const page = parseFbsArchivePage(payload, cursor)
+  const rows = page.orders
   await saveStreamItemBatch(pool, {
     connectionId,stream:'fbsArchive',syncId,rows,
-    keyOf:(row,index)=>extendedRowKey('fbsArchive',row,index),batchSize:HEAVY_DB_BATCH_SIZE,
+    keyOf:(row,index)=>fbsArchiveOrderKey(row,index),batchSize:HEAVY_DB_BATCH_SIZE,
   })
   const persistedCount = await countStreamItems(pool,{connectionId,stream:'fbsArchive',syncId})
-  const next = Math.max(0, Number(payload?.next ?? payload?.data?.next ?? 0))
-  if (rows.length > 0 && next > 0 && next !== cursor) {
+  const monthKey = fbsArchiveMonthKey(selectedMonth)
+  const oldStats = state?.metadata?.monthStats && typeof state.metadata.monthStats === 'object' ? state.metadata.monthStats : {}
+  const previousMonthRows = Math.max(0, Number(oldStats?.[monthKey]?.rows || 0))
+  const monthStats = {
+    ...oldStats,
+    [monthKey]:{
+      rows:previousMonthRows + rows.length,
+      pages:monthPageNumber + 1,
+      complete:page.complete,
+    },
+  }
+  const sharedMetadata = {
+    syncId,
+    ...plan,
+    monthStats,
+    persistedCount,
+    lastPageRows:rows.length,
+    currentMonth:selectedMonth,
+  }
+  if (!page.complete) {
     return {
       pending:true,
       nextAllowedAt:new Date(Date.now()+500).toISOString(),
-      metadata:{ syncId,next,monthIndex,pageNumber:pageNumber+1,persistedCount,lastPageRows:rows.length,currentMonth:selectedMonth },
+      metadata:{ ...sharedMetadata,next:page.next,monthIndex,pageNumber:pageNumber+1,monthPageNumber:monthPageNumber+1 },
     }
   }
   if (monthIndex + 1 < months.length) {
     return {
       pending:true,
       nextAllowedAt:new Date(Date.now()+500).toISOString(),
-      metadata:{ syncId,next:0,monthIndex:monthIndex+1,pageNumber:pageNumber+1,persistedCount,lastPageRows:rows.length,currentMonth:months[monthIndex+1] },
+      metadata:{ ...sharedMetadata,next:0,monthIndex:monthIndex+1,pageNumber:pageNumber+1,monthPageNumber:0,currentMonth:months[monthIndex+1] },
     }
   }
   await finalizeStreamItems(pool,{connectionId,stream:'fbsArchive',syncId})
+  const previewPage = await loadStreamItemPage(pool,{connectionId,stream:'fbsArchive',syncId,limit:100})
+  const previewRows = previewPage.map(item=>item.payload)
+  const completedMonths = Object.values(monthStats).filter(item=>item?.complete).length
+  const coverage = {
+    archiveOnly:true,
+    olderThan:plan.archiveCutoff,
+    newestMonth:months[0] || null,
+    oldestMonth:months[months.length-1] || null,
+    monthsRequested:months.length,
+    monthsCompleted:completedMonths,
+  }
   return {
     pending:false,
-    value:compactExtendedValue({rows,totalRows:persistedCount,syncId,extra:{next:null,pages:pageNumber+1,monthsScanned:months.length}}),
-    validation:{ incomingRows:rows.length,persistedRows:persistedCount,pages:pageNumber+1,monthsScanned:months.length,memorySafe:true },
+    value:compactExtendedValue({
+      rows:previewRows,totalRows:persistedCount,syncId,
+      extra:{next:null,pages:pageNumber+1,monthsScanned:months.length,coverage,monthStats},
+    }),
+    validation:{
+      incomingRows:rows.length,persistedRows:persistedCount,pages:pageNumber+1,
+      monthsScanned:months.length,monthsCompleted:completedMonths,archiveCutoff:plan.archiveCutoff,
+      monthStats,memorySafe:true,cursorComplete:true,
+    },
     endpoint,
   }
 }
@@ -4425,13 +4470,19 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.10.2',
+    version: '2.15.0',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
       lastError: databaseState.lastError,
       lastConnectedAt: databaseState.lastConnectedAt,
       nextRetryAt: databaseState.nextRetryAt,
+    },
+    wbApiPolicy: {
+      fbsArchive: 'GET /api/marketplace/v3/fbs/orders/archive',
+      orderMetadata: { dbs:'POST /api/marketplace/v3/dbs/orders/meta/details', dbw:'POST /api/marketplace/v3/dbw/orders/meta/details', clickCollect:'POST /api/marketplace/v3/click-collect/orders/meta/details' },
+      sgtWarehouseManagement: WB_API_POLICY.sellerWarehouses.management,
+      sgtApiWriteCutoff: WB_API_POLICY.sellerWarehouses.apiWriteCutoff,
     },
     backgroundWorker: {
       running: backgroundWorkerState.running,

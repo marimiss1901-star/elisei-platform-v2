@@ -72,8 +72,8 @@ for (const marker of [
   'sanitizeChatObject',
   "currentPeriod:{start:detailPeriod.dateFrom,end:detailPeriod.dateTo}",
   "const nextPhase = stage === 'reviews' ? 'archive' : 'answered'",
-  'year:String(selectedMonth.year)',
-  'month:String(selectedMonth.month)',
+  'buildFbsArchiveUrl(selectedMonth, cursor, limit)',
+  'parseFbsArchivePage(payload, cursor)',
   '/api/v1/tariffs/return?date=',
 ]) assert.ok(source.includes(marker),`server.js must contain ${marker}`)
 

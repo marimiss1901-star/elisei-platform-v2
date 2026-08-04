@@ -1,0 +1,15 @@
+3e825f3e3e9d009491e5460f264afcebef3095450c505188cda95acd74c7ca86  ./FILES.txt
+1bca5559d4f7ed578caa798c6590bc9e89a21da1e5ed14c486b7b145894cc657  ./PATCH_FILES.txt
+28b651ef6d26d46c34eb57df70e20df11372995a918553c8ccc1cea2af1c5901  ./PATCH_MANIFEST.txt
+0801b2b54a8f5282ea6db287d754470e0b7fd52e4e08ac9459f9456dd05bfbd0  ./README.md
+2282e2c93560cee7c28f8fc7b891a35cb6af4c35a8016b9ed7760fc9e7858729  ./README_5_6_3.md
+4bf98b91d1b01af3bda0fd32759c00008ee7112c06080e322adc9a6f835d62ea  ./RELEASE_NOTES_V5_6_3.txt
+3b35e8884c1eb1cdc7fd5039aa69b24552465e2babf9fcb7ec69da4f83beb59a  ./backend/package.json
+4fcdf0976cd0d82994ad4cbc5e9fa48620c6ec2f97f43a8f87b251cfcfe76854  ./backend/src/server.js
+5915a12618d84fd387603246c4db6abb10785a6c24cb54dc187ad5d8fc38ab6a  ./backend/src/wb/api-policy.js
+8c85964c57a7e0499efb16028f4f5fe24dd77aec87055a2aac59148b206fafb9  ./backend/src/wb/fbs-archive.js
+953fbc4b58369dce6c3a0f0dd893cf2b7d66d90330c76ba0e2b0d32b87ffed1b  ./backend/tests/wb-api-policy.test.mjs
+a4ad64fe2ae29ba973d18980e67045d90c740f18b056e896a8b3cb8085ce983b  ./backend/tests/wb-extended-coverage.test.mjs
+badd7175087f3bba17645dec3fb4e470679d075a3765531059cb484b416edd7f  ./backend/tests/wb-fbs-archive.test.mjs
+329a7c4c6466ff5da9e99b9edc78ae7d8de43cf6f2dde6c53edb88eab5b218ae  ./package.json
+bcdf04f94f2b5a3ee91f572f99937f28fff8a6b5b5f17a3661bd96d8bf87cbe8  ./src/pages/DashboardPage.jsx

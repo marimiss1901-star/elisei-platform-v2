@@ -1500,6 +1500,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       {connection.tokens?.length > 0 && <div className="token-manager"><div className="section-title-row"><div><span>Безопасное хранилище</span><h2>API-токены кабинета</h2></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Синхронизация':'Синхронизировать доступные разделы'}</button></div><div className="token-card-grid">{connection.tokens.map(item => <div className={`saved-token-card ${item.isPrimary?'primary-token-card':''}`} key={item.id}><div className="saved-token-head"><div className="token-shield"><ShieldCheck size={20}/></div><div><div className="token-title-line"><strong>{item.label}</strong>{item.isPrimary && <b className="primary-token-badge">Основной</b>}</div><span>{item.tokenType} · {item.readOnly?'только чтение':'чтение и запись'}</span></div><button className="token-remove" onClick={() => removeToken(item.id)} title="Удалить токен"><X size={17}/></button></div><div className="token-flow-coverage"><strong>{item.stageCoverageCount || 0}/{connection.stageTotal || item.stageTotal || 27} потоков</strong><span>{item.coversAllCoreFlows ? 'Покрывает всё рабочее ядро' : 'Используется только по своим категориям'}</span></div><div className="token-scopes">{item.scopeLabels?.map(scope => <b key={scope}>{scope}</b>)}</div><div className="token-card-foot"><small>До: {item.expiresAt?new Date(item.expiresAt).toLocaleDateString('ru-RU'):'не указано'} · код {item.fingerprint}</small>{!item.isPrimary && <button className="token-primary-btn" onClick={() => setPrimaryToken(item.id)}>Сделать основным</button>}</div></div>)}</div></div>}
       <div className="connection-card add-token-card"><div className="connection-logo">WB</div><div className="connection-copy"><div className="connection-title"><h3>{connection.tokens?.length ? (connection.tokenMode === 'universal' ? 'Добавить резервный токен' : 'Дополнить недостающие категории') : 'Подключить основной токен'}</h3><span className={connection.tokens?.length?'connection-status connected':'connection-status'}>{connection.tokenMode === 'universal' ? 'Основной покрывает всё' : connection.tokens?.length ? `${connection.tokens.length} токен(а)` : 'Не подключён'}</span></div><p>{connection.tokenMode === 'universal' ? 'Основной токен уже покрывает рабочие потоки. Новый ключ добавляйте только как резервный или для будущих категорий — финансы, отзывы, чат и документы.' : 'Можно вставить один токен сразу со всеми нужными категориями. ELISEI автоматически сделает наиболее полный ключ основным и не будет дублировать запросы через остальные.'}</p><form className="token-form multi-token-form" onSubmit={saveConnection}><label>Название токена — необязательно<input type="text" value={tokenLabel} onChange={e => setTokenLabel(e.target.value)} placeholder={connection.tokens?.length ? 'Например: Резервный или Отзывы' : 'Например: Основной токен WB'} maxLength="80"/></label><label>API-ключ Wildberries</label><div className="token-input"><input type={showToken?'text':'password'} value={tokenDraft} onChange={e => setTokenDraft(e.target.value)} placeholder="Вставьте официальный API-ключ" autoComplete="off"/><button type="button" onClick={() => setShowToken(value => !value)}>{showToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>Категории определятся автоматически. Если ключ покрывает больше потоков, он станет основным. Сам токен обратно в браузер не возвращается.</small><button className="primary-btn" disabled={checking}>{checking?<><RefreshCw className="spin" size={17}/> Проверяем</>:<><PlugZap size={17}/> Проверить и добавить</>}</button></form></div></div>
       <div className="security-note"><ShieldCheck size={22}/><div><strong>Один токен — один набор запросов</strong><p>ELISEI не дублирует обращения к WB через запасные ключи. Для каждого потока выбирается основной токен, а дополнительный включается только при отсутствии нужной категории.</p></div></div>
+      <div className="security-note"><Warehouse size={22}/><div><strong>СГТ-склады — только чтение</strong><p>После 5 августа 2026 года ELISEI показывает уже созданные СГТ-склады и их остатки, но не создаёт и не редактирует такие склады через API. Управление выполняется в личном кабинете Wildberries.</p></div></div>
       {connection.connected && <div className="connection-danger-zone"><div><strong>Отключить магазин полностью</strong><p>Удалятся токены и загруженные данные этого магазина.</p></div><button className="danger-btn" onClick={disconnect}>Отключить Wildberries</button></div>}
     </section>
   }
@@ -1527,6 +1528,21 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
           if (!schemaValid) return { tone:'warning', title:'Нужен новый отчёт', text:'Старые остатки скрыты как неподтверждённые. Запустите или дождитесь нового отчёта WB.' }
           return { tone:'success', title:`${formatNumber(state.lastCount)} строк · ${formatNumber(state.metadata?.totalQuantity || 0)} шт.`, text:state.lastSuccessAt ? `Обновлено ${new Date(state.lastSuccessAt).toLocaleString('ru-RU')}` : 'Этап завершён.' }
         }
+        if (stage === 'sellerStocks') {
+          const sgtCount = Number(state.metadata?.sgtWarehouses || 0)
+          const suffix = sgtCount > 0 ? ` · СГТ-складов только для чтения: ${formatNumber(sgtCount)}` : ''
+          return { tone:'success', title:`Загружено: ${formatNumber(state.lastCount)}`, text:`${state.lastSuccessAt ? `Обновлено ${new Date(state.lastSuccessAt).toLocaleString('ru-RU')}` : 'Этап завершён.'}${suffix}` }
+        }
+        if (stage === 'fbsArchive') {
+          const completed = Number(state.metadata?.monthsCompleted || 0)
+          const requested = Number(state.metadata?.monthsScanned || state.metadata?.monthsRequested || 0)
+          const cutoff = state.metadata?.archiveCutoff ? new Date(state.metadata.archiveCutoff).toLocaleDateString('ru-RU') : 'границы трёх месяцев'
+          return {
+            tone:'success',
+            title:`Загружено: ${formatNumber(state.lastCount)}`,
+            text:`Архив старше ${cutoff}. Проверено месяцев: ${formatNumber(completed)}${requested ? ` из ${formatNumber(requested)}` : ''}.`,
+          }
+        }
         return { tone:'success', title:`Загружено: ${formatNumber(state.lastCount)}`, text:state.lastSuccessAt ? `Обновлено ${new Date(state.lastSuccessAt).toLocaleString('ru-RU')}` : 'Этап завершён.' }
       }
       if (state.status === 'pending') {
@@ -1536,6 +1552,14 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
           : { tone:'pending', title:'Формируется в фоне', text:state.nextAllowedAt ? `Автопроверка после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : 'ELISEI проверит готовность автоматически.' }
       }
       if (state.status === 'queued') {
+        if (stage === 'fbsArchive' && state.metadata?.currentMonth) {
+          const month = state.metadata.currentMonth
+          return {
+            tone:'pending',
+            title:'Архив FBS загружается помесячно',
+            text:`Сохранено ${formatNumber(state.metadata?.persistedCount || state.lastCount || 0)} заданий. Сейчас: ${String(month.month).padStart(2,'0')}.${month.year}, страница ${formatNumber(Number(state.metadata?.monthPageNumber || 0) + 1)}.`,
+          }
+        }
         const completed = Number(state.metadata?.completedChunks || 0)
         return completed > 0
           ? { tone:'pending', title:'Период загружается частями', text:`Сохранено частей: ${completed}. Следующая часть запустится автоматически.` }
