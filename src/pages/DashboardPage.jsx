@@ -330,6 +330,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [elSettings, setElSettings] = useState(() => normalizeElSettings(readStoredJson(EL_CHAT_SETTINGS_KEY, {})))
   const preferredElName = elSettings.preferredName || displayName
   const [elPlan, setElPlan] = useState(defaultElPlan)
+  const [elEngineVersion, setElEngineVersion] = useState('')
   const [elProfileSaving, setElProfileSaving] = useState(false)
   const [showElPersonality, setShowElPersonality] = useState(false)
   const [elMood, setElMood] = useState('happy')
@@ -509,6 +510,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     if (!elApi?.status) return
     elApi.status().then(result => {
       const plan = result?.plan || defaultElPlan
+      setElEngineVersion(String(result?.version || ''))
       setElPlan({ ...defaultElPlan, ...plan, features:{ ...defaultElPlan.features, ...(plan.features || {}) } })
       setElMode(current => {
         if (current === 'pro' && !plan?.features?.pro) return plan?.features?.gpt ? 'gpt' : 'analyst'
@@ -1003,6 +1005,9 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         history:previousMessages.slice(-18).map(item => ({
           role:item.role === 'el' ? 'assistant' : 'user',
           content:item.text,
+          ...(item.resolvedPeriod ? { resolvedPeriod:item.resolvedPeriod } : {}),
+          ...(item.analysisContext ? { analysisContext:item.analysisContext } : {}),
+          ...(item.modulesUsed ? { modulesUsed:item.modulesUsed } : {}),
         })),
         mode:elMode,
         allowWeb:elMode === 'pro' && elSettings.allowWeb,
@@ -1056,6 +1061,9 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         text:result.answer || 'Я проверил данные, но ответ не сформировался. Давай повторим вопрос.',
         sources:Array.isArray(result.sources) ? result.sources : [],
         modules:Array.isArray(result.modulesUsed) ? result.modulesUsed : [],
+        modulesUsed:Array.isArray(result.modulesUsed) ? result.modulesUsed : [],
+        resolvedPeriod:result.resolvedPeriod || null,
+        analysisContext:result.analysisContext || null,
         usedWeb:Boolean(result.usedWeb),
         model:result.model || null,
         mode:result.mode || elMode,
@@ -1921,7 +1929,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         <div className={`el-mode-notice ${elMode}`}>
           <ShieldCheck size={18}/>
           <div>
-            <strong>{elModeMeta[elMode].title}</strong>
+            <strong>{elModeMeta[elMode].title}{elEngineVersion ? ` · ядро ${elEngineVersion}` : ''}</strong>
             <span>{elMode === 'analyst'
               ? 'Работает на данных и расчётах ELISEI. OpenAI API не вызывается.'
               : elMode === 'gpt'

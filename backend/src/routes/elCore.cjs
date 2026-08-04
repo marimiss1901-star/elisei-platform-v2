@@ -46,7 +46,7 @@ function createRouter(express) {
     const plan = await resolveElPlan(req, identity);
     res.json({
       ok: true,
-      version: '5.7.5',
+      version: '5.7.6',
       name: 'El Tiered Intelligence',
       configured: Boolean(process.env.OPENAI_API_KEY && (process.env.ELISEI_GPT_MODEL || process.env.ELISEI_PRO_MODEL || process.env.ELISEI_AI_MODEL)),
       models: {
@@ -97,7 +97,7 @@ function createRouter(express) {
   router.get('/capabilities', asyncRoute(async (req, res) => {
     const identity = identityFromRequest(req);
     const plan = await resolveElPlan(req, identity);
-    res.json({ ok: true, version: '5.7.5', modules: publicCapabilities(), plan, writeActions: false });
+    res.json({ ok: true, version: '5.7.6', modules: publicCapabilities(), plan, writeActions: false });
   }));
 
   router.post('/chat', asyncRoute(async (req, res) => {
@@ -128,9 +128,11 @@ function createRouter(express) {
     const conversationFollowup = resolveConversationFollowup({ message, history, clock, defaultPeriod:body.period });
     const classification = classifyElRequest({ message, requestedMode, history, page: body.page });
     const salesFollowupMetrics = new Set(['fbs_orders','fbo_orders','returns','orders','sales','revenue','products']);
-    if (conversationFollowup.isFollowup && conversationFollowup.inheritedModules?.includes('sales') && salesFollowupMetrics.has(conversationFollowup.metric)) {
+    // Короткие вопросы про FBS/FBO и другие показатели продаж должны идти в модуль sales
+    // даже если история диалога была очищена при deploy или пришла без служебных метаданных.
+    if (salesFollowupMetrics.has(conversationFollowup.metric)) {
       classification.modules = ['sales'];
-      classification.reason = 'conversation-followup';
+      classification.reason = conversationFollowup.isFollowup ? 'conversation-followup' : 'direct-sales-metric';
     } else if (!classification.modules?.length && conversationFollowup.inheritedModules?.length) {
       classification.modules = conversationFollowup.inheritedModules.slice(0,4);
       classification.reason = 'conversation-followup';

@@ -496,7 +496,17 @@ async function runElAnalyst(options = {}) {
   }
 
   if (!sections.length) {
-    sections.push(noDataResponse(voice, options.identity));
+    const metric = followupMetric(options.context || {}, message);
+    const screenSummary = options.context?.screen?.summary && typeof options.context.screen.summary === 'object'
+      ? options.context.screen.summary : null;
+    if (modules.includes('sales') && ['fbs_orders','fbo_orders'].includes(metric) && screenSummary?.orders != null && Number.isFinite(Number(screenSummary.orders))) {
+      const name = String(options.identity?.userName || '').trim().split(/\s+/)[0];
+      const prefix = name ? `${name}, ` : '';
+      sections.push(`${prefix}за ${formatRuPeriod(options.context?.period || options.context?.screen?.period || {})} загружено ${number(screenSummary.orders)} заказов, но точную разбивку FBS/FBO сейчас получить не удалось. Я не буду показывать FBS = 0, потому что отсутствие разбивки — не нулевой результат.`);
+      warnings.push('Общая сумма заказов подтверждена текущим экраном ELISEI; детализация схемы доставки временно недоступна.');
+    } else {
+      sections.push(noDataResponse(voice, options.identity));
+    }
   }
   if (voice.support && ['tired','frustrated','worried'].includes(voice.emotion)) {
     sections.unshift(voice.address === 'formal'

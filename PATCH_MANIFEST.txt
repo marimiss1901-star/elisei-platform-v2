@@ -1,11 +1,12 @@
-ELISEI 5.7.5 PATCH FROM 5.7.4
+ELISEI 5.7.6 PATCH FROM 5.7.5
 
 Purpose:
-- conversational follow-ups inherit the previous period and business topic;
-- short questions such as “из них”, “а сколько FBS?”, “а возвратов?” receive focused answers;
-- FBS/FBO order counts are calculated from order rows without double counting;
-- orders with an unknown fulfillment scheme remain in a separate unknown bucket;
-- missing scheme detail is never displayed as a false FBS/FBO zero.
+- route FBS/FBO questions to the sales module even when conversation metadata is temporarily unavailable;
+- calculate FBS/FBO directly from raw order rows for the selected period;
+- keep unknown fulfillment rows separate without double counting or false zeroes;
+- preserve resolvedPeriod, analysisContext and modulesUsed in frontend history;
+- show the actual backend El engine version in the interface;
+- replace generic connection fallback with a targeted, truthful order-split response.
 
-Install over: ELISEI 5.7.4
-Changed project files: 11
+Install over: ELISEI 5.7.5
+Changed project files: 13

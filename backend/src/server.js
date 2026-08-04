@@ -35,6 +35,7 @@ import {
 import {
   buildFbsArchiveUrl, fbsArchiveMonthKey, fbsArchiveOrderKey, normalizeFbsArchivePlan, parseFbsArchivePage,
 } from './wb/fbs-archive.js'
+import { splitOrdersByFulfillment } from './services/elFulfillment.js'
 
 const { Pool } = pg
 const app = express()
@@ -5613,6 +5614,26 @@ async function buildElModuleData({ req, identity, period, module, focus }) {
     const periodDataAvailable = !filtered.range || selectedRows.orders > 0 || selectedRows.sales > 0
     const periodCoverage = filtered.data?.__periodCoverage || null
     const latestAvailableDate = [periodCoverage?.orders?.to,periodCoverage?.sales?.to].filter(Boolean).sort().at(-1) || null
+    const rawOrderSplit = splitOrdersByFulfillment(filtered.data?.orders)
+    const fallbackFbs = Number(core.fulfillment?.FBS?.orders || 0)
+    const fallbackFbo = Number(core.fulfillment?.FBO?.orders || 0)
+    const fulfillment = rawOrderSplit.total > 0 ? {
+      ...(core.fulfillment || {}),
+      FBS:{ ...(core.fulfillment?.FBS || {}), orders:rawOrderSplit.fbs },
+      FBO:{ ...(core.fulfillment?.FBO || {}), orders:rawOrderSplit.fbo },
+      totalOrders:rawOrderSplit.total,
+      classifiedOrders:rawOrderSplit.classified,
+      unknownOrders:rawOrderSplit.unknown,
+      ordersAvailable:true,
+      source:'raw_order_rows',
+    } : {
+      ...(core.fulfillment || {}),
+      totalOrders:Number(core.summary?.orders || 0),
+      classifiedOrders:fallbackFbs + fallbackFbo,
+      unknownOrders:Math.max(0,Number(core.summary?.orders || 0) - fallbackFbs - fallbackFbo),
+      ordersAvailable:Boolean(core.availability?.orders || sourceCounts.orders > 0),
+      source:'aggregated_order_rows',
+    }
     return {
       ...base,
       available:salesAvailable,
@@ -5630,14 +5651,7 @@ async function buildElModuleData({ req, identity, period, module, focus }) {
         returns: core.summary.returns, returnRate: core.summary.returnRate,
       },
       dailyTrend: core.dailyTrend || [],
-      fulfillment: {
-        ...(core.fulfillment || {}),
-        totalOrders:Number(core.summary?.orders || 0),
-        classifiedOrders:Number(core.fulfillment?.FBS?.orders || 0) + Number(core.fulfillment?.FBO?.orders || 0),
-        unknownOrders:Math.max(0,Number(core.summary?.orders || 0) - Number(core.fulfillment?.FBS?.orders || 0) - Number(core.fulfillment?.FBO?.orders || 0)),
-        ordersAvailable:Boolean(core.availability?.orders || sourceCounts.orders > 0),
-        source:'order_rows',
-      },
+      fulfillment,
       topByRevenue: elTopProducts(products, item => item.revenue),
       topBySales: elTopProducts(products, item => item.salesCount),
     }

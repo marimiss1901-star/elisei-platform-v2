@@ -8,7 +8,7 @@ const MODULES = Object.freeze({
   },
   sales: {
     title: 'Продажи и заказы',
-    keywords: ['продаж', 'заказ', 'выручк', 'оборот', 'покупател', 'конверси'],
+    keywords: ['продаж', 'заказ', 'выручк', 'оборот', 'покупател', 'конверси', 'fbs', 'фбс', 'fbo', 'фбо', 'схема доставки'],
     paths: ['/api/analytics/sales', '/api/sales', '/api/orders/analytics', '/api/orders', '/api/wb/orders'],
   },
   advertising: {
