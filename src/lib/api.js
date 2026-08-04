@@ -34,6 +34,22 @@ async function request(path, options = {}) {
   return payload
 }
 
+async function downloadFile(path) {
+  if (!API_BASE) throw new Error('Backend не настроен: добавьте VITE_API_BASE_URL')
+  const token = authStore.getToken()
+  const response = await fetch(`${API_BASE}${path}`, { headers:{ ...(token ? { Authorization:`Bearer ${token}` } : {}) } })
+  if (!response.ok) {
+    const payload = await response.json().catch(()=>({}))
+    if (response.status === 401) authStore.clear()
+    throw new Error(payload.error || payload.message || `Ошибка ${response.status}`)
+  }
+  const disposition = response.headers.get('content-disposition') || ''
+  const utf = disposition.match(/filename\*=UTF-8''([^;]+)/i)
+  const plain = disposition.match(/filename="?([^";]+)"?/i)
+  const filename = decodeURIComponent(utf?.[1] || plain?.[1] || 'wildberries-document')
+  return { blob:await response.blob(),filename }
+}
+
 export const authApi = {
   register: (data) => request('/api/auth/register', { method: 'POST', body: JSON.stringify(data) }),
   login: (data) => request('/api/auth/login', { method: 'POST', body: JSON.stringify(data) }),
@@ -80,6 +96,12 @@ export const wbApi = {
     }
     const suffix = query.toString() ? `?${query.toString()}` : ''
     return request(`/api/wb/finance-ledger/${encodeURIComponent(connectionId)}${suffix}`)
+  },
+  downloadDocument: async (connectionId, serviceName, extension) => {
+    const cleanExtension=String(extension || '').replace(/^\./,'')
+    const query = new URLSearchParams({ connectionId:String(connectionId),extension:cleanExtension })
+    const result=await downloadFile(`/api/wb/documents/${encodeURIComponent(serviceName)}/download?${query.toString()}`)
+    return { ...result,filename:result.filename === 'wildberries-document' ? `${serviceName}.${cleanExtension}` : result.filename }
   },
   extended: (stream, connectionId, options = {}, legacyLimit = 150) => {
     const params = typeof options === 'string' ? { afterKey:options,limit:legacyLimit } : (options || {})

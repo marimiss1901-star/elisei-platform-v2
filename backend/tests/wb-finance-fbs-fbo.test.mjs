@@ -5,7 +5,7 @@ import { WB_STREAMS, normalizeStreamPayload, streamCount } from '../src/wb/strea
 
 assert.deepEqual(WB_STREAMS, [
   'products','orders','sales','stocks','sellerStocks','advertising','finance','paidStorage','acceptance','acquiring',
-  'financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','goodsReturns','tariffs','funnel','documents',
+  'financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','goodsReturns','tariffs','funnel','documents','jamSubscription',
   'searchQueries','stockHistory','reviews','questions','chats',
 ])
 

@@ -31,6 +31,25 @@ const rowSign = row => {
   return /возврат|сторно|отмена|refund|return/.test(reason) ? -1 : 1
 }
 
+export function classifyFinanceSpecialOperation(row = {}) {
+  const source = [
+    text(row,['docTypeName','doc_type_name']),
+    text(row,['sellerOperName','seller_oper_name','supplier_oper_name']),
+    text(row,['bonusTypeName','bonus_type_name']),
+    text(row,['paymentProcessing','payment_processing']),
+  ].join(' ').toLowerCase()
+  if (/(?:^|[^a-zа-яё])(джем|jam)(?:[^a-zа-яё]|$)/i.test(source)) {
+    return { code:'jam_subscription', group:'subscriptions', name:'Подписка «Джем»', confirmed:true }
+  }
+  if (/подписк|конструктор\s+тариф|тарифн(?:ый|ого)\s+план|пакет\s+опци|опци[яи]\s+тариф/i.test(source)) {
+    return { code:'subscription_charge', group:'subscriptions', name:text(row,['bonusTypeName','bonus_type_name','sellerOperName','supplier_oper_name'],'Подписка или тарифная опция WB'), confirmed:false }
+  }
+  if (/реклам|продвижен|wb\s*продвиж|вб\s*продвиж/i.test(source)) {
+    return { code:'promotion_charge', group:'advertising', name:text(row,['bonusTypeName','bonus_type_name','sellerOperName','supplier_oper_name'],'Расходы на продвижение WB'), confirmed:true }
+  }
+  return null
+}
+
 export function financeFulfillmentMode(row = {}) {
   const value = `${text(row,['fulfillmentMode','deliveryMethod','delivery_method','warehouseType','warehouse_type'])} ${text(row,['officeName','office_name'])}`.toUpperCase()
   if (Boolean(row?.srvDbs) || /FBS|DBS|СКЛАД ПРОДАВ|ПРОДАВЦ/.test(value)) return 'FBS'
@@ -135,8 +154,21 @@ export function normalizeFinanceLedgerRows(stream, row = {}, sourceRowKey = '', 
     addMovement(result,base,{ code:'paid_acceptance',group:'acceptance',name:'Платная приёмка',amount:-acceptance,metricRole:'breakdown',includedInPnl:true,sourceField:'paidAcceptance',index })
     addMovement(result,base,{ code:'acquiring',group:'acquiring',name:id.paymentProcessing || 'Эквайринг и обработка платежа',amount:-acquiring,metricRole:'breakdown',includedInPnl:true,sourceField:'acquiringFee',index })
     addMovement(result,base,{ code:'penalty',group:'penalties',name:id.bonusType || 'Штраф WB',amount:-penalty,metricRole:'breakdown',includedInPnl:true,sourceField:'penalty',index })
-    addMovement(result,base,{ code:'deduction',group:'deductions',name:id.bonusType || id.sellerOperation || 'Удержание WB',amount:-deduction,metricRole:'breakdown',includedInPnl:true,sourceField:'deduction',index })
-    addMovement(result,base,{ code:'additional_payment',group:additional >= 0 ? 'compensations' : 'adjustments',name:id.bonusType || id.sellerOperation || (additional >= 0 ? 'Доплата / компенсация WB' : 'Корректировка WB'),amount:additional,metricRole:'adjustment',includedInPnl:true,sourceField:'additionalPayment',index })
+    const specialOperation = classifyFinanceSpecialOperation(row)
+    addMovement(result,base,{
+      code:specialOperation?.code || 'deduction',
+      group:specialOperation?.group || 'deductions',
+      name:specialOperation?.name || id.bonusType || id.sellerOperation || 'Удержание WB',
+      amount:-deduction,metricRole:'breakdown',includedInPnl:true,sourceField:'deduction',
+      note:specialOperation ? (specialOperation.confirmed ? 'Категория подтверждена текстом операции WB.' : 'Категория определена по описанию операции; точное название услуги сохранено в исходной строке.') : '',index,
+    })
+    addMovement(result,base,{
+      code:additional < 0 && specialOperation ? specialOperation.code : 'additional_payment',
+      group:additional < 0 && specialOperation ? specialOperation.group : (additional >= 0 ? 'compensations' : 'adjustments'),
+      name:additional < 0 && specialOperation ? specialOperation.name : id.bonusType || id.sellerOperation || (additional >= 0 ? 'Доплата / компенсация WB' : 'Корректировка WB'),
+      amount:additional,metricRole:'adjustment',includedInPnl:true,sourceField:'additionalPayment',
+      note:additional < 0 && specialOperation ? 'Специальное списание распознано по официальному описанию операции WB.' : '',index,
+    })
     addMovement(result,base,{ code:'pickup_point_service',group:'logistics',name:'Возмещение за выдачу и возврат на ПВЗ',amount:-ppvzReward,metricRole:'breakdown',includedInPnl:false,sourceField:'ppvzReward',note:'Показывается отдельно для прозрачности; не прибавляется повторно к P&L.',index })
     addMovement(result,base,{ code:'cashback',group:cashbackAmount >= 0 ? 'compensations' : 'adjustments',name:'Кешбэк / корректировка кешбэка',amount:cashbackAmount,metricRole:'adjustment',includedInPnl:false,sourceField:'cashbackAmount',index })
     addMovement(result,base,{ code:'cashback_commission_change',group:cashbackCommission >= 0 ? 'compensations' : 'adjustments',name:'Изменение комиссии по кешбэку',amount:cashbackCommission,metricRole:'adjustment',includedInPnl:false,sourceField:'cashbackCommissionChange',index })
@@ -354,6 +386,9 @@ export async function queryFinanceLedger(db,{ connectionId,from,to,group,mode,ro
       COALESCE(SUM(CASE WHEN operation_group='acquiring' AND detail_only=FALSE THEN ABS(amount) ELSE 0 END),0)::float8 AS acquiring,
       COALESCE(SUM(CASE WHEN operation_group='penalties' AND detail_only=FALSE THEN ABS(amount) ELSE 0 END),0)::float8 AS penalties,
       COALESCE(SUM(CASE WHEN operation_group='deductions' AND detail_only=FALSE THEN ABS(amount) ELSE 0 END),0)::float8 AS deductions,
+      COALESCE(SUM(CASE WHEN operation_group='subscriptions' AND detail_only=FALSE THEN ABS(amount) ELSE 0 END),0)::float8 AS subscriptions,
+      COALESCE(SUM(CASE WHEN operation_code='jam_subscription' AND detail_only=FALSE THEN ABS(amount) ELSE 0 END),0)::float8 AS jam_charges,
+      COALESCE(SUM(CASE WHEN operation_group='advertising' AND detail_only=FALSE THEN ABS(amount) ELSE 0 END),0)::float8 AS advertising_charges,
       COALESCE(SUM(CASE WHEN fulfillment_mode='FBS' AND operation_group='logistics' AND detail_only=FALSE THEN ABS(amount) ELSE 0 END),0)::float8 AS fbs_logistics,
       MIN(operation_date) AS date_from,MAX(operation_date) AS date_to
     FROM wb_finance_ledger WHERE ${where}
@@ -413,7 +448,8 @@ export async function queryFinanceLedger(db,{ connectionId,from,to,group,mode,ro
       expenses:Number(value.expenses||0),allExpenses:Number(value.all_expenses||0),compensations:Number(value.compensations||0),commission:Number(value.commission||0),
       logistics:Number(value.logistics||0),fbsLogistics:Number(value.fbs_logistics||0),storage:Number(value.storage||0),
       acceptance:Number(value.acceptance||0),acquiring:Number(value.acquiring||0),penalties:Number(value.penalties||0),
-      deductions:Number(value.deductions||0),componentNet:Math.round(componentNet*100)/100,
+      deductions:Number(value.deductions||0),subscriptions:Number(value.subscriptions||0),jamCharges:Number(value.jam_charges||0),
+      advertisingCharges:Number(value.advertising_charges||0),componentNet:Math.round(componentNet*100)/100,
       reconciliationDifference:Math.round(difference*100)/100,dateFrom:value.date_from||null,dateTo:value.date_to||null,
     },
     groups:groupRows.rows,

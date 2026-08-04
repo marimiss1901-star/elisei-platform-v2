@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { WB_STREAMS } from '../src/wb/stream-store.js'
 import { normalizeFinanceLedgerRows } from '../src/wb/finance-ledger.js'
 
-assert.equal(WB_STREAMS.length,27)
+assert.equal(WB_STREAMS.length,28)
 for (const stream of ['financeReports','acquiringReports','warehouseMeasurements','antifraudRetention','labelingRetention']) {
   assert.ok(WB_STREAMS.includes(stream),`${stream} must be registered`)
 }

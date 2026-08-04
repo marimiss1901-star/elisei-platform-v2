@@ -7,14 +7,14 @@ const dashboard = fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',im
 const styles = fs.readFileSync(new URL('../../src/styles/app.css',import.meta.url),'utf8')
 
 for (const marker of [
-  "const SERVICE_TOKEN_STAGES = new Set(['financeReports','acquiringReports'])",
+  "const SERVICE_TOKEN_STAGES = new Set(['financeReports','acquiringReports','jamSubscription'])",
   'function selectTokenRowForStage',
   "if (SERVICE_TOKEN_STAGES.has(stage)) return isServiceTokenRow(row)",
   "return !isServiceTokenRow(row)",
   "purpose === 'service' && info.typeId !== 4",
   "purpose !== 'service' && info.typeId === 4",
   "purpose === 'service' && !info.scopes.includes('finance')",
-  "Сервисный токен закреплён только за финансовыми сводками",
+  "Сервисный токен закреплён за расширенными финансовыми сводками и статусом «Джем»",
   "status = serviceOnly ? 'service_token_required' : 'missing_token'",
   "status:'service_secret_required'",
   "? 'retry_scheduled'",
@@ -39,7 +39,7 @@ for (const marker of [
 for (const marker of [
   'saveServiceConnection',
   'serviceTokenDraft',
-  'Сервисный токен для финансовых сводок',
+  'Сервисный токен для расширенных финансовых данных',
   "item.isServiceToken?'service-token-card':''",
   "state.status === 'retry_scheduled'",
   "state.status === 'service_token_required'",
@@ -49,8 +49,8 @@ for (const marker of [
 assert.ok(styles.includes('ELISEI 5.6.4 — раздельный сервисный токен и устойчивые автоповторы'))
 
 // Pure routing check: finance reports are service-only, ordinary finance stays on a non-service token.
-const WB_SYNC_STAGES = { finance:{scope:'finance'},financeReports:{scope:'finance'},acquiringReports:{scope:'finance'},documents:{scope:'documents'} }
-const SERVICE_TOKEN_STAGES = new Set(['financeReports','acquiringReports'])
+const WB_SYNC_STAGES = { finance:{scope:'finance'},financeReports:{scope:'finance'},acquiringReports:{scope:'finance'},jamSubscription:{scope:'finance'},documents:{scope:'documents'} }
+const SERVICE_TOKEN_STAGES = new Set(['financeReports','acquiringReports','jamSubscription'])
 const rowScopes = row => row.scopes || []
 const rowTokenType = row => Number(row.token_type || 0)
 const isServiceTokenRow = row => rowTokenType(row) === 4
@@ -66,6 +66,7 @@ assert.equal(tokenEligibleForStage(basic,'finance'),true)
 assert.equal(tokenEligibleForStage(basic,'financeReports'),false)
 assert.equal(tokenEligibleForStage(service,'financeReports'),true)
 assert.equal(tokenEligibleForStage(service,'acquiringReports'),true)
+assert.equal(tokenEligibleForStage(service,'jamSubscription'),true)
 assert.equal(tokenEligibleForStage(service,'finance'),false)
 assert.equal(tokenEligibleForStage(service,'documents'),false)
 

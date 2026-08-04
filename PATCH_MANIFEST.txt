@@ -1,12 +1,13 @@
-ELISEI 5.7.6 PATCH FROM 5.7.5
+ELISEI 5.8.0 PATCH FROM 5.7.6
 
 Purpose:
-- route FBS/FBO questions to the sales module even when conversation metadata is temporarily unavailable;
-- calculate FBS/FBO directly from raw order rows for the selected period;
-- keep unknown fulfillment rows separate without double counting or false zeroes;
-- preserve resolvedPeriod, analysisContext and modulesUsed in frontend history;
-- show the actual backend El engine version in the interface;
-- replace generic connection fallback with a targeted, truthful order-split response.
+- restore the Base-token financial detail stream and balance as the primary accounting source;
+- preserve exact rrdId cursor pagination, partial pages and automatic continuation after WB limits;
+- add the WB document registry, categories and protected downloads through the backend;
+- classify logistics, storage, acceptance, acquiring, penalties, compensation, promotion and subscriptions in one ledger;
+- treat Jam charges as confirmed only when a financial operation or document provides evidence;
+- derive Base-token acquiring from the finance ledger while keeping privileged official summaries optional;
+- show partial coverage and next retry instead of false zeroes.
 
-Install over: ELISEI 5.7.5
-Changed project files: 13
+Install over: ELISEI 5.7.6
+Changed project files: 19

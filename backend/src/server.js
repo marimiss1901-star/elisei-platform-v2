@@ -36,6 +36,11 @@ import {
   buildFbsArchiveUrl, fbsArchiveMonthKey, fbsArchiveOrderKey, normalizeFbsArchivePlan, parseFbsArchivePage,
 } from './wb/fbs-archive.js'
 import { splitOrdersByFulfillment } from './services/elFulfillment.js'
+import {
+  financePageCooldownMs, documentsPageCooldownMs, financeContinuation, financeProgressCopy,
+  normalizeDocumentCategories, normalizeDocumentRow, summarizeDocuments, deriveAcquiringFromLedgerRows, jamEvidenceFromFinanceRows,
+  isPrivilegedFinanceToken,
+} from './wb/finance-core.js'
 
 const { Pool } = pg
 const app = express()
@@ -221,7 +226,7 @@ function kickBackgroundWorkers(reason = 'timer') {
 }
 
 app.use(helmet())
-app.use(cors({ origin(origin, cb) { if (!origin || !allowedOrigins.length || allowedOrigins.includes(origin)) return cb(null, true); cb(new Error('Origin is not allowed')) } }))
+app.use(cors({ origin(origin, cb) { if (!origin || !allowedOrigins.length || allowedOrigins.includes(origin)) return cb(null, true); cb(new Error('Origin is not allowed')) }, exposedHeaders:['Content-Disposition'] }))
 app.use(express.json({ limit: '2mb' }))
 app.use('/api', (req, res, next) => {
   if (!pool) return res.status(503).json({ error:'DATABASE_URL не настроен', code:'DATABASE_NOT_CONFIGURED' })
@@ -427,27 +432,29 @@ const WB_SYNC_STAGES = Object.freeze({
   tariffs: { label: 'Тарифы и комиссии', scope: 'content' },
   funnel: { label: 'Воронка карточек', scope: 'analytics' },
   documents: { label: 'Документы WB', scope: 'documents' },
+  jamSubscription: { label: 'Подписка «Джем»', scope: 'finance' },
   searchQueries: { label: 'Поисковые запросы', scope: 'analytics' },
   stockHistory: { label: 'История остатков', scope: 'analytics' },
   reviews: { label: 'Отзывы покупателей', scope: 'feedbacks' },
   questions: { label: 'Вопросы покупателей', scope: 'feedbacks' },
   chats: { label: 'Чаты с покупателями', scope: 'chat' },
 })
-const SERVICE_TOKEN_STAGES = new Set(['financeReports','acquiringReports'])
+const SERVICE_TOKEN_STAGES = new Set(['financeReports','acquiringReports','jamSubscription'])
 const GENERAL_SYNC_STAGE_NAMES = Object.keys(WB_SYNC_STAGES).filter(stage => !SERVICE_TOKEN_STAGES.has(stage))
 const CORE_SYNC_SCOPES = [...new Set(GENERAL_SYNC_STAGE_NAMES.map(stage => WB_SYNC_STAGES[stage].scope))]
 const STOCK_DATA_SCHEMA_VERSION = 5
 const STOCK_DATA_SOURCE = 'wb_warehouse_remains'
 const STOCK_REPORT_PROFILE = 'article_barcode_size_v1'
 const ARCHIVE_SYNC_STAGES = Object.freeze(['fbsArchive'])
-const HEAVY_SYNC_STAGES = Object.freeze(['finance','paidStorage','acceptance','acquiring','financeReports','acquiringReports','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','searchQueries','stockHistory','reviews','questions','chats'])
+const HEAVY_SYNC_STAGES = Object.freeze(['finance','paidStorage','acceptance','acquiring','financeReports','acquiringReports','documents','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','searchQueries','stockHistory','reviews','questions','chats'])
 const RETRYABLE_HTTP_STATUSES = new Set([408,425,500,502,503,504])
 const MAX_AUTOMATIC_RETRY_ATTEMPTS = Math.max(3,Math.min(12,Number(process.env.WB_MAX_AUTOMATIC_RETRY_ATTEMPTS || 8)))
 const HEAVY_PAGE_LIMIT = Math.max(500, Math.min(5000, Number(process.env.WB_HEAVY_PAGE_LIMIT || 2500)))
+const FINANCE_PAGE_LIMIT = Math.max(2500, Math.min(20000, Number(process.env.WB_FINANCE_PAGE_LIMIT || 10000)))
 const HEAVY_DB_BATCH_SIZE = Math.max(100, Math.min(500, Number(process.env.WB_HEAVY_DB_BATCH_SIZE || 250)))
 const HEAVY_STAGE_COOLDOWN_MS = Math.max(5000, Number(process.env.WB_HEAVY_STAGE_COOLDOWN_MS || 65000))
 const FBS_ARCHIVE_MONTHS = Math.max(1, Math.min(60, Number(process.env.WB_FBS_ARCHIVE_MONTHS || 24)))
-const EXTENDED_OBJECT_STAGES = new Set(['financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','goodsReturns','tariffs','funnel','documents','searchQueries','stockHistory','reviews','questions','chats'])
+const EXTENDED_OBJECT_STAGES = new Set(['financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','goodsReturns','tariffs','funnel','documents','jamSubscription','searchQueries','stockHistory','reviews','questions','chats'])
 
 function decodeJwtPayload(value, invalidMessage) {
   try {
@@ -569,7 +576,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.17.5 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.18.0 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -586,6 +593,7 @@ async function wbFetch(url, token, options = {}) {
     maxRetryDelayMs = 45000,
     deadlineAt = 0,
     label = 'WB API',
+    preserveInt64Fields = [],
     ...fetchOptions
   } = options
 
@@ -611,7 +619,15 @@ async function wbFetch(url, token, options = {}) {
 
     const text = await response.text()
     let payload = null
-    try { payload = text ? JSON.parse(text) : null } catch { payload = text }
+    try {
+      let source = text
+      for (const field of Array.isArray(preserveInt64Fields) ? preserveInt64Fields : []) {
+        const safeField = String(field).replace(/[^a-zA-Z0-9_]/g,'')
+        if (!safeField) continue
+        source = source.replace(new RegExp(`(\"${safeField}\"\\s*:\\s*)(-?\\d{16,})(?=\\s*[,}])`,'g'),'$1"$2"')
+      }
+      payload = source ? JSON.parse(source) : null
+    } catch { payload = text }
     const requestId = response.headers.get('x-request-id') || payload?.requestId || ''
 
     if (response.ok) return payload
@@ -831,6 +847,7 @@ function isServiceTokenRow(row) {
 function tokenEligibleForStage(row, stage) {
   const definition = WB_SYNC_STAGES[stage]
   if (!definition || !rowScopes(row).includes(definition.scope)) return false
+  if (stage === 'acquiring') return true
   if (SERVICE_TOKEN_STAGES.has(stage)) return isServiceTokenRow(row)
   return !isServiceTokenRow(row)
 }
@@ -945,7 +962,14 @@ function selectTokenRow(tokens, scope) {
 }
 
 function selectTokenRowForStage(tokens, stage) {
-  return [...tokens].filter(item => tokenEligibleForStage(item,stage)).sort(tokenSort)[0] || null
+  const eligible = [...tokens].filter(item => tokenEligibleForStage(item,stage))
+  if (stage === 'acquiring') {
+    const secretReady = publicServiceSecretStatus().valid
+    const service = secretReady ? eligible.filter(isServiceTokenRow).sort(tokenSort)[0] : null
+    if (service) return service
+    return eligible.filter(item => !isServiceTokenRow(item)).sort(tokenSort)[0] || null
+  }
+  return eligible.sort(tokenSort)[0] || null
 }
 
 function chooseToken(tokens, scope) {
@@ -3122,21 +3146,94 @@ async function aggregatePersistedHeavyRows(connectionId, stream, syncId) {
   return [...aggregates.values()]
 }
 
-async function advancePagedFinanceTask(stage, connectionId, token, state, { deadlineAt = 0 } = {}) {
+function financeRequestBody(period, rrdId) {
+  const cursor = /^\d+$/.test(String(rrdId || '0')) ? String(rrdId || '0') : '0'
+  return `{"dateFrom":${JSON.stringify(period.dateFrom)},"dateTo":${JSON.stringify(period.dateTo)},"limit":${FINANCE_PAGE_LIMIT},"rrdId":${cursor},"period":"daily"}`
+}
+
+async function financeCompactSnapshot(connectionId, stage, syncId, period, {
+  complete = false,
+  cursor = '0',
+  persistedCount = 0,
+  tokenInfo = null,
+  pageNumber = 0,
+  balance = null,
+} = {}) {
+  const compactRows = await aggregatePersistedHeavyRows(connectionId,stage,syncId)
+  const totals = stage === 'finance'
+    ? summarizeFinanceRows(compactRows)
+    : { acquiring:Math.round(compactRows.reduce((sum,row)=>sum+Math.abs(fieldNumber(row,['acquiringFee'],0)),0)*100)/100 }
+  const value = {
+    rows:compactRows,totalRows:Number(persistedCount || 0),totals,period,balance:stage === 'finance' ? balance : null,complete:Boolean(complete),
+    lastRrdId:String(cursor || '0'),rawRowCount:Number(persistedCount || 0),storage:'wb_stream_items',
+    progress:financeProgressCopy({ tokenInfo,rows:persistedCount,page:pageNumber,nextAllowedAt:null }),
+  }
+  await saveStreamData(pool,{ connectionId,stream:stage,payload:value,metadata:{period,syncId,cursor:String(cursor || '0'),complete:Boolean(complete)},source:complete?'sync':'partial-sync' })
+  return value
+}
+
+async function deriveAcquiringSnapshot(connectionId, period) {
+  const params=[connectionId,period.dateFrom,period.dateTo]
+  const result=await pool.query(`
+    SELECT source_report_id AS "reportId",source_rrd_id AS "rrdId",operation_date AS "operationDate",
+      nm_id AS "nmId",vendor_code AS "vendorCode",srid,fulfillment_mode AS "fulfillmentMode",
+      payment_processing AS "paymentProcessing",currency,operation_group AS "operationGroup",
+      detail_only AS "detailOnly",amount::float8 AS amount
+    FROM wb_finance_ledger
+    WHERE connection_id=$1 AND source_stream='finance' AND operation_group='acquiring'
+      AND operation_date >= $2::date AND operation_date <= $3::date
+    ORDER BY operation_date DESC NULLS LAST,updated_at DESC
+  `,params)
+  const derived=deriveAcquiringFromLedgerRows(result.rows)
+  const total=derived.reduce((sum,row)=>sum+Math.abs(Number(row.acquiringFee||0)),0)
+  const preview=derived.slice(0,500)
+  return {
+    rows:preview,totalRows:derived.length,totals:{acquiring:Math.round(total*100)/100},period,complete:true,
+    derivedFrom:'finance',vatBreakdownAvailable:false,
+    note:'Эквайринг подтверждён строками детализации реализации. Разбивка НДС появится после подключения Персонального/Сервисного метода отчётов эквайринга.',
+  }
+}
+
+async function advancePagedFinanceTask(stage, connectionId, token, state, { deadlineAt = 0, tokenInfo = null } = {}) {
   const isFinance = stage === 'finance'
   const period = state?.metadata?.period || reportPeriod(30)
+
+  if (!isFinance && !isPrivilegedFinanceToken(tokenInfo)) {
+    const [financeStored,financeState] = await Promise.all([
+      pool.query('SELECT payload,row_count FROM wb_stream_data WHERE connection_id=$1 AND stream=\'finance\'',[connectionId]),
+      pool.query('SELECT status,last_count,next_allowed_at FROM wb_sync_states WHERE connection_id=$1 AND stage=\'finance\'',[connectionId]),
+    ])
+    const financePayload=financeStored.rows[0]?.payload || null
+    const financeComplete=financePayload?.complete === true || financeState.rows[0]?.status === 'success'
+    const value=await deriveAcquiringSnapshot(connectionId,period)
+    if (!financeComplete) {
+      value.complete=false
+      value.note='Эквайринг будет рассчитан из финансовой детализации после завершения потока «Финансы WB». Ноль пока не подтверждён.'
+      const nextAllowedAt=financeState.rows[0]?.next_allowed_at || new Date(Date.now()+15*60*1000).toISOString()
+      await saveStreamData(pool,{connectionId,stream:'acquiring',payload:value,metadata:{period,derivedFrom:'finance',complete:false,nextAllowedAt},source:'partial-derived-finance'})
+      return {pending:true,partialValue:value,nextAllowedAt,metadata:{period,persistedCount:value.totalRows,pageNumber:0,derivedFrom:'finance',waitingForFinance:true}}
+    }
+    await saveStreamData(pool,{connectionId,stream:'acquiring',payload:value,metadata:{period,derivedFrom:'finance',complete:true},source:'derived-finance'})
+    return {
+      pending:false,value,
+      validation:{derivedFrom:'finance',rows:value.totalRows,period,vatBreakdownAvailable:false,accessConfirmed:true},
+      endpoint:'derived://finance-ledger/acquiring',
+    }
+  }
+
   const syncId = String(state?.metadata?.syncId || crypto.randomUUID())
-  const rrdId = Number(state?.metadata?.rrdId || 0)
+  const rrdId = String(state?.metadata?.rrdId || '0')
   const pageNumber = Number(state?.metadata?.pageNumber || 0)
   const endpoint = isFinance
     ? 'https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed'
     : 'https://finance-api.wildberries.ru/api/finance/v1/acquiring/detailed'
   const payload = await wbFetch(endpoint, token, {
     method:'POST',
-    body:JSON.stringify({ dateFrom:period.dateFrom, dateTo:period.dateTo, limit:HEAVY_PAGE_LIMIT, rrdId, period:'daily' }),
+    body:financeRequestBody(period,rrdId),
     headers:{ 'Content-Type':'application/json' },
     label:isFinance ? 'Финансовая детализация WB' : 'Эквайринг WB',
-    timeoutMs:60000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+    timeoutMs:90000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+    preserveInt64Fields:['rrdId','reportId','giId','shkId'],
   })
   const incoming = Array.isArray(payload) ? payload : []
   await saveStreamItemBatch(pool, {
@@ -3147,18 +3244,27 @@ async function advancePagedFinanceTask(stage, connectionId, token, state, { dead
     connectionId,stream:stage,rows:incoming,
     keyOf:(row,index)=>rawFinanceRowKey(stage,row,index),batchSize:HEAVY_DB_BATCH_SIZE,
   })
-  const nextRrdId = Number(incoming.at(-1)?.rrdId ?? incoming.at(-1)?.rrd_id ?? 0)
-  const hasMore = incoming.length >= HEAVY_PAGE_LIMIT && nextRrdId && nextRrdId !== rrdId
+  const continuation=financeContinuation({incomingRows:incoming,previousRrdId:rrdId})
   const persistedCount = await countStreamItems(pool,{connectionId,stream:stage,syncId})
-  if (hasMore) {
+  if (!continuation.complete) {
+    const nextAllowedAt=new Date(Date.now()+financePageCooldownMs(tokenInfo)).toISOString()
+    const partialValue=await financeCompactSnapshot(connectionId,stage,syncId,period,{
+      complete:false,cursor:continuation.nextRrdId,persistedCount,tokenInfo,pageNumber:pageNumber+1,
+    })
+    partialValue.progress.nextAllowedAt=nextAllowedAt
+    await saveStreamData(pool,{connectionId,stream:stage,payload:partialValue,metadata:{period,syncId,cursor:continuation.nextRrdId,complete:false,nextAllowedAt},source:'partial-sync'})
     return {
       pending:true,
-      nextAllowedAt:new Date(Date.now()+HEAVY_STAGE_COOLDOWN_MS).toISOString(),
-      metadata:{ period,syncId,rrdId:nextRrdId,pageNumber:pageNumber+1,persistedCount,lastPageRows:incoming.length },
+      nextAllowedAt,
+      partialValue,
+      metadata:{
+        period,syncId,rrdId:continuation.nextRrdId,pageNumber:pageNumber+1,persistedCount,lastPageRows:incoming.length,
+        accessConfirmed:true,cursorReason:continuation.reason,
+        ...financeProgressCopy({tokenInfo,rows:persistedCount,page:pageNumber+1,nextAllowedAt}),
+      },
     }
   }
-  const compactRows = await aggregatePersistedHeavyRows(connectionId,stage,syncId)
-  await finalizeStreamItems(pool,{connectionId,stream:stage,syncId})
+
   let balance = state?.metadata?.balance || null
   if (isFinance) {
     try {
@@ -3167,17 +3273,21 @@ async function advancePagedFinanceTask(stage, connectionId, token, state, { dead
       })
     } catch (error) { console.warn('WB balance skipped:',error.message) }
   }
-  const totals = isFinance
-    ? summarizeFinanceRows(compactRows)
-    : { acquiring:Math.round(compactRows.reduce((sum,row)=>sum+Math.abs(fieldNumber(row,['acquiringFee'],0)),0)*100)/100 }
+  const value=await financeCompactSnapshot(connectionId,stage,syncId,period,{
+    complete:true,cursor:continuation.nextRrdId,persistedCount,tokenInfo,pageNumber:pageNumber+1,balance,
+  })
+  await finalizeStreamItems(pool,{connectionId,stream:stage,syncId})
   return {
     pending:false,
-    value:{ rows:compactRows,totals,period,balance:isFinance?balance:null,complete:true,lastRrdId:nextRrdId||rrdId||null,rawRowCount:persistedCount,storage:'wb_stream_items' },
-    validation:{ incomingRows:incoming.length,persistedRows:persistedCount,compactRows:compactRows.length,period,pages:pageNumber+1,memorySafe:true },
+    value,
+    validation:{
+      incomingRows:incoming.length,persistedRows:persistedCount,compactRows:value.rows.length,period,pages:pageNumber+1,
+      memorySafe:true,cursorComplete:true,cursorReason:continuation.reason,accessConfirmed:true,
+      tokenMode:isPrivilegedFinanceToken(tokenInfo)?'privileged':'base',
+    },
     endpoint,
   }
 }
-
 
 const FINANCE_REPORT_LISTS = Object.freeze({
   financeReports:{
@@ -3512,13 +3622,54 @@ const OFFSET_REPORTS = Object.freeze({
   },
 })
 
-async function advanceOffsetReportTask(stage, connectionId, token, state, { deadlineAt = 0 } = {}) {
+async function documentStreamSnapshot(connectionId, syncId, period, categories, {
+  complete = false,
+  pages = 0,
+  nextAllowedAt = null,
+} = {}) {
+  const allRows = []
+  let afterKey = ''
+  while (allRows.length < 10000) {
+    const page = await loadStreamItemPage(pool,{connectionId,stream:'documents',syncId,afterKey,limit:1000})
+    if (!page.length) break
+    allRows.push(...page.map(item=>item.payload))
+    afterKey = page.at(-1).row_key
+    if (page.length < 1000) break
+  }
+  const totalRows = await countStreamItems(pool,{connectionId,stream:'documents',syncId})
+  const rows = allRows.slice(0,100)
+  const summary = summarizeDocuments(allRows,categories)
+  summary.total = totalRows
+  const value = compactExtendedValue({
+    rows,totalRows,syncId,period,
+    extra:{complete:Boolean(complete),pages,categories,summary,nextAllowedAt,coverage:{partial:!complete,summaryCapped:totalRows>allRows.length}},
+  })
+  await saveStreamData(pool,{
+    connectionId,stream:'documents',payload:value,
+    metadata:{period,syncId,complete:Boolean(complete),pages,categories,nextAllowedAt},
+    source:complete?'sync':'partial-sync',
+  })
+  return value
+}
+
+async function advanceOffsetReportTask(stage, connectionId, token, state, { deadlineAt = 0, tokenInfo = null } = {}) {
   const definition = OFFSET_REPORTS[stage]
   if (!definition) throw new Error(`Неизвестный постраничный поток WB: ${stage}`)
   const period = state?.metadata?.period || reportPeriod(stage === 'documents' ? 365 : (definition.periodDays || 30))
   const syncId = String(state?.metadata?.syncId || crypto.randomUUID())
   const offset = Math.max(0, Number(state?.metadata?.offset || 0))
   const pageNumber = Math.max(0, Number(state?.metadata?.pageNumber || 0))
+  let categories = Array.isArray(state?.metadata?.categories) ? state.metadata.categories : []
+  if (stage === 'documents' && !categories.length) {
+    try {
+      const categoryPayload = await wbFetch('https://documents-api.wildberries.ru/api/v1/documents/categories?locale=ru', token, {
+        label:'Категории документов WB',timeoutMs:30000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+      })
+      categories = normalizeDocumentCategories(categoryPayload)
+    } catch (error) {
+      console.warn('WB document categories skipped:',error.message)
+    }
+  }
   const params = new URLSearchParams()
   if (stage === 'documents') {
     params.set('locale','ru')
@@ -3540,7 +3691,11 @@ async function advanceOffsetReportTask(stage, connectionId, token, state, { dead
   const payload = await wbFetch(endpoint, token, {
     label:definition.label, timeoutMs:45000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
   })
-  const rows = extractExtendedRows(payload, definition.preferredKeys)
+  const rawRows = extractExtendedRows(payload, definition.preferredKeys)
+  const categoryMap = Object.fromEntries(categories.map(item=>[String(item.name),String(item.title || item.name)]))
+  const rows = stage === 'documents'
+    ? rawRows.map(row=>normalizeDocumentRow(row,categoryMap))
+    : rawRows
   await saveStreamItemBatch(pool, {
     connectionId,stream:stage,syncId,rows,
     keyOf:(row,index)=>extendedRowKey(stage,row,offset+index),batchSize:HEAVY_DB_BATCH_SIZE,
@@ -3555,11 +3710,26 @@ async function advanceOffsetReportTask(stage, connectionId, token, state, { dead
   const declaredTotal = Number(payload?.data?.total ?? payload?.total ?? 0)
   const hasMore = declaredTotal > 0 ? offset + rows.length < declaredTotal : rows.length >= definition.pageSize
   if (hasMore && rows.length) {
-    const waitMs = stage === 'documents' ? 11000 : 65000
+    const waitMs = stage === 'documents' ? documentsPageCooldownMs(tokenInfo) : HEAVY_STAGE_COOLDOWN_MS
+    const nextAllowedAt = new Date(Date.now()+waitMs).toISOString()
+    const partialValue = stage === 'documents'
+      ? await documentStreamSnapshot(connectionId,syncId,period,categories,{complete:false,pages:pageNumber+1,nextAllowedAt})
+      : compactExtendedValue({rows,totalRows:persistedCount,syncId,period,extra:{complete:false,pages:pageNumber+1,nextAllowedAt}})
+    if (stage !== 'documents') {
+      await saveStreamData(pool,{connectionId,stream:stage,payload:partialValue,metadata:{period,syncId,complete:false,pages:pageNumber+1,nextAllowedAt},source:'partial-sync'})
+    }
     return {
-      pending:true,
-      nextAllowedAt:new Date(Date.now()+waitMs).toISOString(),
-      metadata:{ period,syncId,offset:offset+rows.length,pageNumber:pageNumber+1,persistedCount,lastPageRows:rows.length,declaredTotal:declaredTotal||null },
+      pending:true,partialValue,nextAllowedAt,
+      metadata:{ period,syncId,offset:offset+rows.length,pageNumber:pageNumber+1,persistedCount,lastPageRows:rows.length,declaredTotal:declaredTotal||null,categories },
+    }
+  }
+  if (stage === 'documents') {
+    await finalizeStreamItems(pool,{connectionId,stream:stage,syncId})
+    const value = await documentStreamSnapshot(connectionId,syncId,period,categories,{complete:true,pages:pageNumber+1,nextAllowedAt:null})
+    return {
+      pending:false,value,
+      validation:{incomingRows:rows.length,persistedRows:persistedCount,pages:pageNumber+1,period,categories:categories.length,memorySafe:true,accessConfirmed:true},
+      endpoint,
     }
   }
   await finalizeStreamItems(pool,{connectionId,stream:stage,syncId})
@@ -3570,7 +3740,6 @@ async function advanceOffsetReportTask(stage, connectionId, token, state, { dead
     endpoint,
   }
 }
-
 
 const RETENTION_REPORTS = Object.freeze({
   antifraudRetention:{
@@ -3649,6 +3818,41 @@ async function loadTariffs(token, { deadlineAt = 0 } = {}) {
     value:compactExtendedValue({rows:commissionRows,totalRows,extra:{date,commission:result.commission,box:result.box,pallet:result.pallet,returns:result.returns}}),
     rawPayload:result,validation:{date,totalRows,commissionRows:commissionRows.length},endpoint:Object.values(endpoints).join(' + '),
   }
+}
+
+async function loadJamSubscription(token, { deadlineAt = 0 } = {}) {
+  const endpoint = 'https://common-api.wildberries.ru/api/common/v1/subscriptions'
+  const payload = await wbFetch(endpoint, token, {
+    label:'Статус подписок WB',timeoutMs:30000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
+  })
+  const sourceRows = Array.isArray(payload)
+    ? payload
+    : extractExtendedRows(payload,['subscriptions','items','data'])
+  const rows = sourceRows.map((row,index) => {
+    const source = JSON.stringify(row).toLowerCase()
+    const name = String(row?.name || row?.title || row?.subscriptionName || row?.subscription || row?.service || '').trim()
+    const active = Boolean(row?.active ?? row?.isActive ?? row?.enabled ?? row?.status === 'active')
+    const isJam = /(?:^|[^a-zа-яё])(джем|jam)(?:[^a-zа-яё]|$)/i.test(`${name} ${source}`)
+    return {
+      ...row,
+      id:String(row?.id ?? row?.subscriptionId ?? row?.serviceId ?? index),
+      name:name || (isJam ? 'Подписка «Джем»' : 'Подписка WB'),
+      active,
+      isJam,
+      startedAt:row?.startedAt || row?.startDate || row?.dateFrom || null,
+      expiresAt:row?.expiresAt || row?.endDate || row?.dateTo || null,
+    }
+  })
+  const jam = rows.find(row => row.isJam) || null
+  const value = compactExtendedValue({
+    rows,totalRows:rows.length,
+    extra:{
+      checkedAt:new Date().toISOString(),
+      jam:jam ? {found:true,active:Boolean(jam.active),name:jam.name,startedAt:jam.startedAt,expiresAt:jam.expiresAt} : {found:false,active:false},
+      note:'Статус подписки подтверждает доступ к сервису, но не является подтверждением денежного списания. Списание подтверждается только финансовой операцией или документом WB.',
+    },
+  })
+  return { value,rawPayload:payload,validation:{rows:rows.length,jamFound:Boolean(jam),jamActive:Boolean(jam?.active)},endpoint }
 }
 
 async function loadFunnel(token, { deadlineAt = 0 } = {}) {
@@ -4153,6 +4357,7 @@ async function advanceChatsTask(connectionId, token, state, { deadlineAt = 0, to
 function extendedDateExpression(stream) {
   if (stream === 'stockHistory') return `NULLIF(SUBSTRING(COALESCE(payload->>'date',payload->>'dt',payload->>'reportDate') FROM 1 FOR 10),'')`
   if (stream === 'reviews' || stream === 'questions') return `NULLIF(SUBSTRING(COALESCE(payload->>'createdDate',payload->>'createdAt',payload->>'date') FROM 1 FOR 10),'')`
+  if (stream === 'documents') return `NULLIF(SUBSTRING(COALESCE(payload->>'createdAt',payload->>'creationTime',payload->>'date',payload->>'periodFrom') FROM 1 FOR 10),'')`
   if (stream === 'chats') {
     const raw = `COALESCE(payload->>'addTimestamp',payload->>'createdAt',payload->>'createdDate',payload->>'timestamp',payload->>'date',payload#>>'{lastMessage,addTimestamp}',payload#>>'{lastMessage,createdAt}',payload#>>'{message,createdAt}')`
     return `(CASE WHEN ${raw} ~ '^[0-9]{10}$' THEN TO_CHAR(TO_TIMESTAMP((${raw})::numeric),'YYYY-MM-DD') WHEN ${raw} ~ '^[0-9]{13}$' THEN TO_CHAR(TO_TIMESTAMP((${raw})::numeric/1000),'YYYY-MM-DD') ELSE NULLIF(SUBSTRING(${raw} FROM 1 FOR 10),'') END)`
@@ -4369,13 +4574,13 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       }
       value=result.value; meta=result.validation; snapshot={endpoint:result.endpoint,validation:result.validation}
     } else if (stage === 'finance' || stage === 'acquiring') {
-      const result = await advancePagedFinanceTask(stage,connection.id,selected.token,state,{ deadlineAt })
+      const result = await advancePagedFinanceTask(stage,connection.id,selected.token,state,{ deadlineAt,tokenInfo:selected.info })
       if (result.pending) {
         state = await updateSyncState(connection.id,stage,{
-          status:'queued',lastAttemptAt:new Date().toISOString(),nextAllowedAt:result.nextAllowedAt,lastError:null,taskId:null,
+          status:'queued',lastAttemptAt:new Date().toISOString(),nextAllowedAt:result.nextAllowedAt,lastError:null,lastCount:Number(result.metadata.persistedCount||0),taskId:null,
           metadata:{ ...result.metadata,tokenId:selected.row.id,tokenLabel:selected.row.label,primary:Boolean(selected.row.is_primary),memorySafe:true },
         })
-        return { stage,status:'queued',value:fallback,warning:`${definition.label}: сохранена страница ${Number(result.metadata.pageNumber || 0)} (${Number(result.metadata.persistedCount || 0)} строк). Продолжение поставлено в очередь.`,state }
+        return { stage,status:'queued',value:result.partialValue || fallback,warning:`${definition.label}: сохранена страница ${Number(result.metadata.pageNumber || 0)} (${Number(result.metadata.persistedCount || 0)} строк). Продолжение поставлено в очередь.`,state }
       }
       value = result.value
       meta = { ...result.validation,totals:value.totals,balance:value.balance,memorySafe:true }
@@ -4393,13 +4598,13 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       meta=result.validation
       snapshot={endpoint:result.endpoint,validation:result.validation}
     } else if (stage === 'measurementPenalties' || stage === 'deductionsReport' || stage === 'warehouseMeasurements' || stage === 'documents') {
-      const result = await advanceOffsetReportTask(stage,connection.id,selected.token,state,{deadlineAt})
+      const result = await advanceOffsetReportTask(stage,connection.id,selected.token,state,{deadlineAt,tokenInfo:selected.info})
       if (result.pending) {
         state = await updateSyncState(connection.id,stage,{
-          status:'queued',lastAttemptAt:new Date().toISOString(),nextAllowedAt:result.nextAllowedAt,lastError:null,taskId:null,
+          status:'queued',lastAttemptAt:new Date().toISOString(),nextAllowedAt:result.nextAllowedAt,lastError:null,lastCount:Number(result.metadata.persistedCount||0),taskId:null,
           metadata:{...result.metadata,tokenId:selected.row.id,tokenLabel:selected.row.label,memorySafe:true},
         })
-        return {stage,status:'queued',value:fallback,warning:`${definition.label}: сохранено ${Number(result.metadata.persistedCount||0)} строк, продолжение в очереди.`,state}
+        return {stage,status:'queued',value:result.partialValue || fallback,warning:`${definition.label}: сохранено ${Number(result.metadata.persistedCount||0)} строк, продолжение в очереди.`,state}
       }
       value=result.value
       meta=result.validation
@@ -4412,6 +4617,9 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       value=loaded.value; meta=loaded.validation; snapshot=loaded
     } else if (stage === 'tariffs') {
       const loaded=await loadTariffs(selected.token,{deadlineAt})
+      value=loaded.value; meta=loaded.validation; snapshot=loaded
+    } else if (stage === 'jamSubscription') {
+      const loaded=await loadJamSubscription(selected.token,{deadlineAt})
       value=loaded.value; meta=loaded.validation; snapshot=loaded
     } else if (stage === 'funnel') {
       const loaded=await loadFunnel(selected.token,{deadlineAt})
@@ -4756,7 +4964,7 @@ app.post('/api/wb/tokens/:tokenId/primary', authRequired, async (req, res) => {
     if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
     const tokenResult = await pool.query(`SELECT * FROM wb_tokens WHERE id=$1 AND user_id=$2 AND connection_id=$3 AND status='active'`, [req.params.tokenId, req.auth.sub, connection.id])
     if (!tokenResult.rows[0]) return res.status(404).json({ error: 'API-токен не найден' })
-    if (isServiceTokenRow(tokenResult.rows[0])) return res.status(409).json({ error:'Сервисный токен закреплён только за финансовыми сводками и не может быть основным токеном кабинета.' })
+    if (isServiceTokenRow(tokenResult.rows[0])) return res.status(409).json({ error:'Сервисный токен закреплён за расширенными финансовыми сводками и статусом «Джем» и не может быть основным токеном кабинета.' })
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
@@ -4794,6 +5002,31 @@ app.get('/api/wb/status/:id', authRequired, async (req, res) => {
 })
 
 
+app.get('/api/wb/documents/:serviceName/download', authRequired, async (req, res) => {
+  try {
+    const connection=await getConnection(req.auth.sub,String(req.query.connectionId||'')||null)
+    if (!connection) return res.status(404).json({error:'Подключение не найдено'})
+    const serviceName=String(req.params.serviceName||'').trim()
+    const extension=String(req.query.extension||'').trim().replace(/^\./,'').toLowerCase()
+    if (!serviceName || serviceName.length>240) return res.status(400).json({error:'Не указан идентификатор документа WB'})
+    if (!/^[a-z0-9]{1,12}$/.test(extension)) return res.status(400).json({error:'Недопустимое расширение документа'})
+    const tokens=await getWbTokens(req.auth.sub,connection.id)
+    const selected=chooseTokenForStage(tokens,'documents')
+    if (!selected) return res.status(403).json({error:'Нужен API-токен WB с категорией «Документы»'})
+    const params=new URLSearchParams({serviceName,extension})
+    const endpoint=`https://documents-api.wildberries.ru/api/v1/documents/download?${params.toString()}`
+    const buffer=await wbFetchBuffer(endpoint,selected.token,{label:'Скачивание документа WB',timeoutMs:90000})
+    const contentTypes={pdf:'application/pdf',zip:'application/zip',xlsx:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',xls:'application/vnd.ms-excel',csv:'text/csv; charset=utf-8',xml:'application/xml',json:'application/json'}
+    const safeName=serviceName.replace(/[^a-zA-Z0-9а-яА-ЯёЁ._-]+/g,'_').slice(0,120) || 'wildberries-document'
+    res.setHeader('Content-Type',contentTypes[extension] || 'application/octet-stream')
+    res.setHeader('Content-Disposition',`attachment; filename*=UTF-8''${encodeURIComponent(`${safeName}.${extension}`)}`)
+    res.setHeader('Cache-Control','private, no-store')
+    res.send(buffer)
+  } catch (error) {
+    res.status(error.status||502).json({error:error.message,code:error.code||null,nextAllowedAt:error.nextAllowedAt||null})
+  }
+})
+
 app.get('/api/wb/extended/:stream', authRequired, async (req, res) => {
   try {
     const stream=String(req.params.stream||'')
@@ -4810,7 +5043,7 @@ app.get('/api/wb/extended/:stream', authRequired, async (req, res) => {
       rating:String(req.query.rating||'all'),
       warehouse:String(req.query.warehouse||''),
     }
-    if (['financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','documents','searchQueries','stockHistory','reviews','questions','chats'].includes(stream)) {
+    if (['financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','documents','jamSubscription','searchQueries','stockHistory','reviews','questions','chats'].includes(stream)) {
       const [stateResult,storedResult]=await Promise.all([
         pool.query('SELECT * FROM wb_sync_states WHERE connection_id=$1 AND stage=$2',[connection.id,stream]),
         pool.query('SELECT payload,row_count,metadata,updated_at FROM wb_stream_data WHERE connection_id=$1 AND stream=$2',[connection.id,stream]),
@@ -4920,7 +5153,7 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
   const requestedStages = allRequestedStages.filter(stage => !backgroundArchiveStages.includes(stage))
   const requestedRange = analyticsPeriodRange(req.body?.period || {})
   if (requestedRange) {
-    for (const stage of allRequestedStages.filter(item => ['advertising','searchQueries','stockHistory'].includes(item))) {
+    for (const stage of allRequestedStages.filter(item => ['advertising','searchQueries','stockHistory','finance','acquiring','documents'].includes(item))) {
       const period = syncPeriodForStage(stage,requestedRange)
       await updateSyncState(connection.id,stage,{
         status:'queued',lastAttemptAt:null,nextAllowedAt:null,lastError:null,lastCount:0,taskId:null,
@@ -5345,11 +5578,11 @@ app.get('/api/wb/finance-ledger/:id', authRequired, async (req, res) => {
     })
     const states = await getSyncStates(connection.id)
     const stateMap = Object.fromEntries(states.map(item => [item.stage,publicSyncState(item)]))
-    const financeReady = Boolean(stateMap.finance?.lastSuccessAt && Number(stateMap.finance?.lastCount || 0) > 0)
-    const supportingStreams = ['finance','financeReports','acquiringReports','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention']
+    const supportingStreams = ['finance','financeReports','acquiringReports','documents','jamSubscription','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention']
     const streamRows = await pool.query(`SELECT stream,payload,row_count,updated_at FROM wb_stream_data WHERE connection_id=$1 AND stream=ANY($2::text[])`,[connection.id,supportingStreams])
     const payloadByStream = Object.fromEntries(streamRows.rows.map(row => [row.stream,{payload:row.payload||{},rowCount:Number(row.row_count||0),updatedAt:row.updated_at||null}]))
     const financePayload = payloadByStream.finance?.payload || {}
+    const financeReady = Boolean(Number(stateMap.finance?.lastCount || 0) > 0 || Number(payloadByStream.finance?.rowCount || 0) > 0 || Number(financePayload.rawRowCount || 0) > 0)
     const rowOverlapsPeriod = row => {
       const rowFrom=dateKey(row?.dateFrom || row?.from || row?.periodFrom || row?.operationDate || row?.rrDate || row?.rr_dt || row?.dtBonus || row?.dt || row?.date || row?.createdAt || row?.createDate)
       const rowTo=dateKey(row?.dateTo || row?.to || row?.periodTo || rowFrom)
@@ -5357,6 +5590,24 @@ app.get('/api/wb/finance-ledger/:id', authRequired, async (req, res) => {
       return (rowFrom || rowTo) <= selectedTo && (rowTo || rowFrom) >= selectedFrom
     }
     const compactRows = stream => (Array.isArray(payloadByStream[stream]?.payload?.rows) ? payloadByStream[stream].payload.rows : []).filter(rowOverlapsPeriod)
+    const jamLedgerResult = await pool.query(`
+      SELECT source_report_id AS "reportId",source_rrd_id AS "rrdId",operation_date AS "operationDate",
+        operation_code AS "operationCode",operation_name AS "operationName",amount::float8 AS amount,currency
+      FROM wb_finance_ledger
+      WHERE connection_id=$1 AND operation_code='jam_subscription'
+        AND operation_date >= $2::date AND operation_date <= $3::date
+      ORDER BY operation_date DESC,updated_at DESC LIMIT 100
+    `,[connection.id,selectedFrom,selectedTo])
+    const jamFinance = jamEvidenceFromFinanceRows(jamLedgerResult.rows)
+    const jamDocumentResult = await pool.query(`
+      SELECT DISTINCT ON (row_key) payload
+      FROM wb_stream_items
+      WHERE connection_id=$1 AND stream='documents'
+        AND (payload::text ILIKE '%джем%' OR payload::text ILIKE '%jam%')
+      ORDER BY row_key,updated_at DESC LIMIT 100
+    `,[connection.id])
+    const jamDocuments = jamDocumentResult.rows.map(item=>item.payload || {})
+    const jamSubscription = payloadByStream.jamSubscription?.payload || null
     res.json({
       period:{from:selectedFrom,to:selectedTo,days:requestedRange?.days || 30},
       ...result,
@@ -5367,6 +5618,23 @@ app.get('/api/wb/finance-ledger/:id', authRequired, async (req, res) => {
       reports:{
         sales:{ rows:compactRows('financeReports'),totalRows:compactRows('financeReports').length,period:{from:selectedFrom,to:selectedTo},updatedAt:payloadByStream.financeReports?.updatedAt || null },
         acquiring:{ rows:compactRows('acquiringReports'),totalRows:compactRows('acquiringReports').length,period:{from:selectedFrom,to:selectedTo},updatedAt:payloadByStream.acquiringReports?.updatedAt || null },
+      },
+      jam:{
+        financial:jamFinance,
+        subscription:jamSubscription?.jam || null,
+        subscriptionCheckedAt:jamSubscription?.checkedAt || payloadByStream.jamSubscription?.updatedAt || null,
+        documents:{rows:jamDocuments,totalRows:jamDocuments.length,updatedAt:payloadByStream.documents?.updatedAt || null},
+        confirmed:Boolean(jamFinance.confirmed || jamDocuments.length),
+        note:jamFinance.confirmed || jamDocuments.length
+          ? 'Списание или документ «Джем» подтверждены данными WB.'
+          : 'Статус подписки сам по себе не считается денежным списанием. Сумма появится только после подтверждения финансовой операцией или документом WB.',
+      },
+      documents:{
+        rows:compactRows('documents'),
+        totalRows:compactRows('documents').length,
+        summary:payloadByStream.documents?.payload?.summary || null,
+        complete:payloadByStream.documents?.payload?.complete !== false,
+        updatedAt:payloadByStream.documents?.updatedAt || null,
       },
       riskDetails:{
         measurementPenalties:{rows:compactRows('measurementPenalties'),totalRows:compactRows('measurementPenalties').length,updatedAt:payloadByStream.measurementPenalties?.updatedAt || null},
@@ -5383,6 +5651,9 @@ app.get('/api/wb/finance-ledger/:id', authRequired, async (req, res) => {
         acceptance:stateMap.acceptance || null,
         financeReports:stateMap.financeReports || null,
         acquiringReports:stateMap.acquiringReports || null,
+        documents:stateMap.documents || null,
+        jamSubscription:stateMap.jamSubscription || null,
+        financePartial:financePayload.complete === false,
         measurementPenalties:stateMap.measurementPenalties || null,
         deductionsReport:stateMap.deductionsReport || null,
         warehouseMeasurements:stateMap.warehouseMeasurements || null,
@@ -5390,7 +5661,7 @@ app.get('/api/wb/finance-ledger/:id', authRequired, async (req, res) => {
         labelingRetention:stateMap.labelingRetention || null,
         waitingForFinance:!financeReady,
       },
-      note:'Сумма «к перечислению» берётся из поля forPay. Сводки отчётов используются для сверки, а отчёты по габаритам, подменам, самовыкупам и маркировке — для объяснения причин. Эти суммы не вычитаются повторно из P&L.',
+      note:'Сумма «к перечислению» берётся из поля forPay. Базовый токен с категорией «Финансы» загружает детализацию реализации; расширенные сводки служат для сверки. Документы, списания «Джем», габариты, подмены, самовыкупы и маркировка показываются как подтверждающие источники и не вычитаются повторно из P&L.',
     })
   } catch (error) {
     console.warn('WB finance ledger failed:',error.message)

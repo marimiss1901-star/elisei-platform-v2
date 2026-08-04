@@ -373,6 +373,10 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [integrationDiagnostics, setIntegrationDiagnostics] = useState(null)
   const [financeLedger, setFinanceLedger] = useState(null)
   const [financeLedgerLoading, setFinanceLedgerLoading] = useState(false)
+  const [documentsData, setDocumentsData] = useState(null)
+  const [documentsLoading, setDocumentsLoading] = useState(false)
+  const [documentsCategory, setDocumentsCategory] = useState('Все')
+  const [documentDownloading, setDocumentDownloading] = useState('')
   const [financeTab, setFinanceTab] = useState('overview')
   const [financePage, setFinancePage] = useState(1)
   const [advertisingTab, setAdvertisingTab] = useState('overview')
@@ -401,6 +405,8 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     if (tab === 'fbo') return { mode:'FBO' }
     if (tab === 'penalties') return { group:'penalties,deductions' }
     if (tab === 'compensations') return { group:'compensations,adjustments' }
+    if (tab === 'subscriptions') return { group:'subscriptions' }
+    if (tab === 'promotionCharges') return { group:'advertising' }
     return {}
   }
 
@@ -421,6 +427,40 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       notify(error.message, 8000)
     } finally {
       setFinanceLedgerLoading(false)
+    }
+  }
+
+  const loadDocuments = async (connectionId = connection.connectionId) => {
+    if (!connectionId) return
+    setDocumentsLoading(true)
+    try {
+      const result = await wbApi.extended('documents',connectionId,{
+        from:analyticsPeriod.from,to:analyticsPeriod.to,query,limit:500,
+      })
+      setDocumentsData(result)
+    } catch (error) {
+      notify(error.message,8000)
+    } finally {
+      setDocumentsLoading(false)
+    }
+  }
+
+  const downloadWbDocument = async row => {
+    if (!connection.connectionId || !row?.serviceName || !row?.extension) return
+    const key=`${row.serviceName}.${row.extension}`
+    setDocumentDownloading(key)
+    try {
+      const result=await wbApi.downloadDocument(connection.connectionId,row.serviceName,row.extension)
+      const url=URL.createObjectURL(result.blob)
+      const anchor=document.createElement('a')
+      anchor.href=url
+      anchor.download=result.filename || `${row.serviceName}.${row.extension}`
+      anchor.click()
+      URL.revokeObjectURL(url)
+    } catch (error) {
+      notify(error.message,8000)
+    } finally {
+      setDocumentDownloading('')
     }
   }
 
@@ -601,7 +641,14 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     }, 280)
     return () => window.clearTimeout(timer)
   }, [active, connection.connected, connection.connectionId, financeTab, query, financePage, analyticsPeriod.from, analyticsPeriod.to,
-      (connection.syncStates || []).find(item => ['finance','acquiring','paidStorage','acceptance'].includes(item.stage))?.lastSuccessAt])
+      (connection.syncStates || []).filter(item => ['finance','acquiring','paidStorage','acceptance','documents','jamSubscription'].includes(item.stage)).map(item => `${item.stage}:${item.lastSuccessAt || item.nextAllowedAt || ''}`).join('|')])
+
+  useEffect(() => {
+    if (active !== 'Документы WB' || !connection.connected || !connection.connectionId) return undefined
+    const timer=window.setTimeout(()=>loadDocuments(connection.connectionId).catch(()=>{}),280)
+    return () => window.clearTimeout(timer)
+  }, [active,connection.connected,connection.connectionId,query,analyticsPeriod.from,analyticsPeriod.to,
+      (connection.syncStates || []).find(item => item.stage === 'documents')?.lastSuccessAt])
 
   useEffect(() => {
     if (active !== 'Реклама' || !connection.connected || !connection.connectionId) return undefined
@@ -618,7 +665,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
   const nav = [
     ['Главная', Home], ['Аналитика', BarChart3], ['Товары', PackageSearch], ['Остатки', Boxes], ['История остатков', Warehouse],
-    ['Финансы', WalletCards], ['Цены и акции', Tag], ['Реклама', Megaphone], ['Поисковые запросы', Search], ['Коммуникации', Star],
+    ['Финансы', WalletCards], ['Документы WB', FileText], ['Цены и акции', Tag], ['Реклама', Megaphone], ['Поисковые запросы', Search], ['Коммуникации', Star],
     ['Сезонность', CalendarDays], ['Отчёты', FileText], ['Импорт данных', Upload], ['AI CRM', UsersRound], ['Спросить ЭЛа', MessageCircle],
     ['Подключения', PlugZap], ['Синхронизации', RefreshCw], ['Настройки', Settings]
   ]
@@ -1421,24 +1468,28 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     const ledgerRows = Array.isArray(ledger.rows) ? ledger.rows : []
     const ledgerSummary = ledger.summary || {}
     const financeReady = Boolean(ledger.coverage?.financeReady || coreData?.availability?.finance)
+    const financePartial = Boolean(ledger.coverage?.financePartial)
+    const financeComplete = financeReady && !financePartial
     const tabs = [
       ['overview','Обзор'],['all','Все операции'],['products','По товарам'],['fbs','FBS'],['fbo','FBO'],
-      ['penalties','Удержания и штрафы'],['compensations','Компенсации'],['reports','Отчёты WB'],['dynamics','Динамика'],['risks','Причины удержаний'],['reconciliation','Сверка с WB'],
+      ['penalties','Удержания и штрафы'],['compensations','Компенсации'],['subscriptions','Подписки и Джем'],['promotionCharges','Списания рекламы'],['reports','Отчёты WB'],['dynamics','Динамика'],['risks','Причины удержаний'],['reconciliation','Сверка с WB'],
     ]
     const groupNames = {
       sales:'Продажи',settlement:'К перечислению',commission:'Комиссия WB',logistics:'Логистика',storage:'Хранение',
-      acceptance:'Приёмка',acquiring:'Эквайринг',penalties:'Штрафы',deductions:'Удержания',compensations:'Компенсации',adjustments:'Корректировки',
+      acceptance:'Приёмка',acquiring:'Эквайринг',penalties:'Штрафы',deductions:'Удержания',compensations:'Компенсации',adjustments:'Корректировки',subscriptions:'Подписки и тарифные опции',advertising:'Продвижение WB',
     }
-    const sourceNames = { finance:'Финансовая детализация',acquiring:'Отчёт эквайринга',paidStorage:'Отчёт хранения',acceptance:'Отчёт приёмки',measurementPenalties:'Габариты и коэффициенты',deductionsReport:'Подмены и вложения',antifraudRetention:'Самовыкупы',labelingRetention:'Маркировка' }
+    const sourceNames = { finance:'Финансовая детализация',acquiring:'Отчёт эквайринга',paidStorage:'Отчёт хранения',acceptance:'Отчёт приёмки',measurementPenalties:'Габариты и коэффициенты',deductionsReport:'Подмены и вложения',antifraudRetention:'Самовыкупы',labelingRetention:'Маркировка',documents:'Документы WB' }
     const productMap = new Map()
     periodFinanceRows.forEach(item => {
       if (item.nmID) productMap.set(`nm:${item.nmID}`,item)
       if (item.vendorCode) productMap.set(`vendor:${item.vendorCode}`,item)
     })
     const titleForLedger = row => productMap.get(`nm:${row.nmId}`)?.title || productMap.get(`vendor:${row.vendorCode}`)?.title || 'Финансовая операция'
-    const statusText = financeReady
-      ? `Финансовая детализация WB загружена. ${formatNumber(ledgerSummary.movements || 0)} движений за ${formatDate(analyticsPeriod.from)} — ${formatDate(analyticsPeriod.to)}.`
-      : 'Финансовый отчёт WB ещё не завершён. Нули не считаются подтверждёнными — показываем статус ожидания и уже сохранённые операции.'
+    const statusText = financeComplete
+      ? `Финансовая детализация WB завершена. ${formatNumber(ledgerSummary.movements || 0)} движений за ${formatDate(analyticsPeriod.from)} — ${formatDate(analyticsPeriod.to)}.`
+      : financeReady
+        ? `Финансовая детализация загружается частями. Уже подтверждено ${formatNumber(ledgerSummary.movements || 0)} движений; отсутствующие суммы до завершения не считаются нулём.`
+        : 'Финансовый отчёт WB ещё не начат или не сохранил первую страницу. Нули не считаются подтверждёнными.'
     const financeValue = value => financeReady || Number(value || 0) !== 0 ? formatMoney(value) : 'Ожидает WB'
     const reportNumber = (row, aliases = []) => {
       for (const key of aliases) {
@@ -1480,7 +1531,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     return <section className="app-page glass-panel">
       <div className="page-title"><span>Финансы / P&amp;L</span><h1>Все движения денег WB</h1><p>Продажи, перечисления, FBS/FBO-логистика, хранение, приёмка, эквайринг, штрафы, удержания, компенсации и корректировки — с привязкой к товару и источнику.</p></div>
       {renderSharedPeriodControls({ note:'Финансовый реестр, отчёты, динамика и P&L ограничиваются единым выбранным периодом. Поиск применяется на сервере ко всем операциям.' })}
-      <div className={`notice ${financeReady ? 'success' : 'warning'}`}><ShieldCheck size={20}/><div><strong>{financeReady ? 'Финансовые данные подтверждены WB' : 'Ожидает завершения «Финансы WB»'}</strong><p>{statusText}</p></div><button onClick={() => setActive('Синхронизации')}>Открыть статусы</button></div>
+      <div className={`notice ${financeComplete ? 'success' : 'warning'}`}><ShieldCheck size={20}/><div><strong>{financeComplete ? 'Финансовые данные подтверждены WB' : financeReady ? 'Финансовые данные загружены частично' : 'Ожидает «Финансы WB»'}</strong><p>{statusText}</p></div><button onClick={() => setActive('Синхронизации')}>Открыть статусы</button></div>
       <div className="finance-tabs">{tabs.map(([key,label]) => <button className={financeTab === key ? 'active' : ''} key={key} onClick={() => { setFinanceTab(key); setFinancePage(1) }}>{label}</button>)}</div>
 
       <div className="metrics-grid four finance-movement-metrics">
@@ -1489,6 +1540,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         <MetricCard label="Удержания и штрафы" value={financeValue(Number(ledgerSummary.penalties || 0)+Number(ledgerSummary.deductions || 0))} delta={`${formatNumber(ledgerSummary.movements || 0)} движений`} icon={AlertTriangle}/>
         <MetricCard label="Компенсации" value={financeValue(ledgerSummary.compensations)} delta={`FBS-логистика ${financeValue(ledgerSummary.fbsLogistics)}`} icon={TrendingUp}/>
       </div>
+      <div className={`finance-jam-strip ${ledger.jam?.confirmed ? 'confirmed' : ''}`}><CreditCard size={20}/><div><strong>{ledger.jam?.confirmed ? `Списание «Джем» подтверждено: ${formatMoney(ledger.jam?.financial?.amount || 0)}` : 'Списание «Джем» пока не подтверждено'}</strong><p>{ledger.jam?.note || 'ELISEI ищет подтверждение одновременно в финансовых операциях и документах WB. Один статус подписки не считается денежным списанием.'}</p></div><span>{ledger.jam?.subscription?.active ? 'Подписка активна' : ledger.coverage?.jamSubscription?.lastSuccessAt ? 'Статус проверен' : 'Статус ожидается'}</span></div>
 
       {financeTab === 'overview' && <>
         <div className="finance-layout">
@@ -1527,6 +1579,30 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       {financeTab === 'reconciliation' && <div className="reconciliation-layout"><div className="pnl-card"><h3>Сверка с отчётом WB</h3><div className="pnl-line"><span>Розничная сумма операций</span><strong>{financeValue(ledgerSummary.grossRevenue)}</strong></div><div className="pnl-line"><span>Расходные компоненты</span><strong>{financeValue(ledgerSummary.expenses)}</strong></div><div className="pnl-line"><span>Компенсации и доплаты</span><strong>{financeValue(ledgerSummary.compensations)}</strong></div><div className="pnl-line"><span>Расчёт по компонентам</span><strong>{financeValue(ledgerSummary.componentNet)}</strong></div><div className="pnl-line total"><span>WB: к перечислению продавцу</span><strong>{financeValue(ledgerSummary.sellerPayable)}</strong></div><div className={`pnl-margin ${Math.abs(Number(ledgerSummary.reconciliationDifference || 0)) > 1 ? 'warning' : ''}`}><span>Контрольная разница</span><strong>{financeValue(ledgerSummary.reconciliationDifference)}</strong></div><p className="settings-hint">Разница может включать специальные операции WB, скидочные механики и поля, которые не являются отдельным денежным удержанием. Все исходные операции остаются в реестре.</p></div><div className="settings-card"><h3>Покрытие источников</h3><div className="finance-sources-list">{(ledger.sources || []).map(item => <div key={item.stream}><span>{sourceNames[item.stream] || item.stream}</span><strong>{formatNumber(item.movements)} движений</strong><small>{item.updatedAt ? new Date(item.updatedAt).toLocaleString('ru-RU') : 'не загружено'}</small></div>)}</div></div></div>}
 
       {!['overview','products','reports','dynamics','risks','reconciliation'].includes(financeTab) && renderLedgerTable()}
+    </section>
+  }
+
+  const renderDocuments = () => {
+    const payload=documentsData?.payload || {}
+    const rows=Array.isArray(documentsData?.rows) ? documentsData.rows : (Array.isArray(payload.rows) ? payload.rows : [])
+    const state=documentsData?.state || connection.syncStates?.find(item=>item.stage === 'documents') || null
+    const summary=payload.summary || {total:documentsData?.total || rows.length,downloadable:rows.filter(row=>row.downloadable).length,categories:0,jamDocuments:0}
+    const categories=['Все',...new Set(rows.map(row=>row.category || row.categoryId || 'Без категории'))]
+    const visible=rows.filter(row=>documentsCategory === 'Все' || (row.category || row.categoryId || 'Без категории') === documentsCategory)
+    const complete=payload.complete !== false
+    const nextAttempt=state?.nextAllowedAt || payload.nextAllowedAt
+    return <section className="app-page glass-panel">
+      <div className="page-title"><span>Документы Wildberries</span><h1>Акты, отчёты и подтверждения списаний</h1><p>Категории документов, номера, периоды и безопасное скачивание. Документы «Джем» связываются с финансовым реестром только как подтверждающий источник.</p></div>
+      {renderSharedPeriodControls({note:'Список документов ограничивается единым периодом кабинета. Для Базового токена WB может разрешать продолжение списка только после суточной паузы.'})}
+      <div className={`notice ${state?.lastSuccessAt || Number(summary.total || 0) > 0 ? 'success' : 'warning'}`}><FileText size={20}/><div><strong>{Number(summary.total || 0) > 0 ? `Найдено документов: ${formatNumber(summary.total)}` : 'Документы пока не подтверждены'}</strong><p>{complete ? 'Проверенный список сохранён в ELISEI.' : `Список загружен частично${nextAttempt ? `; продолжение после ${new Date(nextAttempt).toLocaleString('ru-RU')}` : ''}. Уже сохранённые документы доступны.`}</p></div><button onClick={()=>syncConnection(connection.connectionId,['documents'],{period:analyticsPeriod})} disabled={syncing || (nextAttempt && new Date(nextAttempt).getTime()>Date.now())}>{syncing?'Загрузка':'Обновить документы'}</button></div>
+      <div className="metrics-grid four finance-movement-metrics">
+        <MetricCard label="Всего документов" value={formatNumber(summary.total || 0)} delta={complete?'покрытие завершено':'загрузка продолжается'} icon={FileText}/>
+        <MetricCard label="Можно скачать" value={formatNumber(summary.downloadable || 0)} delta="через защищённый backend" icon={Download}/>
+        <MetricCard label="Категории" value={formatNumber(summary.categories || categories.length-1)} delta={payload.categories?.length ? 'справочник WB загружен' : 'по найденным документам'} icon={Tag}/>
+        <MetricCard label="Связано с Джем" value={state?.lastSuccessAt ? formatNumber(summary.jamDocuments || 0) : 'Ожидает WB'} delta="не считается списанием без финансового факта" icon={CreditCard}/>
+      </div>
+      <div className="documents-toolbar"><label><Search size={16}/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder="Название, номер, категория или период"/></label><select value={documentsCategory} onChange={event=>setDocumentsCategory(event.target.value)}>{categories.map(category=><option key={category}>{category}</option>)}</select><span>{formatNumber(visible.length)} показано</span></div>
+      {documentsLoading ? <div className="finance-ledger-empty"><RefreshCw className="spin" size={22}/> Загружаю документы…</div> : visible.length ? <div className="data-table documents-table"><div className="data-row head documents-row"><span>Дата</span><span>Категория / документ</span><span>Номер и период</span><span>Формат</span><span>Действие</span></div>{visible.map((row,index)=>{ const key=`${row.serviceName || index}.${row.extension || ''}`; return <div className="data-row documents-row" key={key}><span>{formatDate(row.createdAt || row.date)}</span><span><strong>{row.category || 'Документ WB'}</strong><small>{row.title || row.name || row.serviceName || '—'}{row.isJam ? ' · Джем' : ''}</small></span><span><strong>{row.documentNumber || 'Без номера'}</strong><small>{row.periodFrom || row.periodTo ? `${formatDate(row.periodFrom)} — ${formatDate(row.periodTo)}` : 'Период не указан'}</small></span><span><b className="mode-pill">{String(row.extension || '—').toUpperCase()}</b></span><span>{row.downloadable ? <button className="secondary-btn document-download" disabled={documentDownloading === key} onClick={()=>downloadWbDocument(row)}>{documentDownloading === key ? <RefreshCw className="spin" size={15}/> : <Download size={15}/>} Скачать</button> : <small>WB не дал файл</small>}</span></div>})}</div> : <div className="finance-ledger-empty"><FileText size={24}/><strong>{state?.lastSuccessAt ? 'В выбранном периоде документов нет' : 'Ожидает документы WB'}</strong><span>{state?.lastError || 'Запустите поток «Документы WB». Отсутствие строк до завершения загрузки не считается подтверждённым нулём.'}</span></div>}
     </section>
   }
 
@@ -1651,12 +1727,14 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       { scope:'marketplace', stage:'sellerStocks', title:'Остатки FBS', text:'Остатки на складах продавца' },
       { scope:'promotion', stage:'advertising', title:'Реклама', text:'Кампании и эффективность' },
       { scope:'feedbacks', title:'Отзывы', text:'Вопросы, отзывы и рейтинг' },
-      { scope:'finance', stage:'finance', title:'Финансы', text:'Комиссия, логистика, удержания и выплаты' },
-      { scope:'finance', stage:'financeReports', title:'Сводки реализации', text:'Официальные отчёты для сверки выплат · только Сервисный токен' },
+      { scope:'finance', stage:'finance', title:'Финансы', text:'Базовый токен: детализация реализации, комиссия, логистика, удержания и выплаты' },
+      { scope:'documents', stage:'documents', title:'Документы WB', text:'Акты, отчёты, УПД и подтверждающие документы кабинета' },
+      { scope:'finance', stage:'financeReports', title:'Сводки реализации', text:'Официальные сводки для сверки выплат · Персональный/Сервисный доступ' },
       { scope:'analytics', stage:'paidStorage', title:'Хранение', text:'Платное хранение по товарам' },
       { scope:'analytics', stage:'acceptance', title:'Приёмка', text:'Платные операции при приёмке' },
       { scope:'finance', stage:'acquiring', title:'Эквайринг', text:'Издержки на приём платежей' },
-      { scope:'finance', stage:'acquiringReports', title:'Сводки эквайринга', text:'Контроль комиссии и НДС · только Сервисный токен' },
+      { scope:'finance', stage:'acquiringReports', title:'Сводки эквайринга', text:'Контроль комиссии и НДС · Персональный/Сервисный доступ' },
+      { scope:'finance', stage:'jamSubscription', title:'Статус Джем', text:'Проверяется Сервисным токеном; денежное списание подтверждается финансами или документом' },
       { scope:'marketplace', stage:'fbsArchive', title:'Архив FBS', text:'Сборочные задания старше трёх месяцев' },
       { scope:'analytics', stage:'measurementPenalties', title:'Штрафы за габариты', text:'Удержания и замеры упаковки' },
       { scope:'analytics', stage:'deductionsReport', title:'Подмены и вложения', text:'Детализация специальных удержаний' },
@@ -1716,11 +1794,11 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         return <div className={`wb-coverage-card ${covered?'covered':'missing'}`} key={`${item.scope}:${item.stage || item.title}`}><span className="coverage-icon">{covered?<CheckCircle2 size={20}/>:<AlertTriangle size={20}/>}</span><div><strong>{item.title}</strong><p>{item.text}</p><small>{covered ? `${source?.isServiceToken ? 'Сервисный токен' : source?.isPrimary ? 'Основной токен' : source?.label || 'Токен подключён'}${item.stage ? ` · ${stageLabel(state)}` : ''}` : item.stage && ['financeReports','acquiringReports'].includes(item.stage) ? 'Нужен отдельный Сервисный токен' : 'Нужна категория доступа'}</small></div></div>
       })}</div>
 
-      {connection.tokens?.length > 0 && <div className="token-manager"><div className="section-title-row"><div><span>Безопасное хранилище</span><h2>API-токены кабинета</h2></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Синхронизация':'Синхронизировать доступные разделы'}</button></div><div className="token-card-grid">{connection.tokens.map(item => <div className={`saved-token-card ${item.isPrimary?'primary-token-card':''} ${item.isServiceToken?'service-token-card':''}`} key={item.id}><div className="saved-token-head"><div className="token-shield"><ShieldCheck size={20}/></div><div><div className="token-title-line"><strong>{item.label}</strong>{item.isPrimary && <b className="primary-token-badge">Основной</b>}{item.isServiceToken && <b className="service-token-badge">Сервисный</b>}</div><span>{item.tokenType} · {item.readOnly?'только чтение':'чтение и запись'}</span></div><button className="token-remove" onClick={() => removeToken(item.id)} title="Удалить токен"><X size={17}/></button></div><div className="token-flow-coverage"><strong>{item.stageCoverageCount || 0}/{connection.stageTotal || item.stageTotal || 27} потоков</strong><span>{item.isServiceToken ? 'Только сводки реализации и эквайринга' : item.coversAllCoreFlows ? 'Покрывает обычное рабочее ядро' : 'Используется только по своим категориям'}</span></div><div className="token-scopes">{item.scopeLabels?.map(scope => <b key={scope}>{scope}</b>)}</div><div className="token-card-foot"><small>До: {item.expiresAt?new Date(item.expiresAt).toLocaleDateString('ru-RU'):'не указано'} · код {item.fingerprint}</small>{!item.isPrimary && !item.isServiceToken && <button className="token-primary-btn" onClick={() => setPrimaryToken(item.id)}>Сделать основным</button>}</div></div>)}</div></div>}
+      {connection.tokens?.length > 0 && <div className="token-manager"><div className="section-title-row"><div><span>Безопасное хранилище</span><h2>API-токены кабинета</h2></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Синхронизация':'Синхронизировать доступные разделы'}</button></div><div className="token-card-grid">{connection.tokens.map(item => <div className={`saved-token-card ${item.isPrimary?'primary-token-card':''} ${item.isServiceToken?'service-token-card':''}`} key={item.id}><div className="saved-token-head"><div className="token-shield"><ShieldCheck size={20}/></div><div><div className="token-title-line"><strong>{item.label}</strong>{item.isPrimary && <b className="primary-token-badge">Основной</b>}{item.isServiceToken && <b className="service-token-badge">Сервисный</b>}</div><span>{item.tokenType} · {item.readOnly?'только чтение':'чтение и запись'}</span></div><button className="token-remove" onClick={() => removeToken(item.id)} title="Удалить токен"><X size={17}/></button></div><div className="token-flow-coverage"><strong>{item.stageCoverageCount || 0}/{connection.stageTotal || item.stageTotal || 28} потоков</strong><span>{item.isServiceToken ? 'Расширенные сводки и статус Джем' : item.coversAllCoreFlows ? 'Покрывает обычное рабочее ядро' : 'Используется только по своим категориям'}</span></div><div className="token-scopes">{item.scopeLabels?.map(scope => <b key={scope}>{scope}</b>)}</div><div className="token-card-foot"><small>До: {item.expiresAt?new Date(item.expiresAt).toLocaleDateString('ru-RU'):'не указано'} · код {item.fingerprint}</small>{!item.isPrimary && !item.isServiceToken && <button className="token-primary-btn" onClick={() => setPrimaryToken(item.id)}>Сделать основным</button>}</div></div>)}</div></div>}
 
       <div className="connection-card add-token-card"><div className="connection-logo">WB</div><div className="connection-copy"><div className="connection-title"><h3>{connection.connected ? 'Добавить обычный резервный токен' : 'Подключить основной токен'}</h3><span className={connection.connected?'connection-status connected':'connection-status'}>{connection.connected ? 'Основной подключён' : 'Не подключён'}</span></div><p>Здесь принимаются Базовые токены кабинета. Сервисный токен в это поле не добавляется и не сможет случайно стать основным.</p><form className="token-form multi-token-form" onSubmit={saveConnection}><label>Название токена — необязательно<input type="text" value={tokenLabel} onChange={e => setTokenLabel(e.target.value)} placeholder={connection.connected ? 'Например: Резервный или Отзывы' : 'Например: Основной токен WB'} maxLength="80"/></label><label>Базовый API-ключ Wildberries</label><div className="token-input"><input type={showToken?'text':'password'} value={tokenDraft} onChange={e => setTokenDraft(e.target.value)} placeholder="Вставьте Базовый API-ключ" autoComplete="off"/><button type="button" onClick={() => setShowToken(value => !value)}>{showToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>Категории определятся автоматически. Сам токен обратно в браузер не возвращается.</small><button className="primary-btn" disabled={checking}>{checking?<><RefreshCw className="spin" size={17}/> Проверяем</>:<><PlugZap size={17}/> Проверить и добавить</>}</button></form></div></div>
 
-      {connection.connected && <div className="connection-card service-token-connect-card"><div className="connection-logo service-logo"><ShieldCheck size={28}/></div><div className="connection-copy"><div className="connection-title"><h3>Сервисный токен для финансовых сводок</h3><span className={`connection-status ${connection.serviceFinanceReady?'connected':''}`}>{connection.serviceFinanceReady ? 'Готов' : connection.serviceTokenConnected ? 'Проверить секрет' : 'Не подключён'}</span></div><p>Этот токен используется только для «Сводок реализации» и «Сводок эквайринга». Он не участвует в товарах, заказах, остатках, рекламе, документах и обычных финансах.</p><form className="token-form multi-token-form" onSubmit={saveServiceConnection}><label>Название — необязательно<input type="text" value={serviceTokenLabel} onChange={e => setServiceTokenLabel(e.target.value)} placeholder="Например: Финансовые сводки WB" maxLength="80"/></label><label>Сервисный токен Wildberries</label><div className="token-input"><input type={showServiceToken?'text':'password'} value={serviceTokenDraft} onChange={e => setServiceTokenDraft(e.target.value)} placeholder="Вставьте Сервисный токен" autoComplete="off"/><button type="button" onClick={() => setShowServiceToken(value => !value)}>{showServiceToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>{serviceSecretText}. Токен проверяется на backend и никогда не возвращается в браузер.</small><button className="primary-btn" disabled={checkingServiceToken}>{checkingServiceToken?<><RefreshCw className="spin" size={17}/> Проверяем сервисный доступ</>:<><PlugZap size={17}/> Проверить и подключить</>}</button></form></div></div>}
+      {connection.connected && <div className="connection-card service-token-connect-card"><div className="connection-logo service-logo"><ShieldCheck size={28}/></div><div className="connection-copy"><div className="connection-title"><h3>Сервисный токен для расширенных финансовых данных</h3><span className={`connection-status ${connection.serviceFinanceReady?'connected':''}`}>{connection.serviceFinanceReady ? 'Готов' : connection.serviceTokenConnected ? 'Проверить секрет' : 'Не подключён'}</span></div><p>Этот токен используется для официальных сводок реализации, сводок эквайринга и проверки статуса подписки «Джем». Основная финансовая детализация и документы продолжают работать через обычный токен кабинета с нужными категориями.</p><form className="token-form multi-token-form" onSubmit={saveServiceConnection}><label>Название — необязательно<input type="text" value={serviceTokenLabel} onChange={e => setServiceTokenLabel(e.target.value)} placeholder="Например: Расширенные финансы WB" maxLength="80"/></label><label>Сервисный токен Wildberries</label><div className="token-input"><input type={showServiceToken?'text':'password'} value={serviceTokenDraft} onChange={e => setServiceTokenDraft(e.target.value)} placeholder="Вставьте Сервисный токен" autoComplete="off"/><button type="button" onClick={() => setShowServiceToken(value => !value)}>{showServiceToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>{serviceSecretText}. Токен проверяется на backend и никогда не возвращается в браузер.</small><button className="primary-btn" disabled={checkingServiceToken}>{checkingServiceToken?<><RefreshCw className="spin" size={17}/> Проверяем сервисный доступ</>:<><PlugZap size={17}/> Проверить и подключить</>}</button></form></div></div>}
 
       <div className="security-note"><RefreshCw size={22}/><div><strong>Автоповторы без сброса прогресса</strong><p>После 429, 502, 503 или 504 ELISEI сохраняет taskId, страницу и курсор, назначает время следующей попытки и продолжает тот же этап автоматически.</p></div></div>
       <div className="security-note"><ShieldCheck size={22}/><div><strong>Один токен — один набор запросов</strong><p>Обычные потоки не переключаются на сервисный токен. Финансовые сводки, наоборот, никогда не запускаются Базовым ключом.</p></div></div>
@@ -1734,7 +1812,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       ['products','Товары'], ['orders','Заказы'], ['sales','Продажи'], ['stocks','Остатки FBO'], ['sellerStocks','Остатки FBS'], ['advertising','Реклама'],
       ['finance','Финансы WB'], ['paidStorage','Хранение'], ['acceptance','Приёмка'], ['acquiring','Эквайринг'], ['financeReports','Сводки реализации'], ['acquiringReports','Сводки эквайринга'],
       ['fbsArchive','Архив FBS'], ['measurementPenalties','Штрафы за габариты'], ['deductionsReport','Подмены и вложения'], ['warehouseMeasurements','Замеры склада'], ['antifraudRetention','Самовыкупы'], ['labelingRetention','Маркировка'],
-      ['goodsReturns','Возвраты и перемещения'], ['tariffs','Тарифы WB'], ['funnel','Воронка карточек'], ['documents','Документы WB'], ['searchQueries','Поисковые запросы'], ['stockHistory','История остатков'], ['reviews','Отзывы'], ['questions','Вопросы'], ['chats','Чаты']
+      ['goodsReturns','Возвраты и перемещения'], ['tariffs','Тарифы WB'], ['funnel','Воронка карточек'], ['documents','Документы WB'], ['jamSubscription','Подписка Джем'], ['searchQueries','Поисковые запросы'], ['stockHistory','История остатков'], ['reviews','Отзывы'], ['questions','Вопросы'], ['chats','Чаты']
     ]
     const stateFor = stage => connection.syncStates?.find(item => item.stage === stage)
     const statusCopy = (state, stage) => {
@@ -1776,6 +1854,14 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
           : { tone:'pending', title:'Формируется в фоне', text:state.nextAllowedAt ? `Автопроверка после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : 'ELISEI проверит готовность автоматически.' }
       }
       if (state.status === 'queued') {
+        if (stage === 'finance' && Number(state.metadata?.persistedCount || state.lastCount || 0) > 0) return {
+          tone:'pending',title:'Финансы загружены частично',
+          text:`Сохранено ${formatNumber(state.metadata?.persistedCount || state.lastCount || 0)} строк. ${state.nextAllowedAt ? `Следующий разрешённый запрос после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}.` : 'Продолжение поставлено в очередь.'}`,
+        }
+        if (stage === 'documents' && Number(state.metadata?.persistedCount || state.lastCount || 0) > 0) return {
+          tone:'pending',title:'Документы загружены частично',
+          text:`Сохранено ${formatNumber(state.metadata?.persistedCount || state.lastCount || 0)} документов. ${state.nextAllowedAt ? `Продолжение после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}.` : 'Продолжение поставлено в очередь.'}`,
+        }
         if (stage === 'fbsArchive' && state.metadata?.currentMonth) {
           const month = state.metadata.currentMonth
           return {
@@ -1817,7 +1903,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     }
     return <section className="app-page glass-panel"><div className="page-title"><span>Контроль данных</span><h1>Журнал синхронизаций</h1><p>Каждый поток работает независимо. Лимит одного метода больше не останавливает остальные разделы.</p></div>{integrationDiagnostics && <div className="data-integrity-strip"><div><strong>Единое ядро товаров</strong><span>{formatNumber(integrationDiagnostics.productMaster?.products)} карточек · {formatNumber(integrationDiagnostics.productMaster?.withBarcodes)} со ШК</span></div><div><strong>Остатки</strong><span>{integrationDiagnostics.stockAllocation?`${formatNumber(integrationDiagnostics.stockAllocation.matchedQuantity)} шт. сопоставлено`:'снимок ожидается'}</span></div><div><strong>Реклама</strong><span>{formatNumber(integrationDiagnostics.advertisingMeta?.campaigns)} кампаний · {formatNumber(integrationDiagnostics.advertisingMeta?.campaignsWithStats)} со статистикой</span></div></div>}{!connection.connected ? <div className="empty-state"><RefreshCw size={38}/><h3>Wildberries не подключён</h3><button className="primary-btn" onClick={() => setActive('Подключения')}>Подключить</button></div> : <>
       <div className="sync-summary"><div><span>Последнее успешное обновление</span><strong>{connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : 'Ещё не выполнялось'}</strong></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Запускаем этапы':'Запустить доступные этапы'}</button></div>
-      <div className="sync-stage-grid">{stages.map(([stage,label]) => { const state=stateFor(stage); const copy=statusCopy(state,stage); const serviceBlocked=['service_token_required','service_secret_required','service_token_invalid','service_permission_required'].includes(state?.status); const blocked=syncing || state?.status === 'pending' || (state?.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now()); const buttonText=serviceBlocked?'Открыть подключения':blocked?(state?.status==='pending'?'Ожидаем WB':'Повтор будет автоматически'):(['rate_limited','retry_scheduled'].includes(state?.status)?'Повторить сейчас':'Обновить отдельно'); return <div className={`sync-stage-card ${copy.tone}`} key={stage}><div className="sync-stage-head"><span>{copy.tone==='success'?<CheckCircle2 size={19}/>:copy.tone==='pending'?<RefreshCw className="spin" size={19}/>:<AlertTriangle size={19}/>}</span><div><small>{label}</small><strong>{copy.title}</strong></div></div><p>{copy.text}</p><button disabled={blocked && !serviceBlocked} onClick={() => serviceBlocked ? setActive('Подключения') : syncConnection(connection.connectionId,[stage])}>{buttonText}</button></div> })}</div>
+      <div className="sync-stage-grid">{stages.map(([stage,label]) => { const state=stateFor(stage); const copy=statusCopy(state,stage); const serviceBlocked=['service_token_required','service_secret_required','service_token_invalid','service_permission_required'].includes(state?.status); const blocked=syncing || state?.status === 'pending' || (state?.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now()); const buttonText=serviceBlocked?'Открыть подключения':blocked?(state?.status==='pending'?'Ожидаем WB':'Повтор будет автоматически'):(['rate_limited','retry_scheduled'].includes(state?.status)?'Повторить сейчас':'Обновить отдельно'); return <div className={`sync-stage-card ${copy.tone}`} key={stage}><div className="sync-stage-head"><span>{copy.tone==='success'?<CheckCircle2 size={19}/>:copy.tone==='pending'?<RefreshCw className="spin" size={19}/>:<AlertTriangle size={19}/>}</span><div><small>{label}</small><strong>{copy.title}</strong></div></div><p>{copy.text}</p><button disabled={blocked && !serviceBlocked} onClick={() => serviceBlocked ? setActive('Подключения') : syncConnection(connection.connectionId,[stage],{period:['advertising','searchQueries','stockHistory','finance','acquiring','documents'].includes(stage)?analyticsPeriod:null})}>{buttonText}</button></div> })}</div>
       {coreData?.syncWarnings?.length > 0 && <div className="warning-stack">{coreData.syncWarnings.map((warning,index) => <div key={index}><AlertTriangle size={17}/>{warning}</div>)}</div>}
       <div className="sync-log">{syncHistory.length === 0 ? <div className="sync-empty">В журнале пока нет записей.</div> : syncHistory.map(item => { const warnings=Boolean(item.warnings?.length); const counts=item.counts || {}; return <div className={`sync-log-row ${warnings?'warning':item.status}`} key={item.id}><div className="sync-log-icon">{item.status==='success'&&!warnings?<CheckCircle2 size={18}/>:<AlertTriangle size={18}/>}</div><div><strong>{item.automatic?'Автоматический повтор':item.status==='success'?(warnings?'Завершено частично':'Завершено успешно'):'Не все этапы завершены'}</strong><span>{new Date(item.at).toLocaleString('ru-RU')}</span></div><div className="sync-log-details"><span>{counts.products ?? 0} товаров</span><span>{counts.orders ?? 0} заказов</span><span>{counts.sales ?? 0} продаж</span><span>{counts.stocks ?? 0} строк остатков</span><span>{counts.advertising ?? 0} кампаний</span>{warnings&&<span className="sync-warning-text">{item.warnings[0]}</span>}</div></div>})}</div>
     </>}</section>
@@ -1979,7 +2065,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
   const renderers = {
     'Главная':renderHome, 'Аналитика':renderAnalytics, 'Товары':renderProducts, 'Остатки':renderStocks, 'История остатков':renderStockHistory,
-    'Финансы':renderFinance, 'Цены и акции':renderPricing, 'Реклама':renderAdvertising, 'Поисковые запросы':renderSearchQueries, 'Коммуникации':renderCommunications,
+    'Финансы':renderFinance, 'Документы WB':renderDocuments, 'Цены и акции':renderPricing, 'Реклама':renderAdvertising, 'Поисковые запросы':renderSearchQueries, 'Коммуникации':renderCommunications,
     'Сезонность':renderSeasonality, 'Отчёты':renderReports, 'Импорт данных':renderImport, 'AI CRM':renderCrm, 'Спросить ЭЛа':renderChat,
     'Подключения':renderConnections, 'Синхронизации':renderSyncHistory, 'Настройки':renderSettings,
   }

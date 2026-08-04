@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { WB_STREAMS, normalizeStreamPayload, streamCount } from '../src/wb/stream-store.js'
 import { normalizeFinanceLedgerRows } from '../src/wb/finance-ledger.js'
 
-for (const stream of ['financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','goodsReturns','tariffs','funnel','documents','searchQueries','stockHistory','reviews','questions','chats']) {
+for (const stream of ['financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','goodsReturns','tariffs','funnel','documents','jamSubscription','searchQueries','stockHistory','reviews','questions','chats']) {
   assert.ok(WB_STREAMS.includes(stream), `${stream} is registered`)
   const payload=normalizeStreamPayload(stream,{rows:[{id:1}],totalRows:12})
   assert.equal(streamCount(stream,payload),12)
