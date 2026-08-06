@@ -349,9 +349,32 @@ function formatReturns(data, tone) {
 }
 
 function formatReviews(data, tone) {
-  if (!data?.available) return data?.warning || 'Отзывы пока не синхронизированы с WB, поэтому я не буду придумывать мнение покупателей.';
-  const reviews = Array.isArray(data?.reviews) ? data.reviews : [];
-  return `Загружено ${number(reviews.length)} отзывов. Для точного разбора по темам и артикулам нужен нормализованный текст отзывов и связь с nmID.${mildHumor(tone, 'returns')}`;
+  if (!data?.available) return data?.warning || 'Отзывы, вопросы и чаты пока не синхронизированы с WB, поэтому я не буду придумывать мнение покупателей.';
+  const reviewSummary = data?.summary?.reviews || {};
+  const questionSummary = data?.summary?.questions || {};
+  const chatSummary = data?.summary?.chats || {};
+  const low = Array.isArray(data?.lowRatedReviews) ? data.lowRatedReviews : [];
+  const unansweredQuestions = Array.isArray(data?.unansweredQuestions) ? data.unansweredQuestions : [];
+  const signals = Array.isArray(data?.productSignals) ? data.productSignals : [];
+  const lines = [
+    `Коммуникации за ${periodLabel(data)}: отзывы — ${number(reviewSummary.total)}, вопросы — ${number(questionSummary.total)}, диалоги и события чатов — ${number(chatSummary.total)}.`,
+  ];
+  if (reviewSummary.averageRating != null) lines.push(`Средняя оценка по доступной выборке — ${number(reviewSummary.averageRating)} ★; низких оценок 1–3 ★ — ${number(reviewSummary.lowRated)}.`);
+  lines.push(`Без ответа: отзывы — ${number(reviewSummary.unanswered)}, вопросы — ${number(questionSummary.unanswered)}.`);
+  if (low.length) {
+    lines.push(`Низкие оценки, которые стоит разобрать первыми: ${low.slice(0,4).map((item) => {
+      const product = titleOf(item);
+      const text = String(item.text || item.cons || '').trim();
+      return `${product} — ${item.rating == null ? 'без оценки' : `${number(item.rating)} ★`}${text ? `: «${text.slice(0,120)}»` : ''}`;
+    }).join('; ')}.`);
+  }
+  if (unansweredQuestions.length) {
+    lines.push(`Неотвеченные вопросы: ${unansweredQuestions.slice(0,4).map((item) => `${titleOf(item)} — ${String(item.text || 'вопрос без текста').slice(0,120)}`).join('; ')}.`);
+  }
+  if (signals.length) lines.push(`Наибольшая концентрация сигналов по товарам: ${signals.slice(0,5).map((item) => `${titleOf(item)} — низких отзывов ${number(item.lowRatedReviews)}, без ответа ${number(item.unansweredReviews + item.unansweredQuestions)}`).join('; ')}.`);
+  if (chatSummary.readOnly) lines.push('Чаты загружены только для анализа: Эл не отправляет сообщения без отдельного подтверждения и write-инструмента.');
+  lines.push(`Следующий шаг: сначала ответить на вопросы без ответа и проверить товары, где низкие оценки совпадают с возвратами.${mildHumor(tone, 'returns')}`);
+  return lines.filter(Boolean).join('\n');
 }
 
 function formatPricing(data, tone) {

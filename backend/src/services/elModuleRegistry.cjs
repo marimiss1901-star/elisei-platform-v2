@@ -8,7 +8,7 @@ const MODULES = Object.freeze({
   },
   sales: {
     title: 'Продажи и заказы',
-    keywords: ['продаж', 'заказ', 'выручк', 'оборот', 'покупател', 'конверси', 'fbs', 'фбс', 'fbo', 'фбо', 'схема доставки'],
+    keywords: ['продаж', 'заказ', 'выручк', 'оборот', 'сколько покупателей', 'количество покупателей', 'повторные покупатели', 'конверси', 'fbs', 'фбс', 'fbo', 'фбо', 'схема доставки'],
     paths: ['/api/analytics/sales', '/api/sales', '/api/orders/analytics', '/api/orders', '/api/wb/orders'],
   },
   advertising: {
@@ -37,8 +37,8 @@ const MODULES = Object.freeze({
     paths: ['/api/returns/analytics', '/api/returns', '/api/wb/returns', '/api/analytics/returns'],
   },
   reviews: {
-    title: 'Отзывы и качество',
-    keywords: ['отзыв', 'рейтинг', 'оценк', 'жалоб', 'качеств', 'feedback', 'вопрос покупател'],
+    title: 'Отзывы, вопросы и качество',
+    keywords: ['отзыв', 'рейтинг', 'оценк', 'жалоб', 'качеств', 'feedback', 'вопрос покупател', 'вопросы покупател', 'чат с покупател', 'чаты', 'сообщени покупател'],
     paths: ['/api/reviews/analytics', '/api/reviews', '/api/feedbacks', '/api/wb/reviews', '/api/quality/reviews'],
   },
   pricing: {

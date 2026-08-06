@@ -45,6 +45,7 @@ import {
   LIVE_SYNC_STAGES, defaultLiveSyncSettings, normalizeLiveSyncSettings, dueLiveStages, eventStages, safeEqualSecret, publicLiveSyncStatus,
 } from './wb/live-sync.js'
 import { buildDataQualityReport } from './wb/data-quality.js'
+import { buildElEngagementData } from './services/elEngagement.js'
 
 const { Pool } = pg
 const app = express()
@@ -624,7 +625,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.20.0 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.21.0 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -5024,7 +5025,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.20.0',
+    version: '2.21.0',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -6229,6 +6230,50 @@ function elTopProducts(products = [], score, limit = 35) {
     .map(elCompactProduct)
 }
 
+function elExtendedPayloadRows(data = {}, stream = '') {
+  const value = data?.[stream]
+  if (Array.isArray(value)) return value
+  return Array.isArray(value?.rows) ? value.rows : []
+}
+
+function elExtendedRowDate(stream, row = {}) {
+  if (stream === 'reviews' || stream === 'questions') return dateKey(row.createdDate || row.createdAt || row.updatedDate || row.updatedAt || row.date)
+  if (stream === 'chats') return dateKey(row.addTimestamp || row.createdAt || row.createdDate || row.timestamp || row.date || row?.lastMessage?.addTimestamp || row?.lastMessage?.createdAt)
+  return dateKey(row.date || row.createdAt || row.updatedAt)
+}
+
+function elFilterExtendedRows(rows = [], stream = '', range = null) {
+  if (!range) return Array.isArray(rows) ? rows : []
+  return (Array.isArray(rows) ? rows : []).filter(row => {
+    const value = elExtendedRowDate(stream,row)
+    return value && value >= range.from && value <= range.to
+  })
+}
+
+async function elLoadExtendedStream(connectionId, canonicalData, stream, range, limit = 120) {
+  const filters = range ? { from:range.from,to:range.to } : {}
+  const page = await latestExtendedRows(connectionId,stream,{ limit,...filters })
+  if (page.syncId) {
+    const calculated = await extendedStreamSummary(connectionId,stream,page.syncId,filters)
+    return {
+      rows:page.rows,
+      total:page.total,
+      summary:calculated.summary || null,
+      availablePeriod:calculated.availablePeriod || null,
+      source:'wb_stream_items',
+    }
+  }
+  const rows = elFilterExtendedRows(elExtendedPayloadRows(canonicalData,stream),stream,range).slice(0,limit)
+  const payload = canonicalData?.[stream] && typeof canonicalData[stream] === 'object' ? canonicalData[stream] : {}
+  return {
+    rows,
+    total:Math.max(Number(payload?.totalRows || 0),rows.length),
+    summary:payload?.summary || null,
+    availablePeriod:payload?.period || null,
+    source:rows.length ? 'wb_stream_data_sample' : 'none',
+  }
+}
+
 function elDataCoverage(connection, core, range) {
   return {
     requestedPeriod: range ? { from: range.from, to: range.to, days: range.days } : null,
@@ -6403,14 +6448,35 @@ async function buildElModuleData({ req, identity, period, module, focus }) {
     }
   }
   if (module === 'reviews') {
-    const reviews = Array.isArray(connection.data?.reviews) ? connection.data.reviews
-      : Array.isArray(connection.data?.feedbacks) ? connection.data.feedbacks : []
+    const range = filtered.range ? {from:filtered.range.from,to:filtered.range.to} : null
+    const [reviewData,questionData,chatData] = await Promise.all([
+      elLoadExtendedStream(connection.id,canonical.data,'reviews',range,500),
+      elLoadExtendedStream(connection.id,canonical.data,'questions',range,500),
+      elLoadExtendedStream(connection.id,canonical.data,'chats',range,200),
+    ])
+    const states = Object.fromEntries(syncStates
+      .filter(item=>['reviews','questions','chats'].includes(item.stage))
+      .map(item=>[item.stage,item]))
+    const engagement = buildElEngagementData({
+      reviews:reviewData.rows,
+      questions:questionData.rows,
+      chats:chatData.rows,
+      totals:{reviews:reviewData.total,questions:questionData.total,chats:chatData.total},
+      summaries:{reviews:reviewData.summary,questions:questionData.summary,chats:chatData.summary},
+      period:base.period,
+      states,
+    })
     return {
       ...base,
-      available: reviews.length > 0,
-      reviews: reviews.slice(0, 120),
-      warning: reviews.length ? null : 'Отзывы и вопросы покупателей пока не синхронизированы с WB. Эл не будет выдумывать причины отзывов.',
-      relatedReturns: products.filter(item => Number(item.returnsCount || 0) > 0).slice(0, 60).map(elCompactProduct),
+      ...engagement,
+      sources:{reviews:reviewData.source,questions:questionData.source,chats:chatData.source},
+      coverage:{
+        ...base.coverage,
+        reviews:reviewData.availablePeriod,
+        questions:questionData.availablePeriod,
+        chats:chatData.availablePeriod,
+      },
+      relatedReturns:products.filter(item=>Number(item.returnsCount || 0)>0).slice(0,80).map(elCompactProduct),
     }
   }
   if (module === 'pricing') {
