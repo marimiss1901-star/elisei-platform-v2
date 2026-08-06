@@ -1,13 +1,13 @@
+Файлы проекта, которые обновляет патч ELISEI 5.9.2 поверх 5.9.1:
+
+FILES.txt
 README.md
-README_5_9_1.md
-RELEASE_NOTES_V5_9_1.txt
+README_5_9_2.md
+RELEASE_NOTES_V5_9_2.txt
 package.json
 backend/package.json
-backend/src/routes/elCore.cjs
 backend/src/server.js
 backend/src/wb/data-quality.js
-backend/tests/wb-data-quality-591.test.mjs
-backend/tests/wb-live-sync-590.test.mjs
-src/lib/api.js
+backend/tests/wb-data-quality-592.test.mjs
 src/pages/DashboardPage.jsx
 src/styles/app.css

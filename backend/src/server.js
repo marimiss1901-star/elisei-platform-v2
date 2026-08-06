@@ -6037,10 +6037,32 @@ async function dataQualityForConnection(connection, requestedRange = null) {
     reconciliationDifference:Math.round((Number(financeValue.sellerPayable||0)-componentNet)*100)/100,
   }
   const master=Array.isArray(data?.productMaster)?data.productMaster:[]
+  const productLabel=item=>({
+    title:String(item?.title || item?.subjectName || item?.vendorCode || `Товар ${item?.nmID || ''}`).trim(),
+    vendorCode:String(item?.vendorCode || '').trim(),
+    nmID:item?.nmID || null,
+    brand:String(item?.brand || '').trim(),
+  })
+  const missingBarcodes=master
+    .filter(item=>!Array.isArray(item?.barcodes) || item.barcodes.length===0)
+    .map(item=>({...productLabel(item),reasonCode:'missing_barcodes',reason:'В карточке нет штрихкодов размеров; сопоставление по barcode невозможно.'}))
+  const unmatchedStock=master
+    .filter(item=>!item?.stockMapped && !(Number(item?.stock || 0)>0))
+    .map(item=>({
+      ...productLabel(item),
+      reasonCode:Array.isArray(item?.barcodes)&&item.barcodes.length?'not_in_current_snapshot':'missing_barcodes_and_snapshot',
+      reason:Array.isArray(item?.barcodes)&&item.barcodes.length
+        ? 'В текущем снимке остатков не найдено строки по barcode → nmID → vendorCode. Это может означать нулевой остаток или разрыв идентификаторов.'
+        : 'Нет штрихкодов и нет подтверждённой строки в текущем снимке остатков.',
+    }))
   const productDiagnostics={
     products:master.length || Number(sources?.products?.count || 0),
     withBarcodes:master.filter(item=>Array.isArray(item?.barcodes)&&item.barcodes.length).length,
     withMappedStock:master.filter(item=>item?.stockMapped || Number(item?.stock || 0)>0).length,
+    missingBarcodesCount:missingBarcodes.length,
+    unmatchedStockCount:unmatchedStock.length,
+    missingBarcodes:missingBarcodes.slice(0,100),
+    unmatchedStock:unmatchedStock.slice(0,100),
   }
   return buildDataQualityReport({
     states:states.map(publicSyncState),

@@ -1,12 +1,8 @@
-ELISEI 5.9.1 PATCH FROM 5.9.0
-
-Purpose:
-- add one data-quality center over all WB streams;
-- show confirmed period, freshness, source, row count, partial coverage, waits and access blocks;
-- prevent incomplete finance from being presented as final profit;
-- reconcile seller payable with revenue, expenses and compensations from the finance ledger;
-- validate product barcodes and stock-to-product mapping;
-- expose the same quality report to El in the synchronization module.
-
-Install over: ELISEI 5.9.0
-Changed project files: 13
+ELISEI PATCH MANIFEST
+Release: 5.9.2
+Base release: 5.9.1
+Frontend: 5.9.2
+Backend: 2.20.1
+Purpose: exact selected-period coverage, snapshot/history separation, local retry times, unmatched product diagnostics
+Project files replaced: 11
+Archive limit: fewer than 100 files

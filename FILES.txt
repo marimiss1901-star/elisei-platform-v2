@@ -31,6 +31,7 @@ README_5_7_6.md
 README_5_8_0.md
 README_5_9_0.md
 README_5_9_1.md
+README_5_9_2.md
 README_EL_5_4_1_DIRECT.md
 README_PATCH.md
 RELEASE_NOTES_V1_6.txt
@@ -89,6 +90,7 @@ RELEASE_NOTES_V5_7_6.txt
 RELEASE_NOTES_V5_8_0.txt
 RELEASE_NOTES_V5_9_0.txt
 RELEASE_NOTES_V5_9_1.txt
+RELEASE_NOTES_V5_9_2.txt
 SHA256SUMS.txt
 SHA256SUMS_5_5_0.txt
 SHA256SUMS_5_6_0.txt
@@ -97,6 +99,7 @@ SHA256SUMS_5_6_2.txt
 SHA256SUMS_5_6_3.txt
 SHA256SUMS_5_6_4.txt
 SHA256SUMS_5_7_0.txt
+SHA256SUMS_5_7_1.txt
 apply-ads-patch.mjs
 apply-el-all-modules-backend.mjs
 apply-el-all-modules-frontend.mjs
@@ -169,6 +172,7 @@ backend/tests/warehouse-remains-parser.test.mjs
 backend/tests/wb-analytics-period.test.mjs
 backend/tests/wb-api-policy.test.mjs
 backend/tests/wb-data-quality-591.test.mjs
+backend/tests/wb-data-quality-592.test.mjs
 backend/tests/wb-extended-coverage.test.mjs
 backend/tests/wb-fbs-archive.test.mjs
 backend/tests/wb-finance-complete.test.mjs

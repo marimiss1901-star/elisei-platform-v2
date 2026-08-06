@@ -115,6 +115,26 @@ const formatDate = value => {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString('ru-RU')
 }
 
+const formatLocalDateTime = value => {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  return new Intl.DateTimeFormat('ru-RU', {
+    day:'2-digit', month:'long', year:'numeric', hour:'2-digit', minute:'2-digit',
+  }).format(date)
+}
+
+const qualityCoverageText = item => {
+  if (item?.dataMode === 'snapshot') return 'Текущий снимок · не история'
+  if (item?.dataMode === 'reference') return 'Актуальный справочник'
+  if (item?.dataMode === 'archive') return item?.metadata?.monthsCompleted ? `${formatNumber(item.metadata.monthsCompleted)} мес. архива` : 'Архив'
+  return item?.coverage ? `${formatDate(item.coverage.from)} — ${formatDate(item.coverage.to)}` : 'период не определён'
+}
+
+const qualityActionText = item => item?.nextAllowedAt
+  ? `${item.action} Следующее окно: ${formatLocalDateTime(item.nextAllowedAt)}.`
+  : item?.action || '—'
+
 const ANALYTICS_PERIOD_KEY = 'elisei.analytics.period.v1'
 const ANALYTICS_COMPARE_KEY = 'elisei.analytics.compare.v1'
 
@@ -1995,11 +2015,16 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         <button className={qualityView==='finance'?'active':''} onClick={()=>setQualityView('finance')}>Финансовая сверка</button>
       </div>
       {qualityView==='problems' && <div className="quality-problems">
-        {dataQualityLoading && !dataQuality ? <div className="quality-empty"><RefreshCw className="spin" size={22}/>Собираем покрытие источников…</div> : dataQuality?.issues?.length ? dataQuality.issues.map(item=><div className={`quality-issue ${item.severity}`} key={item.id}><span>{item.severity==='critical'?<AlertTriangle size={19}/>:item.severity==='warning'?<Info size={19}/>:<CheckCircle2 size={19}/>}</span><div><strong>{item.title}</strong><p>{item.text}</p><small>{item.action}</small></div>{item.stage&&<button onClick={()=>document.getElementById(`sync-stage-${item.stage}`)?.scrollIntoView({behavior:'smooth',block:'center'})}>Показать карточку</button>}</div>) : <div className="quality-empty success"><CheckCircle2 size={22}/>Критических разрывов не найдено. Итоги можно использовать в рамках указанного покрытия.</div>}
+        {dataQualityLoading && !dataQuality ? <div className="quality-empty"><RefreshCw className="spin" size={22}/>Собираем покрытие источников…</div> : dataQuality?.issues?.length ? dataQuality.issues.map(item=><div className={`quality-issue ${item.severity}`} key={item.id}><span>{item.severity==='critical'?<AlertTriangle size={19}/>:item.severity==='warning'?<Info size={19}/>:<CheckCircle2 size={19}/>}</span><div><strong>{item.title}</strong><p>{item.text}</p><small>{qualityActionText(item)}</small></div>{item.stage&&<button onClick={()=>document.getElementById(`sync-stage-${item.stage}`)?.scrollIntoView({behavior:'smooth',block:'center'})}>Показать карточку</button>}</div>) : <div className="quality-empty success"><CheckCircle2 size={22}/>Критических разрывов не найдено. Итоги можно использовать в рамках указанного покрытия.</div>}
+        {!dataQualityLoading && dataQuality?.productDiagnostics?.unmatchedStock?.length > 0 && <div className="quality-unmatched">
+          <div className="quality-unmatched-head"><div><span>Сопоставление остатков</span><h3>Карточки без подтверждённой строки в текущем снимке</h3><p>Это не всегда ошибка: у товара может быть нулевой остаток. Список показывает, где ELISEI не смог подтвердить связь по barcode → nmID → vendorCode.</p></div><strong>{formatNumber(dataQuality.productDiagnostics.unmatchedStockCount ?? dataQuality.productDiagnostics.unmatchedStock.length)}</strong></div>
+          <div className="quality-unmatched-list">{dataQuality.productDiagnostics.unmatchedStock.map((item,index)=><div className="quality-unmatched-row" key={`${item.nmID || item.vendorCode || index}`}><div><strong>{item.title || item.vendorCode || `Товар ${item.nmID || ''}`}</strong><span>{item.vendorCode ? `Арт. ${item.vendorCode}` : 'Артикул не указан'}{item.nmID ? ` · nmID ${item.nmID}` : ''}{item.brand ? ` · ${item.brand}` : ''}</span></div><p>{item.reason}</p></div>)}</div>
+          {Number(dataQuality.productDiagnostics.unmatchedStockCount || 0) > dataQuality.productDiagnostics.unmatchedStock.length && <small className="quality-unmatched-more">Показаны первые {formatNumber(dataQuality.productDiagnostics.unmatchedStock.length)} карточек из {formatNumber(dataQuality.productDiagnostics.unmatchedStockCount)}.</small>}
+        </div>}
       </div>}
       {qualityView==='streams' && <div className="quality-stream-table">
         <div className="quality-stream-row head"><span>Источник</span><span>Статус</span><span>Строки</span><span>Покрытие</span><span>Свежесть</span><span>Что дальше</span></div>
-        {(dataQuality?.streams || []).map(item=><div className={`quality-stream-row ${item.status}`} key={item.stage}><span><strong>{item.label}</strong><small>{item.source || item.rawStatus}</small></span><span><b>{item.statusLabel}</b></span><span>{formatNumber(item.rowCount)}</span><span>{item.coverage ? `${formatDate(item.coverage.from)} — ${formatDate(item.coverage.to)}` : item.metadata?.monthsCompleted ? `${formatNumber(item.metadata.monthsCompleted)} мес.` : 'текущий снимок'}</span><span>{item.updatedAt ? new Date(item.updatedAt).toLocaleString('ru-RU') : 'нет даты'}</span><span>{item.action}</span></div>)}
+        {(dataQuality?.streams || []).map(item=><div className={`quality-stream-row ${item.status}`} key={item.stage}><span><strong>{item.label}</strong><small>{item.source || item.rawStatus} · {item.dataModeLabel}</small></span><span><b>{item.statusLabel}</b>{item.status==='ready'&&item.backgroundPending?<small>обновление ожидает WB</small>:null}</span><span>{formatNumber(item.rowCount)}</span><span>{qualityCoverageText(item)}</span><span>{item.updatedAt ? formatLocalDateTime(item.updatedAt) : 'нет даты'}</span><span>{qualityActionText(item)}</span></div>)}
       </div>}
       {qualityView==='finance' && <div className="quality-finance-grid">
         <div><span>Движений в реестре</span><strong>{formatNumber(dataQuality?.finance?.movements || 0)}</strong></div>

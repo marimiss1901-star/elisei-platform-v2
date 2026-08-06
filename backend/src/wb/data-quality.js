@@ -1,11 +1,11 @@
 const DAY_MS = 86400000
 
 const STAGE_CONFIG = Object.freeze({
-  products:{ label:'Товары',weight:7,freshSeconds:36*3600,current:true,critical:true },
-  orders:{ label:'Заказы',weight:11,freshSeconds:30*60,critical:true },
-  sales:{ label:'Продажи',weight:11,freshSeconds:45*60,critical:true },
-  stocks:{ label:'Остатки FBO',weight:8,freshSeconds:30*60,current:true,critical:true },
-  sellerStocks:{ label:'Остатки FBS',weight:6,freshSeconds:30*60,current:true },
+  products:{ label:'Товары',weight:7,freshSeconds:36*3600,mode:'reference',critical:true },
+  orders:{ label:'Заказы',weight:11,freshSeconds:30*60,critical:true,coverageCanConfirmPartial:true },
+  sales:{ label:'Продажи',weight:11,freshSeconds:45*60,critical:true,coverageCanConfirmPartial:true },
+  stocks:{ label:'Остатки FBO',weight:8,freshSeconds:30*60,mode:'snapshot',critical:true },
+  sellerStocks:{ label:'Остатки FBS',weight:6,freshSeconds:30*60,mode:'snapshot' },
   advertising:{ label:'Реклама',weight:5,freshSeconds:3*3600 },
   finance:{ label:'Финансы WB',weight:18,freshSeconds:14*3600,critical:true },
   paidStorage:{ label:'Платное хранение',weight:3,freshSeconds:36*3600 },
@@ -13,17 +13,17 @@ const STAGE_CONFIG = Object.freeze({
   acquiring:{ label:'Эквайринг',weight:3,freshSeconds:14*3600,dependsOn:'finance' },
   financeReports:{ label:'Сводки реализации',weight:1,freshSeconds:36*3600,optional:true },
   acquiringReports:{ label:'Сводки эквайринга',weight:1,freshSeconds:36*3600,optional:true },
-  fbsArchive:{ label:'Архив FBS',weight:2,freshSeconds:14*DAY_MS/1000,archive:true },
+  fbsArchive:{ label:'Архив FBS',weight:2,freshSeconds:14*DAY_MS/1000,mode:'archive' },
   measurementPenalties:{ label:'Штрафы за габариты',weight:1,freshSeconds:36*3600,optional:true },
   deductionsReport:{ label:'Подмены и вложения',weight:1,freshSeconds:36*3600,optional:true },
   warehouseMeasurements:{ label:'Замеры склада',weight:1,freshSeconds:36*3600,optional:true },
   antifraudRetention:{ label:'Самовыкупы',weight:1,freshSeconds:36*3600,optional:true },
   labelingRetention:{ label:'Маркировка',weight:1,freshSeconds:36*3600,optional:true },
   goodsReturns:{ label:'Возвраты и перемещения',weight:2,freshSeconds:36*3600 },
-  tariffs:{ label:'Тарифы WB',weight:2,freshSeconds:7*DAY_MS/1000,current:true },
+  tariffs:{ label:'Тарифы WB',weight:2,freshSeconds:7*DAY_MS/1000,mode:'reference' },
   funnel:{ label:'Воронка карточек',weight:2,freshSeconds:3*3600 },
   documents:{ label:'Документы WB',weight:6,freshSeconds:30*3600,critical:true },
-  jamSubscription:{ label:'Подписка «Джем»',weight:0,optional:true },
+  jamSubscription:{ label:'Подписка «Джем»',weight:0,optional:true,mode:'reference' },
   searchQueries:{ label:'Поисковые запросы',weight:2,freshSeconds:3*3600,optional:true },
   stockHistory:{ label:'История остатков',weight:4,freshSeconds:30*3600 },
   reviews:{ label:'Отзывы',weight:2,freshSeconds:3*3600 },
@@ -117,16 +117,17 @@ function deriveRowsPeriod(stream,payload) {
 export function extractStreamCoverage(stream,row = {}) {
   const payload = row?.payload && typeof row.payload === 'object' ? row.payload : {}
   const metadata = row?.metadata && typeof row.metadata === 'object' ? row.metadata : {}
-  const candidates = [
-    periodFromObject(payload.period),
-    periodFromObject(metadata.period),
-    periodFromObject(payload.coverage),
-    periodFromObject(metadata.coverage),
-    periodFromObject(payload.requestedPeriod),
-    periodFromObject(metadata.requestedPeriod),
+  // Фактические даты сохранённых строк важнее запрошенного периода.
+  // Иначе незавершённая пагинация могла ошибочно выглядеть полностью покрытой.
+  const rowsPeriod = deriveRowsPeriod(stream,payload)
+  if (rowsPeriod) return {...rowsPeriod,source:'rows'}
+  const confirmed = [periodFromObject(payload.coverage),periodFromObject(metadata.coverage)].filter(Boolean)
+  if (confirmed[0]) return {...confirmed[0],source:'coverage'}
+  const declared = [
+    periodFromObject(payload.period),periodFromObject(metadata.period),
+    periodFromObject(payload.requestedPeriod),periodFromObject(metadata.requestedPeriod),
   ].filter(Boolean)
-  const direct = candidates[0] || deriveRowsPeriod(stream,payload)
-  return direct ? {...direct,source:candidates.length?'metadata':'rows'} : null
+  return declared[0] ? {...declared[0],source:'declared'} : null
 }
 
 function coverageRatio(available,requested) {
@@ -149,37 +150,55 @@ function humanStatus(status) {
 
 function streamAction(status,stage,state,config) {
   if (status === 'blocked') return state?.lastError || 'Проверьте категорию доступа токена.'
-  if (status === 'waiting' || status === 'running') return state?.nextAllowedAt ? `Автоповтор после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : 'ELISEI продолжит автоматически.'
+  if (status === 'waiting' || status === 'running') return 'ELISEI продолжит автоматически в разрешённое WB окно.'
   if (status === 'partial') return 'Дождаться продолжения загрузки; сохранённые строки не удаляются.'
   if (status === 'stale') return 'Обновить поток или проверить живой режим.'
   if (status === 'missing') return config?.optional ? 'Источник дополнительный; загрузить при наличии доступа.' : 'Запустить поток при разрешённом окне WB.'
+  if (WAITING_STATUSES.has(String(state?.status || ''))) return 'Выбранный период подтверждён; очередное обновление продолжится автоматически.'
   return 'Данные можно использовать.'
 }
 
 function evaluateStream({stage,state,row,requested,now}) {
   const config = STAGE_CONFIG[stage] || {label:stage,weight:1,freshSeconds:24*3600}
+  const dataMode = config.mode || 'history'
   const rowCount = Math.max(Number(row?.row_count || 0),Number(state?.lastCount || state?.last_count || 0),Number(row?.payload?.totalRows || 0),Array.isArray(row?.payload)?row.payload.length:0)
   const updatedAt = row?.updated_at || row?.updatedAt || state?.lastSuccessAt || state?.last_success_at || null
-  const coverage = config.current || config.archive ? null : extractStreamCoverage(stage,row)
-  const ratio = config.current || config.archive ? null : coverageRatio(coverage,requested)
+  const coverage = dataMode === 'history' ? extractStreamCoverage(stage,row) : null
+  const ratio = dataMode === 'history' ? coverageRatio(coverage,requested) : null
   const complete = row?.payload?.complete !== false && row?.metadata?.complete !== false && row?.payload?.coverage?.partial !== true && row?.metadata?.coverage?.partial !== true
   const rawStatus = String(state?.status || (row ? 'success' : 'idle'))
   const age = ageSeconds(updatedAt,now)
   const stale = age != null && config.freshSeconds && age > config.freshSeconds
+  const hasSavedResult = Boolean(row) || rawStatus === 'success' || rowCount > 0
+  const selectedPeriodCovered = ratio != null && ratio >= .999
+  const backgroundPending = WAITING_STATUSES.has(rawStatus)
   let status = 'missing'
+
   if (BLOCKED_STATUSES.has(rawStatus)) status='blocked'
-  else if (rawStatus === 'running') status='running'
-  else if (WAITING_STATUSES.has(rawStatus)) status=rowCount>0?'partial':'waiting'
-  else if (rowCount>0 || rawStatus === 'success') {
-    if (!complete || (ratio != null && ratio < .999)) status='partial'
-    else if (stale) status='stale'
-    else status='ready'
+  else if (!hasSavedResult && rawStatus === 'running') status='running'
+  else if (!hasSavedResult && backgroundPending) status='waiting'
+  else if (hasSavedResult) {
+    if (dataMode === 'history') {
+      const selectedPeriodPartial = ratio != null && ratio < .999
+      const incompleteBlocksConfirmation = !complete && !config.coverageCanConfirmPartial
+      if (selectedPeriodPartial || incompleteBlocksConfirmation || (ratio == null && !complete)) status='partial'
+      else if (stale) status='stale'
+      else status='ready'
+    } else {
+      // Снимок остатков и справочники не сравниваются с историческим диапазоном.
+      if (!complete && rawStatus !== 'success') status='partial'
+      else if (stale) status='stale'
+      else status='ready'
+    }
   }
+
   const quality = ({ready:1,stale:.78,partial:.68,running:.55,waiting:.35,blocked:0,missing:config.optional?.45:0})[status] ?? 0
+  const modeLabel = ({snapshot:'Текущий снимок',reference:'Актуальный справочник',archive:'Архив',history:'Исторические данные'})[dataMode] || dataMode
   return {
     stage,label:config.label,status,statusLabel:humanStatus(status),rawStatus,rowCount,source:row?.source || null,
     updatedAt,lastSuccessAt:state?.lastSuccessAt || state?.last_success_at || null,nextAllowedAt:state?.nextAllowedAt || state?.next_allowed_at || null,
-    taskId:state?.taskId || state?.task_id || null,metadata:state?.metadata || {},coverage,coverageRatio:ratio,complete,
+    taskId:state?.taskId || state?.task_id || null,metadata:state?.metadata || {},coverage,coverageRatio:ratio,selectedPeriodCovered,complete,
+    dataMode,dataModeLabel:modeLabel,backgroundPending,
     freshness:{ageSeconds:age,expectedSeconds:config.freshSeconds || null,stale},critical:Boolean(config.critical),optional:Boolean(config.optional),weight:Number(config.weight||0),quality,
     action:streamAction(status,stage,state,config),dependency:config.dependsOn || null,
   }
@@ -187,7 +206,7 @@ function evaluateStream({stage,state,row,requested,now}) {
 
 function severityRank(value){ return ({critical:0,warning:1,info:2})[value] ?? 3 }
 
-function issue(id,severity,title,text,action,stage=null){ return {id,severity,title,text,action,stage} }
+function issue(id,severity,title,text,action,stage=null,extra={}){ return {id,severity,title,text,action,stage,...extra} }
 
 function financeCheck(financeSummary = {},financeStream,requested) {
   const movements=Number(financeSummary.movements||0)
@@ -221,7 +240,7 @@ export function buildDataQualityReport({states=[],streamRows=[],requestedPeriod=
     else if (item.status==='missing' && item.critical) issues.push(issue(`missing:${item.stage}`,'critical',`${item.label}: данных нет`,'Источник нужен для подтверждённых итогов.',item.action,item.stage))
     else if (item.status==='partial' && item.critical) issues.push(issue(`partial:${item.stage}`,'warning',`${item.label}: загружено частично`,item.coverage?`Покрытие ${item.coverage.from} — ${item.coverage.to}.`:`Сохранено строк: ${item.rowCount}.`,item.action,item.stage))
     else if (item.status==='stale' && item.critical) issues.push(issue(`stale:${item.stage}`,'warning',`${item.label}: данные устарели`,'Последнее успешное обновление старше ожидаемого интервала.',item.action,item.stage))
-    else if (item.status==='waiting' && item.critical) issues.push(issue(`waiting:${item.stage}`,'warning',`${item.label}: ожидает WB`,item.nextAllowedAt?`Следующее окно: ${item.nextAllowedAt}.`:'Поток поставлен в очередь.',item.action,item.stage))
+    else if (item.status==='waiting' && item.critical) issues.push(issue(`waiting:${item.stage}`,'warning',`${item.label}: ожидает WB`,'Поток поставлен в очередь и продолжится автоматически.',item.action,item.stage,{nextAllowedAt:item.nextAllowedAt}))
   }
 
   if (finance.movements>0 && !finance.withinTolerance) issues.push(issue('finance:reconciliation','warning','Финансовая сверка имеет расхождение',`Разница между компонентами и суммой к перечислению: ${Math.round(finance.difference)} ₽.`,'Проверить неподтверждённые удержания и дождаться полного отчёта.','finance'))
@@ -230,10 +249,14 @@ export function buildDataQualityReport({states=[],streamRows=[],requestedPeriod=
   const products=Number(productDiagnostics.products||0)
   const withBarcodes=Number(productDiagnostics.withBarcodes||0)
   const withMappedStock=Number(productDiagnostics.withMappedStock||0)
+  const missingBarcodes=Array.isArray(productDiagnostics.missingBarcodes)?productDiagnostics.missingBarcodes:[]
+  const unmatchedStock=Array.isArray(productDiagnostics.unmatchedStock)?productDiagnostics.unmatchedStock:[]
+  const missingBarcodesCount=Number(productDiagnostics.missingBarcodesCount ?? missingBarcodes.length)
+  const unmatchedStockCount=Number(productDiagnostics.unmatchedStockCount ?? unmatchedStock.length)
   const barcodeRatio=products>0?withBarcodes/products:null
   const stockMappingRatio=products>0?withMappedStock/products:null
   if (products>0 && barcodeRatio<.9) issues.push(issue('products:barcodes','warning','Не все карточки имеют штрихкоды',`Со штрихкодами ${withBarcodes} из ${products} карточек.`,'Обновить каталог и проверить сопоставление размеров.','products'))
-  if (products>0 && byStage.stocks?.rowCount>0 && stockMappingRatio<.75) issues.push(issue('stocks:mapping','warning','Часть остатков не связана с товарами',`Остатки сопоставлены минимум с ${withMappedStock} из ${products} карточек.`,'Проверить barcode → nmID → vendorCode.','stocks'))
+  if (products>0 && byStage.stocks?.rowCount>0 && stockMappingRatio<.75) issues.push(issue('stocks:mapping','warning','Не для всех карточек подтверждён текущий снимок остатков',`Сопоставление подтверждено минимум для ${withMappedStock} из ${products} карточек. Отсутствующая строка может означать нулевой остаток или проблему идентификаторов.`,'Проверить список карточек и цепочку barcode → nmID → vendorCode.','stocks'))
 
   if (byStage.acquiring?.status!=='ready' && byStage.finance?.rowCount>0) issues.push(issue('acquiring:derived','info','Эквайринг ещё не подтверждён отдельно','Основной финансовый отчёт уже может содержать суммы эквайринга.','Дождаться завершения производного расчёта.','acquiring'))
   const weighted=stages.filter(item=>item.weight>0 && !item.optional)
@@ -263,7 +286,7 @@ export function buildDataQualityReport({states=[],streamRows=[],requestedPeriod=
     generatedAt:new Date(now).toISOString(),requestedPeriod:requested,score,overall,
     summary:{ready:readyCount,partial:partialCount,critical:criticalCount,warnings:warningCount,total:stages.length},
     confirmedPeriod,profitConfidence,finance,
-    productDiagnostics:{products,withBarcodes,withMappedStock,barcodeRatio,stockMappingRatio},
+    productDiagnostics:{products,withBarcodes,withMappedStock,barcodeRatio,stockMappingRatio,missingBarcodesCount,unmatchedStockCount,missingBarcodes,unmatchedStock},
     streams:stages,
     issues:issues.sort((a,b)=>severityRank(a.severity)-severityRank(b.severity)||a.title.localeCompare(b.title,'ru')),
   }
