@@ -1,0 +1,23 @@
+ELISEI 5.10.5 / backend 2.22.5 / El Core 5.10.5
+
+SMART WB SCHEDULER
+- One priority due stage per seller connection per background-worker cycle.
+- No parallel fan-out of deferred/archive/report lanes for the same seller.
+- Initial cabinet sync is staggered instead of assigning the same timestamp to every stage.
+- Priority order favors current operational data; FBS archive stays low priority.
+- Existing WB report taskId gets a priority boost so generated reports are finished before unrelated new calls.
+- Successful responses are inspected for X-Ratelimit-Remaining / X-Ratelimit-Reset.
+- X-Ratelimit-Retry and Retry-After remain authoritative on 429.
+- Short local waits <=3s happen inside the stage; longer windows return to queued state without sending a request.
+- Local scheduler wait uses code WB_SCHEDULER_WAIT and never masquerades as a WB 429.
+
+UI
+- Neutral clock state for scheduled/waiting calls.
+- «Ожидает запуска» for deliberate queue staggering.
+- «Ожидает окно WB» for rate-limit windows.
+- Real retryable errors remain warnings; permanent errors remain red.
+
+REGRESSION
+- 29/29 backend tests passed.
+- JS/CJS syntax checks passed.
+- Existing Base finance 12h rate-limit preservation remains covered.

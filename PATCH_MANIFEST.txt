@@ -1,15 +1,9 @@
-ELISEI 5.10.4 CORRECTIVE PATCH
-Base: ELISEI 5.10.3
-Frontend: 5.10.4
-Backend: 2.22.4
-El Core: 5.10.4
-
-Purpose:
-- correct WB finance rate limits by token mode;
-- preserve real Base-token 12h finance rate limits instead of force-resetting them;
-- request up to 100,000 finance rows per allowed call;
-- correct Base document cooldown;
-- explain Base-token finance limits in sync UI;
-- keep one user-facing WB connection; service secret remains backend-only.
-
-Backend test result: 28/28 passed.
+ELISEI PATCH 5.10.5
+Base: ELISEI 5.10.4
+Frontend: 5.10.5
+Backend: 2.22.5
+El Core: 5.10.5
+Purpose: Smart WB Scheduler — priority queue, no cold-start burst, response-header rate windows, neutral waiting states.
+Install: copy the contents over the existing repository with replacement, then redeploy backend and frontend.
+Important: do not clear WB tokens, rrdId, taskId, cursors or database state.
+Payload files: 16 (+ manifest/checksum helper files)

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  AlertTriangle, BarChart3, Bell, Boxes, Calculator, CalendarDays, CheckCircle2, ChevronDown,
+  AlertTriangle, BarChart3, Bell, Boxes, Calculator, CalendarDays, CheckCircle2, ChevronDown, Clock3,
   ChevronRight, ChevronUp, CircleDollarSign, CreditCard, Download, Eye, EyeOff, FileText, Home, LogOut,
   Info, Megaphone, MessageCircle, PackageSearch, Percent, PlugZap, RefreshCw, Save, Search, Send,
   Settings, ShieldCheck, SlidersHorizontal, Sparkles, Star, Tag, TrendingUp, UsersRound,
@@ -16,6 +16,18 @@ const formatMoney = value => value == null ? 'Не загружено' : `${new 
 const formatNumber = value => value == null ? 'Не загружено' : new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))
 const formatPercent = value => value == null ? '—' : `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits:1 }).format(Number(value || 0))}%`
 const csvCell = value => `"${String(value ?? '').replaceAll('"','""')}"`
+
+const formatSchedulerWait = value => {
+  const target = Date.parse(value || '')
+  if (!Number.isFinite(target)) return ''
+  const seconds = Math.max(0,Math.ceil((target-Date.now())/1000))
+  if (seconds <= 0) return 'сейчас'
+  if (seconds < 60) return `через ${seconds} сек.`
+  if (seconds < 3600) return `через ${Math.ceil(seconds/60)} мин.`
+  const hours = Math.floor(seconds/3600)
+  const minutes = Math.ceil((seconds-hours*3600)/60)
+  return `через ${hours} ч.${minutes ? ` ${minutes} мин.` : ''}`
+}
 
 
 const EL_CHAT_MESSAGES_KEY = 'elisei.el.embedded.messages.v2'
@@ -1889,10 +1901,10 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       if (!state) return 'Будет загружено автоматически'
       if (state.status === 'success') return `Загружено: ${formatNumber(state.lastCount)}`
       if (state.status === 'pending') return 'WB формирует данные'
-      if (state.status === 'queued') return 'В фоновой очереди'
+      if (state.status === 'queued') return state.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now() ? `Ожидает запуска · ${formatSchedulerWait(state.nextAllowedAt)}` : 'В фоновой очереди'
       if (state.status === 'running') return 'Загружается'
       if (state.status === 'retry_scheduled') return state.nextAllowedAt ? `Автоповтор после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : 'Автоповтор запланирован'
-      if (state.status === 'rate_limited') return state.nextAllowedAt ? `Пауза WB до ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : 'Пауза по лимиту WB'
+      if (state.status === 'rate_limited') return state.nextAllowedAt ? `Ожидает окно WB · ${formatSchedulerWait(state.nextAllowedAt)}` : 'Ожидает окно WB'
       if (state.status === 'optional_unavailable') return 'Дополнительный источник недоступен'
       if (state.status === 'missing_token') return 'Категория не включена в ключе'
       if (state.status === 'forbidden') return 'WB не дал доступ этому ключу'
@@ -1990,6 +2002,10 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
           tone:'pending',title:'Документы загружены частично',
           text:`Сохранено ${formatNumber(state.metadata?.persistedCount || state.lastCount || 0)} документов. ${state.nextAllowedAt ? `Продолжение после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}.` : 'Продолжение поставлено в очередь.'}`,
         }
+        if (state.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now()) return {
+          tone:'idle',title:'Ожидает запуска',
+          text:`Smart Scheduler запустит этот поток ${formatSchedulerWait(state.nextAllowedAt)}. Запрос к WB пока не отправляется.`,
+        }
         if (stage === 'fbsArchive' && state.metadata?.currentMonth) {
           const month = state.metadata.currentMonth
           return {
@@ -2008,13 +2024,13 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         const generatedTask = ['paidStorage','acceptance'].includes(stage) && state.taskId
         if (generatedTask) return due
           ? { tone:'pending', title:'Проверяем готовность отчёта', text:'taskId сохранён. Срок паузы закончился, фоновая очередь продолжает тот же отчёт.' }
-          : { tone:'warning', title:'Отчёт создан · ждём WB', text:state.nextAllowedAt ? `taskId сохранён. Следующая проверка после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : (state.lastError || 'ELISEI продолжит тот же отчёт автоматически.') }
+          : { tone:'idle', title:'Отчёт создан · ждём WB', text:state.nextAllowedAt ? `taskId сохранён. Следующая проверка после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : (state.lastError || 'ELISEI продолжит тот же отчёт автоматически.') }
         if (stage === 'finance' && state.metadata?.tokenMode === 'base') return due
           ? { tone:'pending', title:'Финансы · разрешённый повтор запускается', text:'12-часовой интервал Базового токена закончился. ELISEI продолжает загрузку с сохранённого rrdId.' }
-          : { tone:'warning', title:'Финансы · лимит Базового токена WB', text:state.nextAllowedAt ? `Данные и rrdId сохранены. WB разрешит следующий запрос после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}. Для Базового токена без сервисного секрета это официальный интервал 12 часов; второй пользовательский токен не требуется.` : (state.lastError || 'WB временно ограничил финансовый метод для Базового токена.') }
+          : { tone:'idle', title:'Ожидает окно WB · финансы', text:state.nextAllowedAt ? `Данные и rrdId сохранены. Автоповтор ${formatSchedulerWait(state.nextAllowedAt)} (${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}). Для Базового токена без сервисного секрета это официальный интервал WB; второй пользовательский токен не требуется.` : (state.lastError || 'WB временно ограничил финансовый метод для Базового токена.') }
         return due
           ? { tone:'pending', title:'Автоповтор запускается', text:'Срок паузы закончился. Интерфейс разбудил фоновую очередь; статус обновится автоматически.' }
-          : { tone:'warning', title:'Лимит метода WB', text:state.nextAllowedAt ? `Только этот поток ждёт до ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}. Остальные этапы продолжаются независимо.` : (state.lastError || 'Только этот поток временно ожидает разрешённого интервала WB.') }
+          : { tone:'idle', title:'Ожидает окно WB', text:state.nextAllowedAt ? `Автоповтор ${formatSchedulerWait(state.nextAllowedAt)}. Запросы других потоков планируются независимо; повторно нажимать ничего не нужно.` : (state.lastError || 'Smart Scheduler дождётся разрешённого интервала WB и продолжит автоматически.') }
       }
       if (state.status === 'retry_scheduled') {
         const due = state.nextAllowedAt && new Date(state.nextAllowedAt).getTime() <= Date.now()
@@ -2029,7 +2045,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       if (state.status === 'running') return { tone:'pending', title:'Загрузка', text:'Запрос выполняется.' }
       return { tone:'danger', title:'Не загружено', text:state.lastError || 'Запустите этап повторно.' }
     }
-    return <section className="app-page glass-panel"><div className="page-title"><span>Контроль данных</span><h1>Журнал синхронизаций</h1><p>Каждый поток работает независимо. Лимит одного метода больше не останавливает остальные разделы.</p></div>{connection.connected && <div className="quality-center">
+    return <section className="app-page glass-panel"><div className="page-title"><span>Контроль данных</span><h1>Журнал синхронизаций</h1><p>Smart WB Scheduler сам распределяет запросы по очереди и окнам API. Ожидание лимита — нормальный статус, а не ошибка кабинета.</p></div>{connection.connected && <div className="quality-center">
       <div className="quality-center-head">
         <div className={`quality-score ${dataQuality?.overall || 'loading'}`}>
           <strong>{dataQualityLoading && !dataQuality ? '…' : `${formatNumber(dataQuality?.score || 0)}%`}</strong>
@@ -2079,7 +2095,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       </div>}
     </div>}{integrationDiagnostics && <div className="data-integrity-strip"><div><strong>Единое ядро товаров</strong><span>{formatNumber(integrationDiagnostics.productMaster?.products)} карточек · {formatNumber(integrationDiagnostics.productMaster?.withBarcodes)} со ШК</span></div><div><strong>Остатки</strong><span>{integrationDiagnostics.stockAllocation?`${formatNumber(integrationDiagnostics.stockAllocation.matchedQuantity)} шт. сопоставлено`:'снимок ожидается'}</span></div><div><strong>Реклама</strong><span>{formatNumber(integrationDiagnostics.advertisingMeta?.campaigns)} кампаний · {formatNumber(integrationDiagnostics.advertisingMeta?.campaignsWithStats)} со статистикой</span></div></div>}{!connection.connected ? <div className="empty-state"><RefreshCw size={38}/><h3>Wildberries не подключён</h3><button className="primary-btn" onClick={() => setActive('Подключения')}>Подключить</button></div> : <>
       <div className="sync-summary"><div><span>Последнее успешное обновление</span><strong>{connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : 'Ещё не выполнялось'}</strong></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Запускаем этапы':'Запустить доступные этапы'}</button></div>
-      <div className="sync-stage-grid">{stages.map(([stage,label]) => { const state=stateFor(stage); const copy=statusCopy(state,stage); const blocked=syncing || state?.status === 'pending' || (state?.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now()); const buttonText=blocked?(state?.status==='pending'?'Ожидаем WB':'Повтор будет автоматически'):(['rate_limited','retry_scheduled'].includes(state?.status)?'Повторить сейчас':'Обновить отдельно'); return <div id={`sync-stage-${stage}`} className={`sync-stage-card ${copy.tone}`} key={stage}><div className="sync-stage-head"><span>{copy.tone==='success'?<CheckCircle2 size={19}/>:copy.tone==='pending'?<RefreshCw className="spin" size={19}/>:<AlertTriangle size={19}/>}</span><div><small>{label}</small><strong>{copy.title}</strong></div></div><p>{copy.text}</p><button disabled={blocked} onClick={() => syncConnection(connection.connectionId,[stage],{period:['advertising','searchQueries','stockHistory','finance','acquiring','documents'].includes(stage)?analyticsPeriod:null})}>{buttonText}</button></div> })}</div>
+      <div className="sync-stage-grid">{stages.map(([stage,label]) => { const state=stateFor(stage); const copy=statusCopy(state,stage); const blocked=syncing || state?.status === 'pending' || (state?.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now()); const buttonText=blocked?(state?.status==='pending'?'Ожидаем WB':'Повтор будет автоматически'):(['rate_limited','retry_scheduled'].includes(state?.status)?'Повторить сейчас':'Обновить отдельно'); return <div id={`sync-stage-${stage}`} className={`sync-stage-card ${copy.tone}`} key={stage}><div className="sync-stage-head"><span>{copy.tone==='success'?<CheckCircle2 size={19}/>:copy.tone==='pending'?<RefreshCw className="spin" size={19}/>:copy.tone==='idle'?<Clock3 size={19}/>:<AlertTriangle size={19}/>}</span><div><small>{label}</small><strong>{copy.title}</strong></div></div><p>{copy.text}</p><button disabled={blocked} onClick={() => syncConnection(connection.connectionId,[stage],{period:['advertising','searchQueries','stockHistory','finance','acquiring','documents'].includes(stage)?analyticsPeriod:null})}>{buttonText}</button></div> })}</div>
       {coreData?.syncWarnings?.length > 0 && <div className="warning-stack">{coreData.syncWarnings.map((warning,index) => <div key={index}><AlertTriangle size={17}/>{warning}</div>)}</div>}
       <div className="sync-log">{syncHistory.length === 0 ? <div className="sync-empty">В журнале пока нет записей.</div> : syncHistory.map(item => { const warnings=Boolean(item.warnings?.length); const counts=item.counts || {}; return <div className={`sync-log-row ${warnings?'warning':item.status}`} key={item.id}><div className="sync-log-icon">{item.status==='success'&&!warnings?<CheckCircle2 size={18}/>:<AlertTriangle size={18}/>}</div><div><strong>{item.automatic?'Автоматический повтор':item.status==='success'?(warnings?'Завершено частично':'Завершено успешно'):'Не все этапы завершены'}</strong><span>{new Date(item.at).toLocaleString('ru-RU')}</span></div><div className="sync-log-details"><span>{counts.products ?? 0} товаров</span><span>{counts.orders ?? 0} заказов</span><span>{counts.sales ?? 0} продаж</span><span>{counts.stocks ?? 0} строк остатков</span><span>{counts.advertising ?? 0} кампаний</span>{warnings&&<span className="sync-warning-text">{item.warnings[0]}</span>}</div></div>})}</div>
     </>}</section>

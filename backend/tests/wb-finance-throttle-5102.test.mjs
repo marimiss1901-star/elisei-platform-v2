@@ -20,14 +20,14 @@ for(const marker of [
   'Math.min(100000',
   'WB_FINANCE_PAGE_LIMIT || 100000',
   'financeRuntimeTokenInfo',
-  "version: '2.22.4'",
-  'ELISEI/2.22.4',
+  "version: '2.22.5'",
+  'ELISEI/2.22.5',
 ]) assert.ok(server.includes(marker),`server.js must contain ${marker}`)
 
 const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')
 for(const marker of [
-  'Финансы · лимит Базового токена WB',
-  'официальный интервал 12 часов',
+  'Ожидает окно WB · финансы',
+  'официальный интервал WB',
   'второй пользовательский токен не требуется',
 ]) assert.ok(dashboard.includes(marker),`DashboardPage must contain ${marker}`)
 

@@ -19,7 +19,9 @@ for (const marker of [
   'const RETRYABLE_HTTP_STATUSES = new Set([408,425,500,502,503,504])',
   "s.status IN ('rate_limited','queued','retry_scheduled')",
   'async function processDueArchiveStages',
-  'Promise.all([processDueDeferredStages(),processDueArchiveStages()])',
+  'await prepareSmartSchedulerCycle()',
+  'await processDueDeferredStages()',
+  'await processDueArchiveStages()',
   'automaticRetryAttempt',
   "const oldServiceStatuses = new Set(['service_token_required','service_secret_required','service_token_invalid','service_permission_required'])",
   'const missingCoreStages = GENERAL_SYNC_STAGE_NAMES.filter',
@@ -27,6 +29,7 @@ for (const marker of [
 ]) assert.ok(server.includes(marker),`server.js must contain ${marker}`)
 
 assert.ok(!server.includes('const SERVICE_TOKEN_STAGES ='), 'core routing must not require a separate service-token lane')
+assert.ok(!server.includes('Promise.all([processDueDeferredStages(),processDueArchiveStages()])'), 'background lanes must not fan out in parallel for one seller account')
 assert.ok(!server.includes("purpose === 'service' && info.typeId !== 4"), 'connect endpoint must not split the user into general/service token forms')
 assert.ok(server.includes('connected: Boolean(row && tokens.length)'), 'any valid connected cabinet key may establish the cabinet connection')
 assert.ok(server.includes('taskId:error?.resetTask ? null : state?.task_id'), 'automatic retry must preserve taskId')

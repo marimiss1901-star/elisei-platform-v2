@@ -45,6 +45,9 @@ import {
   LIVE_SYNC_STAGES, defaultLiveSyncSettings, normalizeLiveSyncSettings, dueLiveStages, eventStages, safeEqualSecret, publicLiveSyncStatus,
 } from './wb/live-sync.js'
 import { buildDataQualityReport } from './wb/data-quality.js'
+import {
+  stagePriority, schedulerGroup, chooseCycleWinners, initialStageSchedule, schedulerVisualState,
+} from './wb/smart-scheduler.js'
 import { buildElEngagementData } from './services/elEngagement.js'
 import elDecisionEngine from './services/elDecisionEngine.cjs'
 
@@ -213,6 +216,48 @@ async function recoverLegacyFinanceCooldowns({ connectionId = null } = {}) {
 }
 
 
+
+let smartSchedulerWinners = new Map()
+let smartSchedulerPreparedAt = null
+
+async function prepareSmartSchedulerCycle() {
+  if (!pool) {
+    smartSchedulerWinners = new Map()
+    return smartSchedulerWinners
+  }
+  const result = await pool.query(`
+    SELECT s.connection_id,s.stage,s.status,s.task_id,s.next_allowed_at,s.updated_at
+    FROM wb_sync_states s
+    JOIN marketplace_connections c ON c.id=s.connection_id
+    WHERE s.status IN ('pending','queued','rate_limited','retry_scheduled')
+      AND (s.next_allowed_at IS NULL OR s.next_allowed_at <= NOW())
+      AND c.status='connected'
+    ORDER BY s.updated_at
+    LIMIT 250
+  `)
+  smartSchedulerWinners = chooseCycleWinners(result.rows)
+  smartSchedulerPreparedAt = new Date().toISOString()
+  return smartSchedulerWinners
+}
+
+function smartSchedulerAllows(connectionId, stage) {
+  if (!smartSchedulerPreparedAt) return true
+  const winner = smartSchedulerWinners.get(String(connectionId))
+  return winner === String(stage)
+}
+
+function smartSchedulerMeta(stage, extra = {}) {
+  return {
+    scheduler:{
+      mode:'smart_wb_scheduler_v1',
+      priority:stagePriority(stage),
+      group:schedulerGroup(stage),
+      preparedAt:smartSchedulerPreparedAt,
+      ...extra,
+    },
+  }
+}
+
 const backgroundWorkerState = {
   running: false,
   promise: null,
@@ -231,12 +276,16 @@ function kickBackgroundWorkers(reason = 'timer') {
   const promise = (async () => {
     await recoverStaleSyncStates({ reason:`worker:${reason}` })
     await recoverLegacyFinanceCooldowns()
-    // Выполняем последовательно, чтобы два тяжёлых запроса WB одного продавца
-    // не стартовали в одну секунду и не провоцировали глобальный лимитер.
+    // 5.10.5 Smart WB Scheduler: сначала добавляем живые задачи в очередь,
+    // затем выбираем ровно один приоритетный due-этап на каждый кабинет.
+    // Это исключает cold-start burst: разные lanes больше не стреляют по WB
+    // одновременно от имени одного продавца.
+    await scheduleDueLiveSyncStages()
+    await prepareSmartSchedulerCycle()
+    await processDueDeferredStages()
     await processPendingStockReports()
     await processPendingGeneratedReports()
-    await scheduleDueLiveSyncStages()
-    await Promise.all([processDueDeferredStages(),processDueArchiveStages()])
+    await processDueArchiveStages()
   })().catch(error => {
     backgroundWorkerState.lastError = error.message
     console.warn('WB background worker kick failed:', error.message)
@@ -626,6 +675,62 @@ function humanWait(seconds) {
   return `${Math.max(1, Math.ceil(seconds))} сек.`
 }
 
+const wbRuntimeRateWindows = new Map()
+
+function wbRateWindowKey(url) {
+  try {
+    const parsed = new URL(String(url))
+    const normalizedPath = parsed.pathname
+      .split('/')
+      .map(part => /^\d+$/.test(part) ? ':id' : /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(part) ? ':uuid' : part)
+      .join('/')
+    return `${parsed.origin}${normalizedPath}`
+  } catch {
+    return String(url || '').split('?')[0]
+  }
+}
+
+function rememberWbRateWindow(url, response) {
+  if (!response?.headers) return null
+  const remaining = Number(response.headers.get('x-ratelimit-remaining'))
+  const reset = Number(response.headers.get('x-ratelimit-reset'))
+  const retry = Number(response.headers.get('x-ratelimit-retry') || response.headers.get('retry-after'))
+  const seconds = Number.isFinite(retry) && retry > 0
+    ? retry
+    : Number.isFinite(remaining) && remaining <= 0 && Number.isFinite(reset) && reset > 0
+      ? reset
+      : 0
+  if (!(seconds > 0)) return null
+  const key = wbRateWindowKey(url)
+  const nextAllowedAt = Date.now() + Math.ceil(seconds * 1000) + 350
+  const current = Number(wbRuntimeRateWindows.get(key) || 0)
+  if (nextAllowedAt > current) wbRuntimeRateWindows.set(key,nextAllowedAt)
+  return new Date(nextAllowedAt).toISOString()
+}
+
+async function waitForWbRuntimeWindow(url, label = 'WB API', deadlineAt = 0) {
+  const key = wbRateWindowKey(url)
+  const next = Number(wbRuntimeRateWindows.get(key) || 0)
+  if (!next || next <= Date.now()) {
+    if (next) wbRuntimeRateWindows.delete(key)
+    return
+  }
+  const waitMs = Math.max(0,next-Date.now())
+  // Tiny intervals are cheaper to wait inside the same stage than to persist a
+  // continuation and wake the worker again. Longer windows return to the queue.
+  if (waitMs <= 3000 && (!deadlineAt || Date.now()+waitMs+750 < deadlineAt)) {
+    await sleep(waitMs)
+    wbRuntimeRateWindows.delete(key)
+    return
+  }
+  const seconds = Math.max(1,Math.ceil(waitMs/1000))
+  throw Object.assign(new Error(`${label}: Smart Scheduler ждёт разрешённое окно WB (${humanWait(seconds)}).`),{
+    code:'WB_SCHEDULER_WAIT',
+    nextAllowedAt:new Date(next).toISOString(),
+    schedulerWait:true,
+  })
+}
+
 function transientRetryPlan(state, stage, error) {
   const previous = Math.max(0,Number(state?.metadata?.automaticRetryAttempt || 0))
   const attempt = Math.min(MAX_AUTOMATIC_RETRY_ATTEMPTS,previous + 1)
@@ -654,7 +759,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.22.4 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.22.5 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -677,6 +782,7 @@ async function wbFetch(url, token, options = {}) {
 
   let lastError = null
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    await waitForWbRuntimeWindow(url,label,deadlineAt)
     const remainingMs = deadlineAt ? deadlineAt - Date.now() : timeoutMs
     if (remainingMs <= 1000) {
       throw Object.assign(new Error(`${label}: достигнут общий лимит времени синхронизации`), { status: 504 })
@@ -707,6 +813,7 @@ async function wbFetch(url, token, options = {}) {
       payload = source ? JSON.parse(source) : null
     } catch { payload = text }
     const requestId = response.headers.get('x-request-id') || payload?.requestId || ''
+    rememberWbRateWindow(url,response)
 
     if (response.ok) return payload
 
@@ -752,6 +859,7 @@ async function wbFetchBuffer(url, token, options = {}) {
     label = 'WB API',
     ...fetchOptions
   } = options
+  await waitForWbRuntimeWindow(url,label,deadlineAt)
   const remainingMs = deadlineAt ? deadlineAt - Date.now() : timeoutMs
   if (remainingMs <= 1000) throw Object.assign(new Error(`${label}: достигнут общий лимит времени синхронизации`), { status:504 })
   let response
@@ -764,6 +872,7 @@ async function wbFetchBuffer(url, token, options = {}) {
   } catch (cause) {
     throw Object.assign(new Error(`${label}: сеть или таймаут запроса`), { status:502,cause })
   }
+  rememberWbRateWindow(url,response)
   if (response.ok) return Buffer.from(await response.arrayBuffer())
   const text = await response.text()
   let payload = null
@@ -977,6 +1086,12 @@ function publicSyncState(row) {
     lastCount: Number(row.last_count || 0),
     taskId: row.task_id || null,
     metadata: row.metadata || {},
+    visualState:schedulerVisualState(row),
+    scheduler:{
+      priority:stagePriority(row.stage),
+      group:schedulerGroup(row.stage),
+      mode:'smart_wb_scheduler_v1',
+    },
   }
 }
 
@@ -4941,24 +5056,29 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
     if (stage === 'searchQueries' && [402,403].includes(Number(error?.status))) {
       error.message = 'Поисковые запросы WB доступны только при активной подписке «Джем» и токене категории «Аналитика».'
     }
-    const retryable = isRetryableWbError(error)
+    const schedulerWait = error?.code === 'WB_SCHEDULER_WAIT'
+    const retryable = !schedulerWait && isRetryableWbError(error)
     const retryPlan = retryable ? transientRetryPlan(state,stage,error) : null
     const nextAllowedAt = error?.nextAllowedAt
       || (error?.retryAfterSeconds ? new Date(Date.now()+Number(error.retryAfterSeconds)*1000).toISOString() : null)
       || retryPlan?.nextAllowedAt
       || null
-    const status = Number(error?.status) === 429
-      ? 'rate_limited'
+    const status = schedulerWait
+      ? 'queued'
+      : Number(error?.status) === 429
+        ? 'rate_limited'
+        : retryable
+          ? 'retry_scheduled'
+          : stage === 'searchQueries' && [402,403].includes(Number(error?.status))
+            ? 'subscription_required'
+            : Number(error?.status) === 403
+              ? (OPTIONAL_PRIVILEGED_STAGES.has(stage) ? 'optional_unavailable' : 'forbidden')
+              : 'error'
+    const retryMessage = schedulerWait
+      ? `Smart Scheduler ждёт разрешённое окно WB${nextAllowedAt ? ` до ${new Date(nextAllowedAt).toLocaleString('ru-RU')}` : ''}. Запрос не отправлялся; прогресс сохранён.`
       : retryable
-        ? 'retry_scheduled'
-        : stage === 'searchQueries' && [402,403].includes(Number(error?.status))
-          ? 'subscription_required'
-          : Number(error?.status) === 403
-            ? (OPTIONAL_PRIVILEGED_STAGES.has(stage) ? 'optional_unavailable' : 'forbidden')
-            : 'error'
-    const retryMessage = retryable
-      ? `${Number(error?.status) === 504 ? 'Wildberries не ответил вовремя' : 'Временная ошибка Wildberries'}. Прогресс сохранён; автоматический повтор после ${new Date(nextAllowedAt).toLocaleString('ru-RU')}.`
-      : error.message
+        ? `${Number(error?.status) === 504 ? 'Wildberries не ответил вовремя' : 'Временная ошибка Wildberries'}. Прогресс сохранён; автоматический повтор после ${new Date(nextAllowedAt).toLocaleString('ru-RU')}.`
+        : error.message
     state = await updateSyncState(connection.id, stage, {
       status, lastAttemptAt:new Date().toISOString(), nextAllowedAt, lastError:retryMessage,
       taskId:error?.resetTask ? null : state?.task_id,
@@ -4967,6 +5087,7 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
         requestId:error?.requestId || null,
         code:error?.code || null,
         details:error?.details || null,
+        ...smartSchedulerMeta(stage,{reason:schedulerWait?'preflight_window':Number(error?.status)===429?'wb_429':'stage_result',requestSent:!schedulerWait}),
         ...(retryPlan ? { automaticRetryAttempt:retryPlan.attempt,automaticRetryReason:retryPlan.reason,lastTransientError:error.message } : {}),
       },
     })
@@ -5032,7 +5153,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.22.4',
+    version: '2.22.5',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -5272,13 +5393,19 @@ async function queueInitialCabinetSync(connection, tokens, { stages = null } = {
   const range = analyticsPeriodRange({ from, to:today })
   const requested = (Array.isArray(stages) ? stages : GENERAL_SYNC_STAGE_NAMES)
     .filter(stage => WB_SYNC_STAGES[stage] && selectTokenRowForStage(tokens,stage))
+  const schedule = initialStageSchedule(requested,{now:Date.now()})
+  const scheduleByStage = new Map(schedule.map(item => [item.stage,item]))
   for (const stage of requested) {
     const period = ['advertising','searchQueries','stockHistory','finance','acquiring','documents'].includes(stage)
       ? syncPeriodForStage(stage,range)
       : null
+    const slot = scheduleByStage.get(stage)
     await updateSyncState(connection.id,stage,{
-      status:'queued',lastAttemptAt:null,nextAllowedAt:nowIso,lastError:null,lastCount:0,taskId:null,
-      metadata:initialPeriodStageMetadata(stage,period),
+      status:'queued',lastAttemptAt:null,nextAllowedAt:slot?.nextAllowedAt || nowIso,lastError:null,lastCount:0,taskId:null,
+      metadata:{
+        ...initialPeriodStageMetadata(stage,period),
+        ...smartSchedulerMeta(stage,{reason:'initial_sync',sequence:slot?.sequence || null,scheduledAt:slot?.nextAllowedAt || nowIso}),
+      },
     })
   }
   if (requested.length) setTimeout(() => kickBackgroundWorkers(`initial-sync:${connection.id}`),25).unref?.()
@@ -6880,6 +7007,7 @@ async function processPendingStockReports() {
   }
 
   for (const row of pending) {
+    if (!smartSchedulerAllows(row.connection_id,'stocks')) continue
     if (backgroundStockLocks.has(row.connection_id)) continue
     backgroundStockLocks.add(row.connection_id)
     try {
@@ -6914,14 +7042,15 @@ async function processPendingStockReports() {
         metadata:{ taskStatus:'done', ...stockMeta, persistedRows:persisted.persistedRows, persistedQuantity:persisted.persistedQuantity },
       })
     } catch (error) {
-      const retryable = isRetryableWbError(error)
+      const schedulerWait = error?.code === 'WB_SCHEDULER_WAIT'
+      const retryable = !schedulerWait && isRetryableWbError(error)
       const plan = retryable ? transientRetryPlan(row,'stocks',error) : null
       const nextAllowedAt = error?.nextAllowedAt || plan?.nextAllowedAt || new Date(Date.now() + 60000).toISOString()
-      const status = Number(error?.status)===429 ? 'rate_limited' : retryable ? 'retry_scheduled' : 'pending'
+      const status = schedulerWait ? 'queued' : Number(error?.status)===429 ? 'rate_limited' : retryable ? 'retry_scheduled' : 'pending'
       await updateSyncState(row.connection_id, 'stocks', {
-        status,nextAllowedAt,lastError:retryable ? `Временная ошибка WB. Прогресс отчёта сохранён; автоповтор после ${new Date(nextAllowedAt).toLocaleString('ru-RU')}.` : error.message,
+        status,nextAllowedAt,lastError:schedulerWait ? 'Smart Scheduler ждёт разрешённое окно WB; повтор выполнится автоматически без нового запроса до этого времени.' : retryable ? `Временная ошибка WB. Прогресс отчёта сохранён; автоповтор после ${new Date(nextAllowedAt).toLocaleString('ru-RU')}.` : error.message,
         taskId:error?.resetTask?null:row.task_id,
-        metadata:{ ...(row.metadata || {}),...(plan ? {automaticRetryAttempt:plan.attempt,automaticRetryReason:plan.reason,lastTransientError:error.message} : {}) },
+        metadata:{ ...(row.metadata || {}),...smartSchedulerMeta('stocks',{reason:schedulerWait?'preflight_window':Number(error?.status)===429?'wb_429':'stock_poll',requestSent:!schedulerWait}),...(plan ? {automaticRetryAttempt:plan.attempt,automaticRetryReason:plan.reason,lastTransientError:error.message} : {}) },
       })
     } finally {
       backgroundStockLocks.delete(row.connection_id)
@@ -6953,6 +7082,7 @@ async function processPendingGeneratedReports() {
   }
 
   for (const row of due) {
+    if (!smartSchedulerAllows(row.connection_id,row.stage)) continue
     if (generatedReportLocks.has(row.connection_id)) continue
     generatedReportLocks.add(row.connection_id)
     try {
@@ -7041,6 +7171,7 @@ async function processDueDeferredStages() {
   }
 
   for (const row of due) {
+    if (!smartSchedulerAllows(row.connection_id,row.stage)) continue
     const syncKey = `${row.user_id}:${row.connection_id}`
     if (deferredStageLocks.has(row.connection_id) || activeSyncs.has(syncKey)) continue
     deferredStageLocks.add(row.connection_id)
@@ -7112,6 +7243,7 @@ async function processDueArchiveStages() {
   }
 
   for (const row of due) {
+    if (!smartSchedulerAllows(row.connection_id,'fbsArchive')) continue
     const syncKey = `${row.user_id}:${row.connection_id}`
     if (archiveStageLocks.has(row.connection_id) || activeSyncs.has(syncKey)) continue
     archiveStageLocks.add(row.connection_id)
