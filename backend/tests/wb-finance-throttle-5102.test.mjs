@@ -19,8 +19,8 @@ for(const marker of [
   "legacyFinanceCooldownRecovered",
   "await recoverLegacyFinanceCooldowns({ connectionId:connection.id })",
   "await recoverLegacyFinanceCooldowns()",
-  "version: '2.22.2'",
-  'ELISEI/2.22.2',
+  "version: '2.22.3'",
+  'ELISEI/2.22.3',
 ]) assert.ok(server.includes(marker),`server.js must contain ${marker}`)
 
 const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')

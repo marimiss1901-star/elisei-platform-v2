@@ -212,10 +212,12 @@ async function recoverLegacyFinanceCooldowns({ connectionId = null } = {}) {
     params.push(connectionId)
     connectionFilter=' AND connection_id=$1'
   }
-  // До 5.10.2 ELISEI ошибочно держал базовый финансовый поток 12 часов между
-  // страницами. WB уже расширил лимит sales-reports/detailed до 1 запроса
-  // примерно раз в 20 секунд. Сбрасываем только явно legacy-паузы, не трогая
-  // реальные Retry-After от WB.
+  // До 5.10.2 ELISEI ошибочно держал обычное продолжение финансовой
+  // пагинации на часы. В старых состояниях признак limitNote мог лежать внутри
+  // progress или вообще отсутствовать, поэтому фильтр по тексту не срабатывал.
+  // Нормальное продолжение finance после успешной страницы всегда имеет status
+  // queued и короткий cooldown. Настоящий ответ WB 429 хранится как
+  // rate_limited, поэтому его Retry-After здесь не трогаем.
   const result=await pool.query(`
     UPDATE wb_sync_states
     SET status='queued',
@@ -224,18 +226,19 @@ async function recoverLegacyFinanceCooldowns({ connectionId = null } = {}) {
         metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object(
           'legacyFinanceCooldownRecovered',true,
           'legacyFinanceCooldownRecoveredAt',NOW(),
-          'limitNote','Финансовая детализация WB продолжает пагинацию примерно раз в 20 секунд.'
+          'legacyFinanceCooldownPreviousNextAllowedAt',next_allowed_at,
+          'limitNote','Финансовая детализация WB продолжает пагинацию короткими страницами автоматически.'
         ),
         updated_at=NOW()
     WHERE stage='finance'
       AND status='queued'
       AND COALESCE(last_count,0) > 0
-      AND next_allowed_at > NOW() + INTERVAL '5 minutes'
-      AND COALESCE(metadata->>'limitNote','') ILIKE '%12 час%'
+      AND next_allowed_at > NOW() + INTERVAL '2 minutes'
+      AND COALESCE(metadata->>'complete','false') <> 'true'
       ${connectionFilter}
     RETURNING connection_id,stage,last_count
   `,params)
-  if (result.rows.length) console.warn(`Recovered ${result.rows.length} legacy WB finance cooldown(s) from pre-5.10.2 schedule.`)
+  if (result.rows.length) console.warn(`Recovered ${result.rows.length} stale queued WB finance cooldown(s).`)
   return result.rows
 }
 
@@ -448,6 +451,9 @@ async function initDatabase() {
   await ensurePrimaryTokens()
   await recoverStaleSyncStates({ reason:'startup' })
   await recoverRetryableErrorStates()
+  // 5.10.3: миграция старого длинного finance next_allowed_at выполняется
+  // сразу при старте backend, ещё до первого открытия пользователем страницы.
+  await recoverLegacyFinanceCooldowns()
 }
 
 function requireBackendConfig() {
@@ -674,7 +680,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.22.2 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.22.3 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -5052,7 +5058,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.22.2',
+    version: '2.22.3',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,

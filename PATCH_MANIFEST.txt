@@ -1,14 +1,13 @@
-ELISEI 5.10.2 PATCH
-Base: ELISEI 5.10.1
-Frontend: 5.10.2
-Backend: 2.22.2
-El Core: 5.10.2
+ELISEI 5.10.3 HOTFIX PATCH
+Base: ELISEI 5.10.2
+Frontend: 5.10.3
+Backend: 2.22.3
+El Core: 5.10.3
 
 Purpose:
-1. Remove obsolete 12-hour finance pagination cooldown.
-2. Auto-recover the old queued finance cooldown without reconnecting WB.
-3. Respect explicit WB X-Ratelimit-Retry without negative jitter.
-4. Stop showing false zeroes while sales/finance/ads are incomplete.
-5. Explain rate limits as per-stream waits, not a cabinet-wide stop.
+- recover stale pre-5.10.2 finance continuation timestamps that remained queued for hours;
+- preserve rrdId/syncId/last_count and already persisted finance rows;
+- never overwrite genuine WB 429 rate_limited Retry-After;
+- run recovery immediately during backend startup.
 
-Apply with replacement over ELISEI 5.10.1 and redeploy frontend + backend.
+Apply: replace files preserving paths, then redeploy backend/frontend.
