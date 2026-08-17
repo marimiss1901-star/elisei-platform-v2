@@ -361,3 +361,15 @@ npm run build
 - search overview/group строки не показываются внутри SKU 360;
 - реклама привязывается только по точному nmID;
 - batch поисковых запросов WB ограничен 20 nmIds.
+
+
+## ELISEI 5.11.5 — Search Source Integrity
+
+- Поисковые фразы SKU 360 теперь считаются только по точной привязке `nmId` из ответа WB.
+- Подменные SKU (`isSubstitutedSKU`) исключены из обычной поисковой видимости: они могут быть семантически не связаны с товаром.
+- Запрос `/api/v2/search-report/product/search-texts` отправляется с `includeSubstitutedSKUs:false` и `includeSearchTexts:true`.
+- При сохранении каждой фразе записывается `sourceNmID`; строки без доказуемого nmID или вне запрошенного batch отбрасываются и учитываются в диагностике binding.
+- Старые сохранённые подменные строки фильтруются в SKU 360 сразу, без ожидания новой полной синхронизации.
+- SKU 360 не использует vendorCode/barcode/chrtID как fallback для поисковых фраз.
+
+Версии: frontend **5.11.5**, backend **2.23.5**, El Core **5.11.5**.

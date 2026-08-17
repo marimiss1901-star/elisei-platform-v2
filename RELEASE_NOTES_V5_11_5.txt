@@ -1,0 +1,6 @@
+ELISEI 5.11.5 — Search Source Integrity
+Frontend 5.11.5
+Backend 2.23.5
+El Core 5.11.5
+
+Search queries in SKU 360 are now bound only by exact WB nmId. Substitute SKU rows are excluded from organic search visibility at request time and at read time. Every persisted query is stamped with sourceNmID; unbound/out-of-batch rows are dropped and counted in binding diagnostics.

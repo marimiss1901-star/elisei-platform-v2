@@ -10,10 +10,10 @@ assert.equal(conversation.shouldForceSalesModule({metric:'returns',detectedModul
 
 const route = fs.readFileSync(new URL('../src/routes/elCore.cjs',import.meta.url),'utf8')
 assert.ok(route.includes("typeof conversationContext.shouldForceSalesModule === 'function'"),'elCore must keep a safe mixed-deploy fallback')
-assert.ok(route.includes("version: '5.11.4'"),'El Core status must report 5.10.1')
+assert.ok(route.includes("version: '5.11.5'"),'El Core status must report 5.10.1')
 
 const server = fs.readFileSync(new URL('../src/server.js',import.meta.url),'utf8')
-assert.ok(server.includes("version: '2.23.4'"),'backend health must report 2.22.1')
-assert.ok(server.includes('ELISEI/2.23.4'),'WB User-Agent must use backend release version')
+assert.ok(server.includes("version: '2.23.5'"),'backend health must report 2.22.1')
+assert.ok(server.includes('ELISEI/2.23.5'),'WB User-Agent must use backend release version')
 
 console.log('ELISEI 5.10.1 conversation hotfix tests passed')

@@ -20,8 +20,8 @@ for(const marker of [
   'Math.min(100000',
   'WB_FINANCE_PAGE_LIMIT || 100000',
   'financeRuntimeTokenInfo',
-  "version: '2.23.4'",
-  'ELISEI/2.23.4',
+  "version: '2.23.5'",
+  'ELISEI/2.23.5',
 ]) assert.ok(server.includes(marker),`server.js must contain ${marker}`)
 
 const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')

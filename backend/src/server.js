@@ -45,7 +45,7 @@ import {
   LIVE_SYNC_STAGES, defaultLiveSyncSettings, normalizeLiveSyncSettings, dueLiveStages, eventStages, safeEqualSecret, publicLiveSyncStatus,
 } from './wb/live-sync.js'
 import { buildDataQualityReport } from './wb/data-quality.js'
-import { buildProduct360, findProduct360Product, product360Matches, product360Identities } from './wb/product-360.js'
+import { buildProduct360, findProduct360Product, product360Matches, product360Identities, bindWbSearchRowsToNmId } from './wb/product-360.js'
 import {
   stagePriority, schedulerGroup, chooseCycleWinners, initialStageSchedule, schedulerVisualState,
 } from './wb/smart-scheduler.js'
@@ -760,7 +760,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.23.4 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.23.5 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -4258,25 +4258,34 @@ async function advanceSearchQueriesTask(connectionId, token, state, data, { dead
       currentPeriod:{start:detailPeriod.dateFrom,end:detailPeriod.dateTo},
       nmIds:batch,
       topOrderBy:'orders',
-      includeSubstitutedSKUs:true,
+      // SKU 360/search visibility must contain only real search texts for the requested products.
+      // WB marks substitute/promo placements separately via isSubstitutedSKU; do not request them
+      // in the organic search-text stream because they can be semantically unrelated to the item.
+      includeSubstitutedSKUs:false,
       includeSearchTexts:true,
       orderBy:{field:'orders',mode:'desc'},
       limit:30,
     }),
     label:'Поисковые фразы по товарам WB',timeoutMs:60000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,
   })
-  const rows = searchReportRows(payload).map(row=>({rowType:'query',...row}))
+  const bound = bindWbSearchRowsToNmId(searchReportRows(payload),batch)
+  const rows = bound.rows
   await saveStreamItemBatch(pool,{
     connectionId,stream:'searchQueries',syncId,rows,
     keyOf:(row,index)=>engagementRowKey('searchQueries',row,productOffset*1000+index),batchSize:HEAVY_DB_BATCH_SIZE,
   })
   const persistedCount = await countStreamItems(pool,{connectionId,stream:'searchQueries',syncId})
+  const binding = {
+    boundRows:Number(state?.metadata?.binding?.boundRows || 0) + rows.length,
+    droppedUnbound:Number(state?.metadata?.binding?.droppedUnbound || 0) + bound.droppedUnbound,
+    droppedOutsideRequest:Number(state?.metadata?.binding?.droppedOutsideRequest || 0) + bound.droppedOutsideRequest,
+  }
   const nextProductOffset = productOffset + batch.length
   if (nextProductOffset < nmIds.length) {
-    return {pending:true,nextAllowedAt:new Date(Date.now()+streamCooldownMs('searchQueries',tokenInfo)).toISOString(),metadata:{period,detailPeriod,syncId,phase:'products',offset:0,pageNumber:pageNumber+1,productOffset:nextProductOffset,persistedCount,summary}}
+    return {pending:true,nextAllowedAt:new Date(Date.now()+streamCooldownMs('searchQueries',tokenInfo)).toISOString(),metadata:{period,detailPeriod,syncId,phase:'products',offset:0,pageNumber:pageNumber+1,productOffset:nextProductOffset,persistedCount,summary,binding}}
   }
-  const value = await compactPersistedObjectStream(connectionId,'searchQueries',syncId,{period,extra:{summary,detailPeriod,productsScanned:nmIds.length,complete:true}})
-  return {pending:false,value,validation:{period,detailPeriod,totalRows:value.totalRows,productsScanned:nmIds.length,pages:pageNumber+1,memorySafe:true},endpoint:'https://seller-analytics-api.wildberries.ru/api/v2/search-report/report + /product/search-texts'}
+  const value = await compactPersistedObjectStream(connectionId,'searchQueries',syncId,{period,extra:{summary,detailPeriod,productsScanned:nmIds.length,complete:true,binding}})
+  return {pending:false,value,validation:{period,detailPeriod,totalRows:value.totalRows,productsScanned:nmIds.length,pages:pageNumber+1,memorySafe:true,binding},endpoint:'https://seller-analytics-api.wildberries.ru/api/v2/search-report/report + /product/search-texts'}
 }
 
 function firstRowValue(row, keys = []) {
@@ -5155,7 +5164,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.23.4',
+    version: '2.23.5',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -5985,11 +5994,21 @@ function product360ExtendedIdentityClause(product, params = []) {
   return clauses.length ? `(${clauses.join(' OR ')})` : ''
 }
 
+function isSubstitutedSearchRow(row = {}) {
+  const value = row?.isSubstitutedSKU ?? row?.isSubstitutedSku ?? row?.isSubstituted ?? false
+  if (value === true || value === 1) return true
+  return /^(?:1|true|yes)$/i.test(String(value || '').trim())
+}
+
 function compactProduct360ExtendedRows(canonicalData, stream, product, range, limit = 120) {
   const payload = canonicalData?.[stream] && typeof canonicalData[stream] === 'object' ? canonicalData[stream] : {}
   const sample = elFilterExtendedRows(elExtendedPayloadRows(canonicalData,stream),stream,range)
-    .filter(row=>stream !== 'searchQueries' || String(row?.rowType || '').toLowerCase() === 'query')
-    .filter(row=>product360Matches(row,product).matched)
+    .filter(row=>stream !== 'searchQueries' || (
+      String(row?.rowType || '').toLowerCase() === 'query' &&
+      !isSubstitutedSearchRow(row) &&
+      product360Matches(row,product).method === 'nmID'
+    ))
+    .filter(row=>stream === 'searchQueries' || product360Matches(row,product).matched)
     .slice(0,Math.max(1,Math.min(200,Number(limit)||120)))
   const totalRows = Math.max(Number(payload?.totalRows || 0), Number(payload?.rows?.length || 0))
   return {
@@ -6016,10 +6035,21 @@ async function loadProduct360ExtendedRows(connectionId, canonicalData, stream, p
 
   const params = [connectionId,stream,syncId]
   const where = [`connection_id=$1`,`stream=$2`,`sync_id=$3::uuid`]
-  const identityClause = product360ExtendedIdentityClause(product,params)
-  if (!identityClause) return compactProduct360ExtendedRows(canonicalData,stream,product,range,limit)
-  where.push(identityClause)
-  if (stream === 'searchQueries') where.push(`COALESCE(payload->>'rowType','')='query'`)
+  if (stream === 'searchQueries') {
+    // SearchReportTextRes contains nmId. For SKU 360 this is the only admissible join key:
+    // never infer ownership of a search phrase from vendorCode/barcode/chrtID.
+    const nmIDs = product360Identities(product).nmIDs.map(value=>String(value || '').trim()).filter(Boolean)
+    if (!nmIDs.length) return compactProduct360ExtendedRows(canonicalData,stream,product,range,limit)
+    params.push([...new Set(nmIDs)])
+    const nmRef = `$${params.length}::text[]`
+    where.push(`COALESCE(payload->>'nmID',payload->>'nmId',payload->>'nm_id')=ANY(${nmRef})`)
+    where.push(`COALESCE(payload->>'rowType','')='query'`)
+    where.push(`LOWER(COALESCE(payload->>'isSubstitutedSKU',payload->>'isSubstitutedSku',payload->>'isSubstituted','false')) NOT IN ('true','1','yes')`)
+  } else {
+    const identityClause = product360ExtendedIdentityClause(product,params)
+    if (!identityClause) return compactProduct360ExtendedRows(canonicalData,stream,product,range,limit)
+    where.push(identityClause)
+  }
   const dateExpression = extendedDateExpression(stream)
   if (dateExpression && range?.from && range?.to) {
     params.push(String(range.from).slice(0,10)); const fromRef = `$${params.length}`
@@ -6036,7 +6066,9 @@ async function loadProduct360ExtendedRows(connectionId, canonicalData, stream, p
   `,params)
   const matched = page.rows
     .map(item=>({rowKey:item.row_key,...item.payload}))
-    .filter(row=>product360Matches(row,product).matched)
+    .filter(row=>stream === 'searchQueries'
+      ? (!isSubstitutedSearchRow(row) && product360Matches(row,product).method === 'nmID')
+      : product360Matches(row,product).matched)
   const compact = compactProduct360ExtendedRows(canonicalData,stream,product,range,limit)
   const rows = matched.length ? matched.slice(0,safeLimit) : compact.rows
   return {

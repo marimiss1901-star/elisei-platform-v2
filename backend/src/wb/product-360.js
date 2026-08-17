@@ -119,6 +119,37 @@ export function product360Matches(row = {}, product = {}) {
   return { matched:false, method:null }
 }
 
+
+export function bindWbSearchRowsToNmId(sourceRows = [], requestedNmIds = []) {
+  const requested = new Set((requestedNmIds || []).map(cleanNumericId).filter(Boolean))
+  const rows = []
+  let droppedUnbound = 0
+  let droppedOutsideRequest = 0
+
+  const pushBound = (row, parentNmID = null) => {
+    if (!row || typeof row !== 'object') return
+    const explicit = product360Identities(row).nmIDs[0] || cleanNumericId(parentNmID)
+    if (!explicit) { droppedUnbound += 1; return }
+    if (requested.size && !requested.has(explicit)) { droppedOutsideRequest += 1; return }
+    rows.push({ ...row, nmId:explicit, sourceNmID:explicit, rowType:'query' })
+  }
+
+  for (const source of Array.isArray(sourceRows) ? sourceRows : []) {
+    if (!source || typeof source !== 'object') continue
+    const parentNmID = product360Identities(source).nmIDs[0] || null
+    const nested = Array.isArray(source.searchTexts) ? source.searchTexts : null
+    if (nested) {
+      for (const item of nested) {
+        if (typeof item === 'string') pushBound({ searchText:item }, parentNmID)
+        else pushBound(item, parentNmID)
+      }
+      continue
+    }
+    pushBound(source, parentNmID)
+  }
+  return { rows, droppedUnbound, droppedOutsideRequest }
+}
+
 export function findProduct360Product(products = [], selector = '') {
   const raw = text(selector)
   if (!raw) return null
@@ -194,12 +225,19 @@ function normalizeQuestion(row = {}) {
   }
 }
 
+function isSubstitutedSearch(row = {}) {
+  const value = row?.isSubstitutedSKU ?? row?.isSubstitutedSku ?? row?.isSubstituted ?? false
+  if (value === true || value === 1) return true
+  return /^(?:1|true|yes)$/i.test(String(value || '').trim())
+}
+
 function normalizeSearch(row = {}) {
   const product = nestedProduct(row)
   const phrase = text(pick(row,['searchText','searchQuery','query','keyword','text','name']))
   return {
     id:String(row?.rowKey || `${product?.nmID || product?.vendorCode || 'q'}:${phrase}`),
     rowType:row?.rowType || 'query',
+    isSubstitutedSKU:isSubstitutedSearch(row),
     phrase,
     nmID:product?.nmID ?? null,
     vendorCode:product?.vendorCode || '',
@@ -305,9 +343,14 @@ export function buildProduct360({
   const reviews = reviewRows.filter(row=>product360Matches(row,product).matched).map(normalizeReview)
   const questions = questionRows.filter(row=>product360Matches(row,product).matched).map(normalizeQuestion)
   const searches = searchRows
-    // SKU 360 may use only product-level query rows. Overview/group rows can contain
-    // search phrases from several products and must never leak into a single SKU.
-    .filter(row=>String(row?.rowType || '').toLowerCase() === 'query' && product360Matches(row,product).matched)
+    // Organic SKU search visibility: exact nmID only. WB substitute-SKU placements can be
+    // semantically unrelated (the item may be injected into another query), so they are excluded.
+    .filter(row=>{
+      const match = product360Matches(row,product)
+      return String(row?.rowType || '').toLowerCase() === 'query' &&
+        !isSubstitutedSearch(row) &&
+        match.matched && match.method === 'nmID'
+    })
     .map(normalizeSearch)
     .filter(row=>row.phrase)
     .sort((a,b)=>finite(b.orders)-finite(a.orders) || finite(b.revenue)-finite(a.revenue) || finite(b.frequency)-finite(a.frequency))
