@@ -45,6 +45,7 @@ import {
   LIVE_SYNC_STAGES, defaultLiveSyncSettings, normalizeLiveSyncSettings, dueLiveStages, eventStages, safeEqualSecret, publicLiveSyncStatus,
 } from './wb/live-sync.js'
 import { buildDataQualityReport } from './wb/data-quality.js'
+import { buildProduct360, findProduct360Product, product360Matches, product360Identities } from './wb/product-360.js'
 import {
   stagePriority, schedulerGroup, chooseCycleWinners, initialStageSchedule, schedulerVisualState,
 } from './wb/smart-scheduler.js'
@@ -759,7 +760,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.22.5 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.23.0 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -5153,7 +5154,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.22.5',
+    version: '2.23.0',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -5956,6 +5957,129 @@ app.get('/api/wb/core/:id', authRequired, async (req, res) => {
     period:range ? { from:range.from, to:range.to, days:range.days } : null,
     dataSources:sources, recovered, recoveryQueued, lastSync: connection.last_sync_at || null,
   })
+})
+
+
+async function loadProduct360ExtendedRows(connectionId, canonicalData, stream, product, range, limit = 500) {
+  const identities = product360Identities(product)
+  const candidates = [
+    ...(identities.nmIDs || []),
+    ...(identities.vendorCodes || []),
+    ...(identities.barcodes || []),
+  ].map(value=>String(value || '').trim()).filter(Boolean)
+  let lastPage = null
+  for (const candidate of candidates.slice(0,5)) {
+    const page = await latestExtendedRows(connectionId,stream,{
+      limit:Math.max(1,Math.min(500,Number(limit)||500)),
+      query:candidate,
+      ...(range?.from && range?.to ? {from:range.from,to:range.to} : {}),
+    })
+    lastPage = page
+    const rows = (page.rows || []).filter(row=>product360Matches(row,product).matched)
+    if (rows.length) {
+      const calculated = page.syncId ? await extendedStreamSummary(connectionId,stream,page.syncId,range?.from && range?.to ? {from:range.from,to:range.to} : {}) : null
+      return {
+        rows,
+        total:rows.length,
+        source:'wb_stream_items',
+        syncId:page.syncId,
+        availablePeriod:calculated?.availablePeriod || canonicalData?.[stream]?.period || null,
+        truncated:Number(page.total || 0) > Number(page.rows?.length || 0),
+      }
+    }
+  }
+
+  // Последний безопасный fallback — компактная выборка уже сохранённого потока.
+  // Название товара как ключ не используется: product360Matches разрешает только идентификаторы.
+  const compact = elFilterExtendedRows(elExtendedPayloadRows(canonicalData,stream),stream,range)
+    .filter(row=>product360Matches(row,product).matched)
+    .slice(0,Math.max(1,Math.min(500,Number(limit)||500)))
+  return {
+    rows:compact,
+    total:compact.length,
+    source:compact.length ? 'wb_stream_data_sample' : (lastPage?.syncId ? 'wb_stream_items_no_match' : 'none'),
+    syncId:lastPage?.syncId || canonicalData?.[stream]?.syncId || null,
+    availablePeriod:canonicalData?.[stream]?.period || null,
+    truncated:false,
+  }
+}
+
+app.get('/api/wb/product-360/:id', authRequired, async (req, res) => {
+  const connection = await getConnection(req.auth.sub, req.params.id)
+  if (!connection) return res.status(404).json({ error:'Подключение не найдено' })
+  const selector = String(req.query.productKey || req.query.key || req.query.nmID || req.query.vendorCode || '').trim()
+  if (!selector) return res.status(400).json({ error:'Не указан товар для SKU 360' })
+
+  try {
+    const [{data,sources},settings,states] = await Promise.all([
+      canonicalConnectionData(connection),
+      getBusinessSettings(req.auth.sub),
+      getSyncStates(connection.id),
+    ])
+    const range = analyticsPeriodRange(req.query)
+    const selectedData = analyticsFilterConnectionData(data,range)
+    const core = buildCoreAnalytics(selectedData,settings)
+    const product = findProduct360Product(core.products || [],selector)
+    if (!product) return res.status(404).json({ error:'Товар не найден в едином ядре ELISEI' })
+
+    const streamNames = ['searchQueries','reviews','questions','stockHistory']
+    const streamResults = await Promise.all(streamNames.map(async stream=>[
+      stream,
+      await loadProduct360ExtendedRows(connection.id,data,stream,product,range,500),
+    ]))
+    const streamMap = Object.fromEntries(streamResults)
+    const financeQuery = String(product.nmID || product.vendorCode || '').trim()
+    const financeResult = financeQuery ? await queryFinanceLedger(pool,{
+      connectionId:connection.id,
+      from:range?.from || reportPeriod(30).dateFrom,
+      to:range?.to || reportPeriod(30).dateTo,
+      group:'all',mode:'all',role:'all',query:financeQuery,page:1,limit:60,
+    }) : {rows:[]}
+    const stateMap = Object.fromEntries(states.map(item=>[item.stage,publicSyncState(item)]))
+    const streamCoverage = Object.fromEntries(streamNames.map(stream=>{
+      const result=streamMap[stream] || {}
+      const stage=stateMap[stream] || null
+      return [stream,{
+        status:stage?.status || null,
+        lastSuccessAt:stage?.lastSuccessAt || null,
+        nextAllowedAt:stage?.nextAllowedAt || null,
+        rows:Number(result.rows?.length || 0),
+        source:result.source || 'none',
+        availablePeriod:result.availablePeriod || null,
+        truncated:Boolean(result.truncated),
+      }]
+    }))
+    const searchSnapshotPeriod=data?.searchQueries?.period || null
+    if (range && searchSnapshotPeriod?.from && searchSnapshotPeriod?.to) {
+      streamCoverage.searchQueries.periodExact=String(searchSnapshotPeriod.from).slice(0,10)===range.from && String(searchSnapshotPeriod.to).slice(0,10)===range.to
+      streamCoverage.searchQueries.snapshotPeriod={from:String(searchSnapshotPeriod.from).slice(0,10),to:String(searchSnapshotPeriod.to).slice(0,10)}
+    }
+
+    const payload = buildProduct360({
+      product,
+      advertisingRows:core?.advertising?.productRows || [],
+      searchRows:streamMap.searchQueries?.rows || [],
+      reviewRows:streamMap.reviews?.rows || [],
+      questionRows:streamMap.questions?.rows || [],
+      stockHistoryRows:streamMap.stockHistory?.rows || [],
+      stockDetails:core?.stockDetails || [],
+      financeMovements:financeResult?.rows || [],
+      period:range ? {from:range.from,to:range.to,days:range.days} : (core?.period || null),
+      coverage:{
+        core:core?.availability || {},
+        streams:streamCoverage,
+        finance:stateMap.finance || null,
+      },
+      sources:{
+        core:sources,
+        extended:Object.fromEntries(streamNames.map(stream=>[stream,streamMap[stream]?.source || 'none'])),
+      },
+    })
+    res.json({ product360:payload,lastSync:connection.last_sync_at || null })
+  } catch (error) {
+    console.warn('WB product 360 failed:',error.message)
+    res.status(error.status || 500).json({ error:error.message })
+  }
 })
 
 app.get('/api/wb/advertising/:id', authRequired, async (req, res) => {

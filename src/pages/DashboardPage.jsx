@@ -10,6 +10,7 @@ import ElMascot from '../components/ElMascot'
 import MetricCard from '../components/MetricCard'
 import TrendChart from '../components/TrendChart'
 import WbExtendedWorkspace from '../components/WbExtendedWorkspace'
+import Product360Drawer from '../components/Product360Drawer'
 import { businessApi, elApi, wbApi } from '../lib/api'
 
 const formatMoney = value => value == null ? 'Не загружено' : `${new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))} ₽`
@@ -428,6 +429,9 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [productFilter, setProductFilter] = useState('Все')
   const [productSort, setProductSort] = useState({ key:'revenue', direction:'desc' })
   const [selectedProduct, setSelectedProduct] = useState(null)
+  const [product360Data, setProduct360Data] = useState(null)
+  const [product360Loading, setProduct360Loading] = useState(false)
+  const [product360Error, setProduct360Error] = useState('')
   const [importResult, setImportResult] = useState(null)
   const connectionRef = useRef(emptyConnection)
   const syncRevisionRef = useRef('')
@@ -697,6 +701,25 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     loadConnectionData(connection.connectionId).catch(() => {})
   }, [active, connection.connected, connection.connectionId])
 
+  useEffect(() => {
+    const selector = selectedProduct ? String(selectedProduct.key || selectedProduct.nmID || selectedProduct.vendorCode || selectedProduct.barcode || '') : ''
+    if (!selector || !connection.connected || !connection.connectionId) {
+      setProduct360Data(null)
+      setProduct360Error('')
+      setProduct360Loading(false)
+      return undefined
+    }
+    let cancelled = false
+    setProduct360Data(null)
+    setProduct360Error('')
+    setProduct360Loading(true)
+    wbApi.product360(connection.connectionId,selector,{ from:analyticsPeriod.from,to:analyticsPeriod.to })
+      .then(result => { if (!cancelled) setProduct360Data(result?.product360 || null) })
+      .catch(error => { if (!cancelled) setProduct360Error(error.message || 'Не удалось собрать SKU 360') })
+      .finally(() => { if (!cancelled) setProduct360Loading(false) })
+    return () => { cancelled = true }
+  }, [connection.connected,connection.connectionId,selectedProduct?.key,selectedProduct?.nmID,selectedProduct?.vendorCode,analyticsPeriod.from,analyticsPeriod.to])
+
 
   useEffect(() => {
     if (active !== 'Подключения' || !connection.connected || !connection.connectionId) return
@@ -815,6 +838,19 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       return productSort.direction === 'asc' ? result : -result
     })
   }, [productRows, query, productFilter, productSort])
+
+  const openProduct360 = row => {
+    if (!row) return
+    const nm=String(row.nmID || row.nmId || '').trim()
+    const vendor=String(row.vendorCode || row.supplierArticle || '').trim().toLowerCase()
+    const barcode=String(row.barcode || '').trim()
+    const canonical=productRows.find(item =>
+      (nm && String(item.nmID || '').trim() === nm) ||
+      (vendor && String(item.vendorCode || '').trim().toLowerCase() === vendor) ||
+      (barcode && String(item.barcode || '').trim() === barcode)
+    )
+    setSelectedProduct(canonical || row)
+  }
 
   const analyticsBaseProducts = useMemo(() => {
     const source = analyticsCore?.products || (!connection.connected ? coreData?.products : []) || []
@@ -1325,7 +1361,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     const topProducts = analyticsAvailability.sales ? [...analyticsBaseProducts]
       .sort((a,b)=>Number(b.revenue || 0)-Number(a.revenue || 0))
       .slice(0,10) : []
-    const openProduct = row => { setSelectedProduct(row); setActive('Товары') }
+    const openProduct = row => openProduct360(row)
 
     return <>
       <section className="brand-hero glass-panel">
@@ -1458,7 +1494,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
         <div className="section-title-row"><div><span>ABC/XYZ</span><h2>Приоритет товаров</h2></div><small>{formatNumber(filteredCount)} из {formatNumber(analyticsBaseProducts.length)}</small></div>
         <div className="data-table compact-table"><div className="data-row head analytics-row"><span>Товар</span><span>ABC</span><span>XYZ</span><span>Выручка</span><span>Продажи</span><span>Возвраты</span><span>Дней запаса</span></div>
-          {analyticsFilteredProducts.length ? analyticsFilteredProducts.slice(0,100).map(p => <div className="data-row analytics-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article} · {p.brand}{p.category ? ` · ${p.category}` : ''}</small></span><span><b className={`class-pill class-${String(p.abc || 'C').toLowerCase()}`}>{p.abc}</b></span><span><b className="class-pill">{p.xyz}</b></span><span>{formatMoney(p.revenue)}</span><span>{formatNumber(p.salesCount)}</span><span>{formatPercent(p.returnRate)}</span><span>{p.stockCoverDays ?? '—'}</span></div>) : <div className="product-empty">По выбранным фильтрам товаров нет.</div>}
+          {analyticsFilteredProducts.length ? analyticsFilteredProducts.slice(0,100).map(p => <button className="data-row analytics-row product-drill-row" key={p.id} onClick={()=>openProduct360(p)}><span><strong>{p.title}</strong><small>{p.article} · {p.brand}{p.category ? ` · ${p.category}` : ''}</small></span><span><b className={`class-pill class-${String(p.abc || 'C').toLowerCase()}`}>{p.abc}</b></span><span><b className="class-pill">{p.xyz}</b></span><span>{formatMoney(p.revenue)}</span><span>{formatNumber(p.salesCount)}</span><span>{formatPercent(p.returnRate)}</span><span>{p.stockCoverDays ?? '—'}</span></button>) : <div className="product-empty">По выбранным фильтрам товаров нет.</div>}
         </div>
       </>)}
     </section>
@@ -1499,7 +1535,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         {filteredProducts.length === 0 ? (
           <div className="product-empty">По выбранным условиям товары не найдены.</div>
         ) : filteredProducts.map(p => (
-          <button className="data-row product-row product-master-row product-item" key={p.id} onClick={() => setSelectedProduct(p)}>
+          <button className="data-row product-row product-master-row product-item" key={p.id} onClick={() => openProduct360(p)}>
             <span className="product-master-main">
               <span className="product-thumb">{p.photo ? <img src={p.photo} alt="" loading="lazy"/> : <PackageSearch size={22}/>}</span>
               <span className="product-name"><strong>{p.title}</strong><small>{p.brand} · {p.status}</small></span>
@@ -1518,46 +1554,6 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         ))}
       </div>
 
-      {selectedProduct && (
-        <div className="product-drawer-backdrop" onClick={() => setSelectedProduct(null)}>
-          <aside className="product-drawer wide" onClick={event => event.stopPropagation()}>
-            <button className="drawer-close" onClick={() => setSelectedProduct(null)}><X size={20}/></button>
-            <div className="drawer-photo">{selectedProduct.photo ? <img src={selectedProduct.photo} alt={selectedProduct.title}/> : <PackageSearch size={44}/>}</div>
-            <span className="drawer-eyebrow">{selectedProduct.brand} · {selectedProduct.abc}{selectedProduct.xyz}</span>
-            <h2>{selectedProduct.title}</h2>
-            <div className="product-identifiers">
-              <span>Артикул WB<strong>{selectedProduct.nmID || '—'}</strong></span>
-              <span>Артикул продавца<strong>{selectedProduct.vendorCode || '—'}</strong></span>
-              <span>Штрихкоды<strong>{Array.isArray(selectedProduct.barcodes) && selectedProduct.barcodes.length ? selectedProduct.barcodes.join(', ') : selectedProduct.barcode || '—'}</strong></span>
-              <span>Схема работы<strong>{selectedProduct.fulfillmentMode || 'Не определено'}</strong></span>
-            </div>
-            <div className="drawer-metrics grid">
-              <div><span>Остаток общий</span><strong>{selectedProduct.stock == null ? 'Не загружено' : `${formatNumber(selectedProduct.stock)} шт.`}</strong><small>FBS {formatNumber(selectedProduct.fbsStock)} · FBO {formatNumber(selectedProduct.fboStock)}</small></div>
-              <div><span>Продажи</span><strong>{formatNumber(selectedProduct.salesCount)}</strong></div>
-              <div><span>Возвраты</span><strong>{formatNumber(selectedProduct.returnsCount)}</strong></div>
-              <div><span>Выручка</span><strong>{formatMoney(selectedProduct.revenue)}</strong></div>
-              <div><span>Прибыль</span><strong>{formatMoney(selectedProduct.profit)}</strong></div>
-              <div><span>Маржа</span><strong>{formatPercent(selectedProduct.margin)}</strong></div>
-            </div>
-            <div className="expense-breakdown">
-              <h3>Экономика товара</h3>
-              <div><span>Себестоимость</span><strong>{formatMoney(selectedProduct.cogs)}</strong></div>
-              <div><span>Комиссия WB</span><strong>{formatMoney(selectedProduct.commission)}</strong></div>
-              <div><span>Логистика</span><strong>{formatMoney(selectedProduct.logistics)}</strong></div>
-              <div><span>Хранение</span><strong>{formatMoney(selectedProduct.storage)}</strong></div>
-              <div><span>Платная приёмка</span><strong>{formatMoney(selectedProduct.acceptance)}</strong></div>
-              <div><span>Эквайринг</span><strong>{formatMoney(selectedProduct.acquiring)}</strong></div>
-              <div><span>Штрафы и удержания</span><strong>{formatMoney((selectedProduct.penalties || 0) + (selectedProduct.deductions || 0))}</strong></div>
-              <div><span>Реклама</span><strong>{formatMoney(selectedProduct.advertising)}</strong></div>
-              <div><span>Налог и постоянные расходы</span><strong>{formatMoney((selectedProduct.tax || 0) + (selectedProduct.fixedExpenses || selectedProduct.sharedExpenses || 0))}</strong></div>
-              {(selectedProduct.additionalPayment || 0) !== 0 && <div><span>Корректировки / доплаты</span><strong className="positive">− {formatMoney(selectedProduct.additionalPayment)}</strong></div>}
-              <div className="expense-total"><span>Все затраты</span><strong>{formatMoney(selectedProduct.expenses)}</strong></div>
-            </div>
-            {selectedProduct.modeBreakdown && <div className="mode-economics"><h3>FBS / FBO</h3>{['FBS','FBO'].map(mode => { const row=selectedProduct.modeBreakdown?.[mode]; return row?.active ? <div className="mode-economics-row" key={mode}><b>{mode}</b><span>Выручка {formatMoney(row.revenue)}</span><span>Расходы {formatMoney(row.expenses)}</span><strong className={row.profit != null && row.profit < 0 ? 'negative':'positive'}>{formatMoney(row.profit)}</strong></div> : null })}</div>}
-            <div className={`drawer-insight ${stockTone(selectedProduct.status)}`}><Sparkles size={19}/><div><strong>Рекомендация ЭЛа</strong><p>{selectedProduct.recommendation}</p></div></div>
-          </aside>
-        </div>
-      )}
     </section>
   )
 
@@ -1603,7 +1599,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       {stockAvailable && stockDetailsAvailable && !zeroSnapshot && <div className="notice success"><CheckCircle2 size={20}/><div><strong>Официальный снимок остатков WB</strong><p>{formatNumber(stockMeta?.persistedRows ?? stockMeta?.rows ?? 0)} строк · {formatNumber(stockMeta?.totalQuantity || 0)} шт. · сопоставлено {formatNumber(stockMeta?.mappedRows || 0)} строк ({formatPercent(stockMeta?.mappingCoveragePercent)}) · получено {stockMeta?.receivedAt ? new Date(stockMeta.receivedAt).toLocaleString('ru-RU') : '—'}.</p></div></div>}
       <div className="metrics-grid four"><MetricCard label="Всего единиц" value={formatNumber(periodStockSummary.stockUnits)} delta={stockAvailable ? (stockDetailsAvailable ? `${formatNumber(stockMeta?.mappedProducts || 0)} товаров сопоставлено` : 'нужно сопоставить с каталогом') : 'данные ожидаются'} icon={Boxes}/><MetricCard label="Нет остатка" value={formatNumber(periodStockSummary.zeroStock)} delta="потенциально упущенные продажи" icon={AlertTriangle}/><MetricCard label="Заканчиваются" value={formatNumber(periodStockSummary.lowStock)} delta="запас менее 14 дней" icon={Warehouse}/><MetricCard label="Избыток" value={formatNumber(periodStockSummary.slowStock)} delta="запас выше нормы" icon={PackageSearch}/></div>
       {stockAvailable && coreData?.warehouses?.length > 0 && <div className="warehouse-grid">{coreData.warehouses.slice(0,8).map(row => <div className="warehouse-card" key={row.name}><Warehouse size={18}/><span>{row.name}</span><strong>{formatNumber(row.quantity)} шт.</strong></div>)}</div>}
-      <div className="data-table stock-table"><div className="data-row head stock-row"><span>Товар</span><span>Продажи</span><span>Остаток</span><span>Дней запаса</span><span>Заморожено</span><span>Статус</span><span>Что делать</span></div>{periodStockRows.length === 0 ? <div className="product-empty">Сначала загрузите каталог товаров.</div> : visibleStockRows.length === 0 ? <div className="product-empty">По выбранному периоду и фильтрам товаров нет.</div> : [...visibleStockRows].sort((a,b) => (a.stockCoverDays ?? 99999) - (b.stockCoverDays ?? 99999)).map(p => <div className="data-row stock-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatNumber(p.salesCount)}</span><span>{formatNumber(p.stock)}</span><span>{p.stockCoverDays ?? '—'}</span><span>{p.stock == null ? '—' : formatMoney(p.frozenMoney || 0)}</span><span><b className={`status-badge ${stockTone(p.status)}`}>{p.status}</b></span><span>{p.recommendation}</span></div>)}</div>
+      <div className="data-table stock-table"><div className="data-row head stock-row"><span>Товар</span><span>Продажи</span><span>Остаток</span><span>Дней запаса</span><span>Заморожено</span><span>Статус</span><span>Что делать</span></div>{periodStockRows.length === 0 ? <div className="product-empty">Сначала загрузите каталог товаров.</div> : visibleStockRows.length === 0 ? <div className="product-empty">По выбранному периоду и фильтрам товаров нет.</div> : [...visibleStockRows].sort((a,b) => (a.stockCoverDays ?? 99999) - (b.stockCoverDays ?? 99999)).map(p => <button className="data-row stock-row product-drill-row" key={p.id} onClick={()=>openProduct360(p)}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatNumber(p.salesCount)}</span><span>{formatNumber(p.stock)}</span><span>{p.stockCoverDays ?? '—'}</span><span>{p.stock == null ? '—' : formatMoney(p.frozenMoney || 0)}</span><span><b className={`status-badge ${stockTone(p.status)}`}>{p.status}</b></span><span>{p.recommendation}</span></button>)}</div>
       {stockAvailable && coreData?.stockDetails?.length > 0 && <><div className="section-title-row"><div><span>Детализация</span><h2>По артикулам, размерам и складам</h2></div><small>{formatNumber(coreData.stockDetails.length)} строк</small></div><div className="data-table stock-detail-table"><div className="data-row head stock-detail-row"><span>Товар</span><span>Размер</span><span>nmID / штрихкод</span><span>Склад</span><span>Остаток</span></div>{coreData.stockDetails.filter(row => !stockNeedle || [row.title,row.vendorCode,row.nmID,row.barcode,row.warehouseName].join(' ').toLowerCase().includes(stockNeedle)).slice(0,500).map(row => <div className="data-row stock-detail-row" key={row.key}><span><strong>{row.title}</strong><small>{row.vendorCode || `nmID ${row.nmID || '—'}`}</small></span><span>{row.techSize || '—'}</span><span>{row.nmID || row.barcode || '—'}{row.nmID && row.barcode ? <small>{row.barcode}</small> : null}</span><span>{row.warehouseName}</span><span>{formatNumber(row.quantity)}</span></div>)}</div></>}
       {unmatchedRows.length > 0 && <><div className="section-title-row"><div><span>Диагностика</span><h2>Не сопоставленные строки WB</h2></div><small>{formatNumber(unmatchedRows.length)} строк</small></div><div className="data-table stock-detail-table"><div className="data-row head stock-detail-row"><span>Идентификатор</span><span>Размер</span><span>nmID / штрихкод</span><span>Склад</span><span>Остаток</span></div>{unmatchedRows.filter(row => !stockNeedle || [row.vendorCode,row.nmID,row.barcode,row.warehouseName].join(' ').toLowerCase().includes(stockNeedle)).slice(0,200).map(row => <div className="data-row stock-detail-row" key={row.key}><span><strong>{row.vendorCode || `nmID ${row.nmID || 'не передан'}`}</strong><small>Строка пока не привязана к карточке</small></span><span>{row.techSize || '—'}</span><span>{row.nmID || row.barcode || row.vendorCode || '—'}</span><span>{row.warehouseName}</span><span>{formatNumber(row.quantity)}</span></div>)}</div></>}
     </>)}</section>
@@ -1701,7 +1697,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         <div className="section-title-row"><div><span>Себестоимость</span><h2>По товарам</h2></div><button className="secondary-btn" onClick={saveSettings}><Save size={16}/> Сохранить</button></div><div className="data-table cost-table"><div className="data-row head cost-row"><span>Товар</span><span>Средняя цена</span><span>Себестоимость за единицу</span><span>Цена в ноль</span><span>Прибыль</span><span>Маржа</span></div>{visibleFinanceProducts.slice(0,100).map(p => { const costKey=String(p.key || p.nmID || p.vendorCode); const cost=settingsDraft.productCosts?.[costKey] ?? p.unitCost ?? 0; return <div className="data-row cost-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatMoney(p.averagePrice)}</span><span><input className="inline-cost" type="number" min="0" value={cost} onChange={e => updateProductCost(p,e.target.value)} /></span><span>{formatMoney(p.breakevenPrice)}</span><span className={p.profit != null && p.profit < 0 ? 'negative' : 'positive'}>{formatMoney(p.profit)}</span><span>{formatPercent(p.margin)}</span></div>})}</div>
       </>}
 
-      {financeTab === 'products' && <div className="data-table finance-products-table"><div className="data-row head finance-products-row"><span>Товар</span><span>Схема</span><span>К перечислению</span><span>Расходы WB</span><span>Логистика</span><span>Штрафы</span><span>Удержания</span><span>Компенсации</span></div>{(ledger.products || []).map(row => <div className="data-row finance-products-row" key={`${row.nmId}-${row.vendorCode}-${row.fulfillmentMode}`}><span><strong>{titleForLedger(row)}</strong><small>{row.vendorCode || '—'} · nmID {row.nmId || '—'}</small></span><span><b className="mode-pill">{row.fulfillmentMode || '—'}</b></span><span>{formatMoney(row.sellerPayable)}</span><span>{formatMoney(row.expenses)}</span><span>{formatMoney(row.logistics)}</span><span>{formatMoney(row.penalties)}</span><span>{formatMoney(row.deductions)}</span><span>{formatMoney(row.compensations)}</span></div>)}</div>}
+      {financeTab === 'products' && <div className="data-table finance-products-table"><div className="data-row head finance-products-row"><span>Товар</span><span>Схема</span><span>К перечислению</span><span>Расходы WB</span><span>Логистика</span><span>Штрафы</span><span>Удержания</span><span>Компенсации</span></div>{(ledger.products || []).map(row => <button className="data-row finance-products-row product-drill-row" key={`${row.nmId}-${row.vendorCode}-${row.fulfillmentMode}`} onClick={()=>openProduct360(row)}><span><strong>{titleForLedger(row)}</strong><small>{row.vendorCode || '—'} · nmID {row.nmId || '—'}</small></span><span><b className="mode-pill">{row.fulfillmentMode || '—'}</b></span><span>{formatMoney(row.sellerPayable)}</span><span>{formatMoney(row.expenses)}</span><span>{formatMoney(row.logistics)}</span><span>{formatMoney(row.penalties)}</span><span>{formatMoney(row.deductions)}</span><span>{formatMoney(row.compensations)}</span></button>)}</div>}
 
       {financeTab === 'reports' && <div className="finance-report-layout">
         <div className="finance-report-card"><div className="finance-report-head"><div><span>Официальные сводки</span><h3>Отчёты реализации</h3></div><b>{formatNumber(ledger.reports?.sales?.totalRows || salesReports.length)}</b></div>{salesReports.length ? <div className="data-table finance-report-table"><div className="data-row head finance-report-row"><span>Период / ID</span><span>Розница</span><span>К перечислению</span><span>Логистика</span><span>Хранение</span><span>Приёмка</span><span>Штрафы и удержания</span><span>Банк</span></div>{salesReports.map((row,index) => <div className="data-row finance-report-row" key={row.reportId || index}><span><strong>{formatDate(row.dateFrom)} — {formatDate(row.dateTo)}</strong><small>№ {row.reportId || '—'} · создан {formatDate(row.createDate)}</small></span><span>{formatMoney(reportNumber(row,['retailAmountSum']))}</span><span>{formatMoney(reportNumber(row,['forPaySum']))}</span><span>{formatMoney(reportNumber(row,['deliveryServiceSum']))}</span><span>{formatMoney(reportNumber(row,['paidStorageSum']))}</span><span>{formatMoney(reportNumber(row,['paidAcceptanceSum']))}</span><span>{formatMoney(reportNumber(row,['penaltySum'])+reportNumber(row,['deductionSum']))}<small>штраф {formatMoney(reportNumber(row,['penaltySum']))} · удержание {formatMoney(reportNumber(row,['deductionSum']))}</small></span><span>{formatMoney(reportNumber(row,['bankPaymentSum']))}</span></div>)}</div> : <div className="finance-ledger-empty"><FileText size={24}/><strong>Дополнительная сводка реализации не загружена</strong><span>{reportStatus(ledger.coverage?.financeReports)}</span></div>}</div>
@@ -1756,7 +1752,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     </section>
   }
 
-  const renderPricing = () => <section className="app-page glass-panel"><div className="page-title"><span>Ценообразование</span><h1>Цены и акции</h1><p>Цена в ноль, целевая цена, цена пика и безопасные сценарии скидок.</p></div>{summary.cogs == null && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Добавьте себестоимость</strong><p>Без неё невозможно честно определить убыточные скидки.</p></div><button onClick={() => setActive('Финансы')}>Открыть финансы</button></div>}<div className="data-table pricing-table"><div className="data-row head pricing-row"><span>Товар</span><span>Текущая/средняя</span><span>Цена в 0</span><span>Целевая</span><span>Пик</span><span>−20%</span><span>−40%</span><span>Решение</span></div>{productRows.map(p => { const base=p.averagePrice || p.targetPrice || 0; const discount20=base*.8; const discount40=base*.6; return <div className="data-row pricing-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatMoney(base)}</span><span>{formatMoney(p.breakevenPrice)}</span><span>{formatMoney(p.targetPrice)}</span><span>{formatMoney(p.peakPrice)}</span><span className={p.breakevenPrice && discount20 < p.breakevenPrice ? 'negative' : 'positive'}>{formatMoney(discount20)}</span><span className={p.breakevenPrice && discount40 < p.breakevenPrice ? 'negative' : 'positive'}>{formatMoney(discount40)}</span><span>{p.profit != null && p.profit < 0 ? 'Повысить цену / снизить расходы' : p.status === 'Избыток' ? 'Допустима контролируемая акция' : 'Сохранять цену'}</span></div>})}</div></section>
+  const renderPricing = () => <section className="app-page glass-panel"><div className="page-title"><span>Ценообразование</span><h1>Цены и акции</h1><p>Цена в ноль, целевая цена, цена пика и безопасные сценарии скидок.</p></div>{summary.cogs == null && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Добавьте себестоимость</strong><p>Без неё невозможно честно определить убыточные скидки.</p></div><button onClick={() => setActive('Финансы')}>Открыть финансы</button></div>}<div className="data-table pricing-table"><div className="data-row head pricing-row"><span>Товар</span><span>Текущая/средняя</span><span>Цена в 0</span><span>Целевая</span><span>Пик</span><span>−20%</span><span>−40%</span><span>Решение</span></div>{productRows.map(p => { const base=p.averagePrice || p.targetPrice || 0; const discount20=base*.8; const discount40=base*.6; return <button className="data-row pricing-row product-drill-row" key={p.id} onClick={()=>openProduct360(p)}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatMoney(base)}</span><span>{formatMoney(p.breakevenPrice)}</span><span>{formatMoney(p.targetPrice)}</span><span>{formatMoney(p.peakPrice)}</span><span className={p.breakevenPrice && discount20 < p.breakevenPrice ? 'negative' : 'positive'}>{formatMoney(discount20)}</span><span className={p.breakevenPrice && discount40 < p.breakevenPrice ? 'negative' : 'positive'}>{formatMoney(discount40)}</span><span>{p.profit != null && p.profit < 0 ? 'Повысить цену / снизить расходы' : p.status === 'Избыток' ? 'Допустима контролируемая акция' : 'Сохранять цену'}</span></button>})}</div></section>
 
   const renderAdvertising = () => {
     const advertising = advertisingSnapshot || coreData?.advertising || { campaigns:[], productRows:[], daily:[], totals:{}, source:'manual' }
@@ -2263,5 +2259,5 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   }
   const content = (renderers[active] || renderHome)()
 
-  return <div className="shell"><aside className="sidebar glass-panel"><button className="brand brand-button" onClick={() => onNavigate('/')}><div className="brand-mark">E</div><div><strong>ELISEI</strong><span>AI Operating System</span></div></button><nav>{nav.map(([label,Icon]) => <button key={label} className={active===label?'nav-item active':'nav-item'} onClick={() => setActive(label)}><Icon size={18}/><span>{label}</span></button>)}</nav><div className="sidebar-foot"><div className="status-dot"/><span>{connection.connected?'Wildberries подключён':'Демо-режим'}</span></div></aside><main className="main"><header className="topbar"><div className="search"><Search size={17}/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Найти товар, артикул или модель"/></div><div className="top-actions"><button className="icon-btn" onClick={() => notify(recommendations[0]?.title || 'Новых уведомлений нет')}><Bell size={18}/><span className="ping"/></button><button className="icon-btn" title="Подключения" onClick={() => setActive('Подключения')}><PlugZap size={18}/></button><button className="icon-btn" title="Выйти" onClick={onLogout}><LogOut size={18}/></button><button className="profile" title={rawName || 'Профиль'}>{profileInitial}</button></div></header>{content}</main>{toast&&<div className="app-toast"><CheckCircle2 size={18}/>{toast}</div>}</div>
+  return <div className="shell"><aside className="sidebar glass-panel"><button className="brand brand-button" onClick={() => onNavigate('/')}><div className="brand-mark">E</div><div><strong>ELISEI</strong><span>AI Operating System</span></div></button><nav>{nav.map(([label,Icon]) => <button key={label} className={active===label?'nav-item active':'nav-item'} onClick={() => setActive(label)}><Icon size={18}/><span>{label}</span></button>)}</nav><div className="sidebar-foot"><div className="status-dot"/><span>{connection.connected?'Wildberries подключён':'Демо-режим'}</span></div></aside><main className="main"><header className="topbar"><div className="search"><Search size={17}/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Найти товар, артикул или модель"/></div><div className="top-actions"><button className="icon-btn" onClick={() => notify(recommendations[0]?.title || 'Новых уведомлений нет')}><Bell size={18}/><span className="ping"/></button><button className="icon-btn" title="Подключения" onClick={() => setActive('Подключения')}><PlugZap size={18}/></button><button className="icon-btn" title="Выйти" onClick={onLogout}><LogOut size={18}/></button><button className="profile" title={rawName || 'Профиль'}>{profileInitial}</button></div></header>{content}</main>{selectedProduct&&<Product360Drawer product={selectedProduct} data={product360Data} loading={product360Loading} error={product360Error} period={analyticsPeriod} onClose={()=>setSelectedProduct(null)}/>} {toast&&<div className="app-toast"><CheckCircle2 size={18}/>{toast}</div>}</div>
 }

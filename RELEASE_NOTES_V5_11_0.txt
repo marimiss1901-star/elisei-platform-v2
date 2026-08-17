@@ -1,0 +1,23 @@
+ELISEI 5.11.0 / backend 2.23.0 / El Core 5.11.0
+
+SKU 360
+- Added contextual SKU 360 drawer without a new left-navigation section.
+- Opens from Products, Analytics, Stocks, Finance-by-product and Pricing rows.
+- Unifies economics, orders/sales/returns, advertising, search visibility, feedback, stock, stock history, pricing and finance movements.
+- Shows source/stream coverage and keeps missing metrics unknown instead of converting them to zero.
+- Adds prioritized product signals and a single “Что делать первым” decision.
+
+STRICT IDENTITY
+- SKU joins are allowed only by nmID, barcode, vendorCode or chrtID.
+- Product title is never a join key.
+- Extended stream search results are filtered again by exact product identity before they enter SKU 360.
+- Finance movements and stock details are re-filtered by the same strict identity policy.
+
+API
+- Added GET /api/wb/product-360/:connectionId with productKey + global period parameters.
+- Uses PostgreSQL wb_stream_items for extended rows with compact saved-stream fallback.
+
+REGRESSION
+- 30/30 backend test commands passed.
+- New regression specifically proves that two products with the same title cannot leak review/search/advertising/stock rows into each other.
+- JS/CJS syntax checks passed.

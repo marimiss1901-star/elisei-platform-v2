@@ -83,6 +83,12 @@ export const wbApi = {
     const suffix = query.toString() ? `?${query.toString()}` : ''
     return request(`/api/wb/core/${encodeURIComponent(connectionId)}${suffix}`)
   },
+  product360: (connectionId, productKey, params = {}) => {
+    const query = new URLSearchParams({ productKey:String(productKey || '') })
+    if (params?.from) query.set('from',String(params.from).slice(0,10))
+    if (params?.to) query.set('to',String(params.to).slice(0,10))
+    return request(`/api/wb/product-360/${encodeURIComponent(connectionId)}?${query.toString()}`)
+  },
   advertising: (connectionId, params = {}) => {
     const query = new URLSearchParams()
     if (params?.from) query.set('from',String(params.from).slice(0,10))

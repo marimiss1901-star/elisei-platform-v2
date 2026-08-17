@@ -1,9 +1,10 @@
-ELISEI PATCH 5.10.5
-Base: ELISEI 5.10.4
-Frontend: 5.10.5
-Backend: 2.22.5
-El Core: 5.10.5
-Purpose: Smart WB Scheduler — priority queue, no cold-start burst, response-header rate windows, neutral waiting states.
+ELISEI PATCH 5.11.0
+Base: ELISEI 5.10.5
+Frontend: 5.11.0
+Backend: 2.23.0
+El Core: 5.11.0
+Purpose: SKU 360 — strict product drill-down unifying economics, demand, advertising, search, feedback, stock, pricing and finance trace in one contextual screen.
 Install: copy the contents over the existing repository with replacement, then redeploy backend and frontend.
-Important: do not clear WB tokens, rrdId, taskId, cursors or database state.
-Payload files: 16 (+ manifest/checksum helper files)
+Important: do not clear WB tokens, scheduler state, rrdId, taskId, cursors or PostgreSQL data.
+Identity policy: nmID -> barcode -> vendorCode -> chrtID; product title is never a join key.
+Payload files: 18 (+ manifest/checksum helper files)
