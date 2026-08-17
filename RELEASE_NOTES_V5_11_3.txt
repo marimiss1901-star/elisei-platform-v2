@@ -1,0 +1,12 @@
+ELISEI 5.11.3 / Backend 2.23.3 / El Core 5.11.3
+SKU 360 FAST OPEN HOTFIX
+
+- fixed live SKU 360 infinite skeleton caused by sync-status refreshes cancelling slow product-360 requests
+- lightweight depth=core renders first; depth=full enriches in background
+- scheduler nextAllowedAt/status changes no longer restart the primary SKU request
+- SKU refresh revision now tracks actual persisted data changes only
+- extended SKU lookup uses one exact-identity DB pass instead of repeated payload::text ILIKE + COUNT scans
+- compact/sample extended data is treated as partial and cannot prove a zero
+- bounded SKU request timeouts: 12s core / 25s full
+- full enrichment failure never hides an already loaded core SKU 360
+- backend regression suite: 33/33

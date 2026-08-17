@@ -760,7 +760,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.23.2 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.23.3 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -5154,7 +5154,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.23.2',
+    version: '2.23.3',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -5960,47 +5960,90 @@ app.get('/api/wb/core/:id', authRequired, async (req, res) => {
 })
 
 
-async function loadProduct360ExtendedRows(connectionId, canonicalData, stream, product, range, limit = 500) {
+function product360ExtendedIdentityClause(product, params = []) {
   const identities = product360Identities(product)
-  const candidates = [
-    ...(identities.nmIDs || []),
-    ...(identities.vendorCodes || []),
-    ...(identities.barcodes || []),
-  ].map(value=>String(value || '').trim()).filter(Boolean)
-  let lastPage = null
-  for (const candidate of candidates.slice(0,5)) {
-    const page = await latestExtendedRows(connectionId,stream,{
-      limit:Math.max(1,Math.min(500,Number(limit)||500)),
-      query:candidate,
-      ...(range?.from && range?.to ? {from:range.from,to:range.to} : {}),
-    })
-    lastPage = page
-    const rows = (page.rows || []).filter(row=>product360Matches(row,product).matched)
-    if (rows.length) {
-      const calculated = page.syncId ? await extendedStreamSummary(connectionId,stream,page.syncId,range?.from && range?.to ? {from:range.from,to:range.to} : {}) : null
-      return {
-        rows,
-        total:rows.length,
-        source:'wb_stream_items',
-        syncId:page.syncId,
-        availablePeriod:calculated?.availablePeriod || canonicalData?.[stream]?.period || null,
-        truncated:Number(page.total || 0) > Number(page.rows?.length || 0),
-      }
-    }
+  const clauses = []
+  const addArray = values => {
+    const normalized = [...new Set((values || []).map(value=>String(value || '').trim()).filter(Boolean))]
+    if (!normalized.length) return null
+    params.push(normalized)
+    return `$${params.length}::text[]`
   }
 
-  // Последний безопасный fallback — компактная выборка уже сохранённого потока.
-  // Название товара как ключ не используется: product360Matches разрешает только идентификаторы.
-  const compact = elFilterExtendedRows(elExtendedPayloadRows(canonicalData,stream),stream,range)
+  const nmRef = addArray(identities.nmIDs)
+  if (nmRef) clauses.push(`COALESCE(payload->>'nmID',payload->>'nmId',payload->>'nm_id',payload#>>'{productDetails,nmID}',payload#>>'{productDetails,nmId}',payload#>>'{product,nmID}',payload#>>'{product,nmId}',payload#>>'{details,nmID}',payload#>>'{details,nmId}')=ANY(${nmRef})`)
+
+  const barcodeRef = addArray(identities.barcodes)
+  if (barcodeRef) clauses.push(`COALESCE(payload->>'barcode',payload->>'barCode',payload->>'sku',payload#>>'{productDetails,barcode}',payload#>>'{productDetails,barCode}',payload#>>'{product,barcode}',payload#>>'{product,barCode}',payload#>>'{details,barcode}')=ANY(${barcodeRef})`)
+
+  const vendorRef = addArray(identities.vendorCodes)
+  if (vendorRef) clauses.push(`COALESCE(payload->>'vendorCode',payload->>'supplierArticle',payload->>'supplier_article',payload#>>'{productDetails,vendorCode}',payload#>>'{productDetails,supplierArticle}',payload#>>'{product,vendorCode}',payload#>>'{product,supplierArticle}',payload#>>'{details,vendorCode}',payload#>>'{details,supplierArticle}')=ANY(${vendorRef})`)
+
+  const chrtRef = addArray(identities.chrtIDs)
+  if (chrtRef) clauses.push(`COALESCE(payload->>'chrtID',payload->>'chrtId',payload->>'chrt_id',payload#>>'{productDetails,chrtID}',payload#>>'{product,chrtID}',payload#>>'{details,chrtID}')=ANY(${chrtRef})`)
+  return clauses.length ? `(${clauses.join(' OR ')})` : ''
+}
+
+function compactProduct360ExtendedRows(canonicalData, stream, product, range, limit = 120) {
+  const payload = canonicalData?.[stream] && typeof canonicalData[stream] === 'object' ? canonicalData[stream] : {}
+  const sample = elFilterExtendedRows(elExtendedPayloadRows(canonicalData,stream),stream,range)
     .filter(row=>product360Matches(row,product).matched)
-    .slice(0,Math.max(1,Math.min(500,Number(limit)||500)))
+    .slice(0,Math.max(1,Math.min(200,Number(limit)||120)))
+  const totalRows = Math.max(Number(payload?.totalRows || 0), Number(payload?.rows?.length || 0))
   return {
-    rows:compact,
-    total:compact.length,
-    source:compact.length ? 'wb_stream_data_sample' : (lastPage?.syncId ? 'wb_stream_items_no_match' : 'none'),
-    syncId:lastPage?.syncId || canonicalData?.[stream]?.syncId || null,
-    availablePeriod:canonicalData?.[stream]?.period || null,
-    truncated:false,
+    rows:sample,
+    total:sample.length,
+    source:sample.length ? 'wb_stream_data_sample' : (totalRows > 0 ? 'wb_stream_data_sample_no_match' : 'none'),
+    syncId:payload?.syncId || null,
+    availablePeriod:payload?.period || null,
+    truncated:totalRows > Number(payload?.rows?.length || 0),
+    sampleOnly:totalRows > Number(payload?.rows?.length || 0),
+  }
+}
+
+async function loadProduct360ExtendedRows(connectionId, canonicalData, stream, product, range, limit = 500) {
+  // 5.11.3: SKU 360 must never scan the same heavy JSON stream 5x with payload::text ILIKE + COUNT.
+  // One exact-identity pass over the latest sync is enough; JS re-validates every row afterwards.
+  const latest = await pool.query(`
+    SELECT sync_id FROM wb_stream_items
+    WHERE connection_id=$1 AND stream=$2
+    ORDER BY updated_at DESC LIMIT 1
+  `,[connectionId,stream])
+  const syncId = latest.rows[0]?.sync_id
+  if (!syncId) return compactProduct360ExtendedRows(canonicalData,stream,product,range,limit)
+
+  const params = [connectionId,stream,syncId]
+  const where = [`connection_id=$1`,`stream=$2`,`sync_id=$3::uuid`]
+  const identityClause = product360ExtendedIdentityClause(product,params)
+  if (!identityClause) return compactProduct360ExtendedRows(canonicalData,stream,product,range,limit)
+  where.push(identityClause)
+  const dateExpression = extendedDateExpression(stream)
+  if (dateExpression && range?.from && range?.to) {
+    params.push(String(range.from).slice(0,10)); const fromRef = `$${params.length}`
+    params.push(String(range.to).slice(0,10)); const toRef = `$${params.length}`
+    where.push(`${dateExpression} BETWEEN ${fromRef} AND ${toRef}`)
+  }
+  const safeLimit = Math.max(1,Math.min(500,Number(limit)||500))
+  params.push(safeLimit + 1)
+  const page = await pool.query(`
+    SELECT row_key,payload FROM wb_stream_items
+    WHERE ${where.join(' AND ')}
+    ORDER BY row_key
+    LIMIT $${params.length}
+  `,params)
+  const matched = page.rows
+    .map(item=>({rowKey:item.row_key,...item.payload}))
+    .filter(row=>product360Matches(row,product).matched)
+  const compact = compactProduct360ExtendedRows(canonicalData,stream,product,range,limit)
+  const rows = matched.length ? matched.slice(0,safeLimit) : compact.rows
+  return {
+    rows,
+    total:rows.length,
+    source:matched.length ? 'wb_stream_items_exact' : compact.source,
+    syncId,
+    availablePeriod:canonicalData?.[stream]?.period || compact.availablePeriod || null,
+    truncated:page.rows.length > safeLimit || compact.truncated,
+    sampleOnly:false,
   }
 }
 
@@ -6023,13 +6066,19 @@ app.get('/api/wb/product-360/:id', authRequired, async (req, res) => {
     if (!product) return res.status(404).json({ error:'Товар не найден в едином ядре ELISEI' })
 
     const streamNames = ['searchQueries','reviews','questions','stockHistory']
-    const streamResults = await Promise.all(streamNames.map(async stream=>[
-      stream,
-      await loadProduct360ExtendedRows(connection.id,data,stream,product,range,500),
-    ]))
+    const detailLevel = String(req.query.depth || req.query.detail || 'core').toLowerCase() === 'full' ? 'full' : 'core'
+    const streamResults = detailLevel === 'full'
+      ? await Promise.all(streamNames.map(async stream=>[
+          stream,
+          await loadProduct360ExtendedRows(connection.id,data,stream,product,range,500),
+        ]))
+      : streamNames.map(stream=>[
+          stream,
+          compactProduct360ExtendedRows(data,stream,product,range,120),
+        ])
     const streamMap = Object.fromEntries(streamResults)
     const financeQuery = String(product.nmID || product.vendorCode || '').trim()
-    const financeResult = financeQuery ? await queryFinanceLedger(pool,{
+    const financeResult = detailLevel === 'full' && financeQuery ? await queryFinanceLedger(pool,{
       connectionId:connection.id,
       from:range?.from || reportPeriod(30).dateFrom,
       to:range?.to || reportPeriod(30).dateTo,
@@ -6047,6 +6096,7 @@ app.get('/api/wb/product-360/:id', authRequired, async (req, res) => {
         source:result.source || 'none',
         availablePeriod:result.availablePeriod || null,
         truncated:Boolean(result.truncated),
+        partial:Boolean(detailLevel === 'core' && (result.sampleOnly || result.truncated || Number(data?.[stream]?.totalRows || 0) > Number(result.rows?.length || 0))),
       }]
     }))
     const searchSnapshotPeriod=data?.searchQueries?.period || null
@@ -6086,7 +6136,12 @@ app.get('/api/wb/product-360/:id', authRequired, async (req, res) => {
         extended:Object.fromEntries(streamNames.map(stream=>[stream,streamMap[stream]?.source || 'none'])),
       },
     })
-    res.json({ product360:payload,lastSync:connection.last_sync_at || null })
+    res.json({
+      product360:{...payload,detailLevel,enrichmentPending:detailLevel !== 'full'},
+      detailLevel,
+      enrichmentPending:detailLevel !== 'full',
+      lastSync:connection.last_sync_at || null,
+    })
   } catch (error) {
     console.warn('WB product 360 failed:',error.message)
     res.status(error.status || 500).json({ error:error.message })

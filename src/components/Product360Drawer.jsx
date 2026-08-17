@@ -92,8 +92,9 @@ export default function Product360Drawer({ product, data, loading, error, period
         </div>
       </header>
 
-      {loading && !hasPayload && <div className="sku360-loading"><RefreshCw className="spin" size={19}/> Собираю продажи, финансы, рекламу, поиск, отзывы и остатки по одному товару…</div>}
+      {loading && !hasPayload && <div className="sku360-loading"><RefreshCw className="spin" size={19}/> Собираю основные данные SKU 360…</div>}
       {error && <div className="sku360-alert danger"><AlertTriangle size={18}/><div><strong>Не удалось собрать SKU 360</strong><span>{error}</span></div></div>}
+      {hasPayload && view.enrichmentPending && <div className="sku360-alert info"><RefreshCw className={loading?'spin':''} size={18}/><div><strong>Основные данные готовы</strong><span>Отзывы, поиск, история остатков и финансовые операции уточняются в фоне. Карточка остаётся доступной.</span></div></div>}
 
       {!hasPayload && !error && <div className="sku360-preload"><div><RefreshCw className="spin" size={22}/><span><b>Готовлю рентген товара</b><small>Пока ответ сервера не готов, ELISEI не подставляет нули из общей карточки.</small></span></div><div className="sku360-skeleton-grid">{Array.from({length:6}).map((_,index)=><i key={index}/>)}</div></div>}
 
@@ -177,7 +178,7 @@ export default function Product360Drawer({ product, data, loading, error, period
         </Section>
 
         <Section icon={ShieldCheck} eyebrow="Финансовый след" title="Последние операции WB">
-          {financeRows.length ? <div className="sku360-finance-list">{financeRows.slice(0,12).map((row,index)=><div key={`${row.operationDate}-${row.operationCode}-${index}`}><span><strong>{row.operationName || row.operationCode || 'Операция WB'}</strong><small>{fmtDate(row.operationDate)} · {row.fulfillmentMode || '—'}</small></span><b className={Number(row.amount||0)<0?'negative':'positive'}>{fmtMoney(row.amount)}</b></div>)}</div> : <div className="sku360-empty">{readiness.finance === 'partial' ? 'Финансы загружены частично: в текущей части реестра операций по этому SKU пока нет.' : readiness.finance === 'ready' ? 'Подтверждено: финансовых операций по SKU в выбранном периоде нет.' : 'Финансовый реестр по SKU ещё ожидается.'}</div>}
+          {financeRows.length ? <div className="sku360-finance-list">{financeRows.slice(0,12).map((row,index)=><div key={`${row.operationDate}-${row.operationCode}-${index}`}><span><strong>{row.operationName || row.operationCode || 'Операция WB'}</strong><small>{fmtDate(row.operationDate)} · {row.fulfillmentMode || '—'}</small></span><b className={Number(row.amount||0)<0?'negative':'positive'}>{fmtMoney(row.amount)}</b></div>)}</div> : <div className="sku360-empty">{view.enrichmentPending ? 'Основная экономика уже доступна. Детальный финансовый след по SKU уточняется в фоне.' : readiness.finance === 'partial' ? 'Финансы загружены частично: в текущей части реестра операций по этому SKU пока нет.' : readiness.finance === 'ready' ? 'Подтверждено: финансовых операций по SKU в выбранном периоде нет.' : 'Финансовый реестр по SKU ещё ожидается.'}</div>}
         </Section>
       </div>
 

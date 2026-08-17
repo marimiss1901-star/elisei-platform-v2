@@ -87,7 +87,9 @@ export const wbApi = {
     const query = new URLSearchParams({ productKey:String(productKey || '') })
     if (params?.from) query.set('from',String(params.from).slice(0,10))
     if (params?.to) query.set('to',String(params.to).slice(0,10))
-    return request(`/api/wb/product-360/${encodeURIComponent(connectionId)}?${query.toString()}`)
+    if (params?.depth) query.set('depth',String(params.depth))
+    const timeoutMs = params?.depth === 'full' ? 25000 : 12000
+    return request(`/api/wb/product-360/${encodeURIComponent(connectionId)}?${query.toString()}`, { signal:AbortSignal.timeout(timeoutMs) })
   },
   advertising: (connectionId, params = {}) => {
     const query = new URLSearchParams()

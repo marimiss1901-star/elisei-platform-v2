@@ -17,6 +17,9 @@ function syncReadiness(state = null, coreAvailable = false) {
 
 function extendedReadiness(state = null) {
   const status = String(state?.status || '').toLowerCase()
+  // Core SKU 360 may intentionally use only the compact persisted sample.
+  // Even if the WB stage itself is complete, a sample is not enough to prove a per-SKU zero.
+  if (state?.partial || state?.sampleOnly || state?.truncated) return 'partial'
   if (status === 'success' || state?.lastSuccessAt) return 'ready'
   if (Number(state?.rows || 0) > 0) return 'partial'
   if (WAITING_STATUSES.has(status)) return 'waiting'

@@ -334,6 +334,20 @@ const syncDataRevision = (value = {}) => JSON.stringify(
     }))
 )
 
+// SKU 360 only refreshes when actual persisted data changes. Scheduler clocks/statuses must not cancel a long SKU request.
+const product360DataRevision = (value = {}) => JSON.stringify(
+  [...(Array.isArray(value.syncStates) ? value.syncStates : [])]
+    .sort((a,b) => String(a.stage || '').localeCompare(String(b.stage || '')))
+    .map(item => ({
+      stage:item.stage || '',
+      lastSuccessAt:item.lastSuccessAt || null,
+      lastCount:Number(item.lastCount || 0),
+      rows:Number(item.metadata?.rows || item.metadata?.persistedCount || 0),
+      totalQuantity:Number(item.metadata?.totalQuantity || 0),
+      receivedAt:item.metadata?.receivedAt || null,
+    }))
+)
+
 const demoProducts = [
   { key:'demo-1', nmID:'1234567', vendorCode:'DEMO-01', title:'Товар для демонстрации', brand:'ELISEI Demo', revenue:286740, stock:124, salesCount:38, returnsCount:2, returnRate:5.3, stockCoverDays:98, stockStatus:'В наличии', abc:'A', xyz:'X', recommendation:'Контролировать динамику', profit:null, margin:null, unitCost:0, averagePrice:7546, breakevenPrice:null, targetPrice:null },
   { key:'demo-2', nmID:'7654321', vendorCode:'DEMO-02', title:'Ходовой товар', brand:'ELISEI Demo', revenue:198200, stock:8, salesCount:31, returnsCount:1, returnRate:3.2, stockCoverDays:8, stockStatus:'Заканчивается', abc:'A', xyz:'Y', recommendation:'Запланировать поставку', profit:null, margin:null, unitCost:0, averagePrice:6394, breakevenPrice:null, targetPrice:null },
@@ -433,6 +447,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [product360Loading, setProduct360Loading] = useState(false)
   const [product360Error, setProduct360Error] = useState('')
   const product360RequestKeyRef = useRef('')
+  const product360LastRevisionRef = useRef('')
   const [importResult, setImportResult] = useState(null)
   const connectionRef = useRef(emptyConnection)
   const syncRevisionRef = useRef('')
@@ -702,12 +717,13 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     loadConnectionData(connection.connectionId).catch(() => {})
   }, [active, connection.connected, connection.connectionId])
 
-  const product360SyncRevision = syncDataRevision(connection)
+  const product360SyncRevision = product360DataRevision(connection)
 
   useEffect(() => {
     const selector = selectedProduct ? String(selectedProduct.key || selectedProduct.nmID || selectedProduct.vendorCode || selectedProduct.barcode || '') : ''
     if (!selector || !connection.connected || !connection.connectionId) {
       product360RequestKeyRef.current = ''
+      product360LastRevisionRef.current = ''
       setProduct360Data(null)
       setProduct360Error('')
       setProduct360Loading(false)
@@ -720,12 +736,53 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     if (isNewSelection) setProduct360Data(null)
     setProduct360Error('')
     setProduct360Loading(true)
-    wbApi.product360(connection.connectionId,selector,{ from:analyticsPeriod.from,to:analyticsPeriod.to })
-      .then(result => { if (!cancelled) setProduct360Data(result?.product360 || null) })
-      .catch(error => { if (!cancelled) setProduct360Error(error.message || 'Не удалось собрать SKU 360') })
-      .finally(() => { if (!cancelled) setProduct360Loading(false) })
+
+    ;(async () => {
+      try {
+        // 5.11.3: first render a lightweight core snapshot. Do not wait for heavy JSON/ledger enrichment.
+        const coreResult = await wbApi.product360(connection.connectionId,selector,{
+          from:analyticsPeriod.from,to:analyticsPeriod.to,depth:'core',
+        })
+        if (cancelled) return
+        setProduct360Data(coreResult?.product360 || null)
+        product360LastRevisionRef.current = product360DataRevision(connectionRef.current)
+        setProduct360Loading(false)
+
+        // Enrichment is best-effort. A slow extended stream must never put the drawer back into skeleton mode.
+        try {
+          const fullResult = await wbApi.product360(connection.connectionId,selector,{
+            from:analyticsPeriod.from,to:analyticsPeriod.to,depth:'full',
+          })
+          if (cancelled) return
+          if (fullResult?.product360) setProduct360Data(fullResult.product360)
+          product360LastRevisionRef.current = product360DataRevision(connectionRef.current)
+        } catch {
+          // Keep the core SKU 360 visible. Extended details will be retried after a later sync revision/reopen.
+        }
+      } catch (error) {
+        if (!cancelled) setProduct360Error(error.message || 'Не удалось собрать SKU 360')
+      } finally {
+        if (!cancelled) setProduct360Loading(false)
+      }
+    })()
     return () => { cancelled = true }
-  }, [connection.connected,connection.connectionId,selectedProduct?.key,selectedProduct?.nmID,selectedProduct?.vendorCode,analyticsPeriod.from,analyticsPeriod.to,product360SyncRevision])
+  }, [connection.connected,connection.connectionId,selectedProduct?.key,selectedProduct?.nmID,selectedProduct?.vendorCode,analyticsPeriod.from,analyticsPeriod.to])
+
+  useEffect(() => {
+    const selector = selectedProduct ? String(selectedProduct.key || selectedProduct.nmID || selectedProduct.vendorCode || selectedProduct.barcode || '') : ''
+    if (!selector || !connection.connected || !connection.connectionId || !product360Data) return undefined
+    if (!product360SyncRevision || product360LastRevisionRef.current === product360SyncRevision) return undefined
+    // Background WB statuses may change every few seconds. Refresh the already visible core once, without cancelling an in-flight request.
+    const timer = window.setTimeout(() => {
+      wbApi.product360(connection.connectionId,selector,{
+        from:analyticsPeriod.from,to:analyticsPeriod.to,depth:'core',
+      }).then(result => {
+        if (result?.product360) setProduct360Data(result.product360)
+        product360LastRevisionRef.current = product360SyncRevision
+      }).catch(() => {})
+    },1800)
+    return () => window.clearTimeout(timer)
+  }, [product360SyncRevision,connection.connected,connection.connectionId,selectedProduct?.key,selectedProduct?.nmID,selectedProduct?.vendorCode,analyticsPeriod.from,analyticsPeriod.to])
 
 
   useEffect(() => {
