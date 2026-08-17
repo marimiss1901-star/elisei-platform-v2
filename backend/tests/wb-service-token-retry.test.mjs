@@ -47,7 +47,7 @@ for (const marker of [
 
 assert.ok(!dashboard.includes('saveServiceConnection'),'Dashboard must not retain the old service-token submit flow')
 assert.ok(!dashboard.includes('serviceTokenDraft'),'Dashboard must not retain a second token input state')
-assert.ok(styles.includes('ELISEI 5.10.1 — единая оцифровка кабинета на Главной'))
+assert.ok(styles.includes('ELISEI 5.10.2 — единая оцифровка кабинета и честные статусы частичных данных'))
 
 // Pure routing check: the normal finance stage works for any key with Finance category.
 // Token-type-limited list endpoints remain optional enrichment and never block core finance.

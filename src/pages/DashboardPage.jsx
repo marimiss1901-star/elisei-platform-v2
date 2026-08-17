@@ -1278,28 +1278,41 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     const ledgerSummary = financeLedger?.summary || {}
     const periodLabel = `${formatDate(analyticsPeriod.from)} — ${formatDate(analyticsPeriod.to)}`
     const periodDays = periodDaysBetween(analyticsPeriod)
-    const metric = (label,value,current,previous,{ money=true,lowerIsBetter=false,note='',onClick='Аналитика' }={}) => ({
-      label,value:money ? formatMoney(value) : formatNumber(value),
-      delta:current == null ? note : compareReady ? comparisonLabel(current,previous,true) : note,
-      tone:comparisonToneDirectional(current,previous,compareReady,lowerIsBetter),onClick,
+    const analyticsAvailability = analyticsCore?.availability || {}
+    const syncStateFor = stage => (connection.syncStates || []).find(item => item.stage === stage) || null
+    const financeState = syncStateFor('finance')
+    const financePersistedRows = Number(financeState?.metadata?.persistedCount || financeState?.lastCount || 0)
+    const financePartial = Boolean(financeLedger?.coverage?.financePartial || (financePersistedRows > 0 && ['queued','running','rate_limited','retry_scheduled'].includes(String(financeState?.status || ''))))
+    const financeMovementsInPeriod = Number(ledgerSummary.movements || financeLedger?.pagination?.total || 0)
+    const metric = (label,value,current,previous,{ money=true,lowerIsBetter=false,note='',onClick='Аналитика',available=true,partial=false }={}) => ({
+      label,
+      value:available ? (money ? formatMoney(value) : formatNumber(value)) : (partial ? 'Догружается…' : 'Не загружено'),
+      delta:!available ? (partial ? note || 'данные уже есть, период ещё догружается' : note || 'ожидаем данные WB') : partial ? (note || 'предварительно · поток ещё догружается') : current == null ? note : compareReady ? comparisonLabel(current,previous,true) : note,
+      tone:available && !partial ? comparisonToneDirectional(current,previous,compareReady,lowerIsBetter) : '',onClick,
     })
+    const financeAvailableForPeriod = Boolean(analyticsAvailability.finance)
+    const financeHasAnyProgress = financePartial || financePersistedRows > 0
+    const storageAvailableForPeriod = Boolean(analyticsAvailability.finance || analyticsAvailability.paidStorage)
+    const acquiringAvailableForPeriod = Boolean(analyticsAvailability.finance || analyticsAvailability.acquiring)
+    const advertisingAvailableForPeriod = Boolean(analyticsAvailability.advertising)
+    const sellerPayableAvailable = Boolean(financeLedger && financeMovementsInPeriod > 0)
     const digitizationMetrics = [
-      metric('Выручка',businessSummary.revenue,businessSummary.revenue,previousSummary.revenue,{ note:`${formatNumber(businessSummary.sales)} продаж` }),
-      { label:'К перечислению',value:financeLedgerLoading && !financeLedger ? 'Загружается…' : formatMoney(financeLedger ? ledgerSummary.sellerPayable : null),delta:financeLedger ? 'по финансовому реестру WB' : 'ожидаем финансовые данные',tone:'',onClick:'Финансы' },
-      metric('Опер. прибыль',businessSummary.operatingProfit,businessSummary.operatingProfit,previousSummary.operatingProfit,{ note:businessSummary.operatingProfit == null ? 'нужна себестоимость' : `маржа ${formatPercent(businessSummary.margin)}`,onClick:'Финансы' }),
-      metric('Заказы',businessSummary.orders,businessSummary.orders,previousSummary.orders,{ money:false,note:`${formatNumber(businessSummary.sales)} продаж` }),
-      metric('Продажи',businessSummary.sales,businessSummary.sales,previousSummary.sales,{ money:false,note:`выкуп ${businessSummary.orders ? formatPercent(Number(businessSummary.sales || 0)/Number(businessSummary.orders || 1)*100) : '—'}` }),
-      metric('Возвраты',businessSummary.returns,businessSummary.returns,previousSummary.returns,{ money:false,lowerIsBetter:true,note:`${formatPercent(businessSummary.returnRate)} от продаж` }),
-      metric('Комиссия WB',businessSummary.commission,businessSummary.commission,previousSummary.commission,{ lowerIsBetter:true,onClick:'Финансы' }),
-      metric('Логистика',businessSummary.logistics,businessSummary.logistics,previousSummary.logistics,{ lowerIsBetter:true,onClick:'Финансы' }),
-      metric('Реклама',businessSummary.advertising,businessSummary.advertising,previousSummary.advertising,{ lowerIsBetter:true,onClick:'Реклама' }),
-      metric('Хранение',businessSummary.storage,businessSummary.storage,previousSummary.storage,{ lowerIsBetter:true,onClick:'Финансы' }),
-      metric('Эквайринг',businessSummary.acquiring,businessSummary.acquiring,previousSummary.acquiring,{ lowerIsBetter:true,onClick:'Финансы' }),
-      metric('Штрафы + удержания',Number(businessSummary.penalties || 0)+Number(businessSummary.deductions || 0),Number(businessSummary.penalties || 0)+Number(businessSummary.deductions || 0),Number(previousSummary.penalties || 0)+Number(previousSummary.deductions || 0),{ lowerIsBetter:true,onClick:'Финансы' }),
+      metric('Выручка',businessSummary.revenue,businessSummary.revenue,previousSummary.revenue,{ note:analyticsAvailability.sales ? `${formatNumber(businessSummary.sales)} продаж` : 'продажи ещё синхронизируются',available:Boolean(analyticsAvailability.sales),partial:!analyticsAvailability.sales && Boolean(syncStateFor('sales')) }),
+      { label:'К перечислению',value:financeLedgerLoading && !financeLedger ? 'Загружается…' : sellerPayableAvailable ? formatMoney(ledgerSummary.sellerPayable) : financeHasAnyProgress ? 'Догружается…' : 'Не загружено',delta:sellerPayableAvailable ? (financePartial ? 'предварительно · финансовый поток ещё догружается' : 'по финансовому реестру WB') : financeHasAnyProgress ? `${formatNumber(financePersistedRows)} строк сохранено · выбранный период ещё покрывается` : 'ожидаем финансовые данные',tone:'',onClick:'Финансы' },
+      { label:'Опер. прибыль',value:businessSummary.cogs == null ? 'Не рассчитано' : (businessSummary.operatingProfit != null && analyticsAvailability.sales && financeAvailableForPeriod ? formatMoney(businessSummary.operatingProfit) : financeHasAnyProgress ? 'Догружается…' : 'Не загружено'),delta:businessSummary.cogs == null ? 'нужна себестоимость' : (businessSummary.operatingProfit != null && analyticsAvailability.sales && financeAvailableForPeriod ? (financePartial ? 'предварительно · финансы догружаются' : `маржа ${formatPercent(businessSummary.margin)}`) : 'ждём продажи и финансовую детализацию'),tone:'',onClick:'Финансы' },
+      metric('Заказы',businessSummary.orders,businessSummary.orders,previousSummary.orders,{ money:false,note:analyticsAvailability.orders ? `${formatNumber(businessSummary.sales)} продаж` : 'заказы ещё синхронизируются',available:Boolean(analyticsAvailability.orders),partial:!analyticsAvailability.orders && Boolean(syncStateFor('orders')) }),
+      metric('Продажи',businessSummary.sales,businessSummary.sales,previousSummary.sales,{ money:false,note:analyticsAvailability.sales ? `выкуп ${businessSummary.orders ? formatPercent(Number(businessSummary.sales || 0)/Number(businessSummary.orders || 1)*100) : '—'}` : 'продажи ещё синхронизируются',available:Boolean(analyticsAvailability.sales),partial:!analyticsAvailability.sales && Boolean(syncStateFor('sales')) }),
+      metric('Возвраты',businessSummary.returns,businessSummary.returns,previousSummary.returns,{ money:false,lowerIsBetter:true,note:analyticsAvailability.sales ? `${formatPercent(businessSummary.returnRate)} от продаж` : 'возвраты считаются из потока продаж',available:Boolean(analyticsAvailability.sales),partial:!analyticsAvailability.sales && Boolean(syncStateFor('sales')) }),
+      metric('Комиссия WB',businessSummary.commission,businessSummary.commission,previousSummary.commission,{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:financeHasAnyProgress,note:financeHasAnyProgress ? `${formatNumber(financePersistedRows)} строк финансов уже сохранено` : '' }),
+      metric('Логистика',businessSummary.logistics,businessSummary.logistics,previousSummary.logistics,{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:financeHasAnyProgress,note:financeHasAnyProgress ? 'предварительно по загруженной части финансов' : '' }),
+      metric('Реклама',businessSummary.advertising,businessSummary.advertising,previousSummary.advertising,{ lowerIsBetter:true,onClick:'Реклама',available:advertisingAvailableForPeriod,partial:!advertisingAvailableForPeriod && Boolean(syncStateFor('advertising')),note:advertisingAvailableForPeriod ? '' : 'кампании или статистика ещё загружаются' }),
+      metric('Хранение',businessSummary.storage,businessSummary.storage,previousSummary.storage,{ lowerIsBetter:true,onClick:'Финансы',available:storageAvailableForPeriod,partial:financeHasAnyProgress || Boolean(syncStateFor('paidStorage')),note:'финансы/отчёт хранения ещё догружаются' }),
+      metric('Эквайринг',businessSummary.acquiring,businessSummary.acquiring,previousSummary.acquiring,{ lowerIsBetter:true,onClick:'Финансы',available:acquiringAvailableForPeriod,partial:financeHasAnyProgress || Boolean(syncStateFor('acquiring')),note:'эквайринг подтверждается финансовой детализацией' }),
+      metric('Штрафы + удержания',Number(businessSummary.penalties || 0)+Number(businessSummary.deductions || 0),Number(businessSummary.penalties || 0)+Number(businessSummary.deductions || 0),Number(previousSummary.penalties || 0)+Number(previousSummary.deductions || 0),{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:financeHasAnyProgress,note:'финансовая детализация ещё догружается' }),
     ]
-    const topProducts = [...analyticsBaseProducts]
+    const topProducts = analyticsAvailability.sales ? [...analyticsBaseProducts]
       .sort((a,b)=>Number(b.revenue || 0)-Number(a.revenue || 0))
-      .slice(0,10)
+      .slice(0,10) : []
     const openProduct = row => { setSelectedProduct(row); setActive('Товары') }
 
     return <>
@@ -1998,7 +2011,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
           : { tone:'warning', title:'Отчёт создан · ждём WB', text:state.nextAllowedAt ? `taskId сохранён. Следующая проверка после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : (state.lastError || 'ELISEI продолжит тот же отчёт автоматически.') }
         return due
           ? { tone:'pending', title:'Автоповтор запускается', text:'Срок паузы закончился. Интерфейс разбудил фоновую очередь; статус обновится автоматически.' }
-          : { tone:'warning', title:'Пауза Wildberries', text:state.nextAllowedAt ? `Автоповтор после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : state.lastError }
+          : { tone:'warning', title:'Лимит метода WB', text:state.nextAllowedAt ? `Только этот поток ждёт до ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}. Остальные этапы продолжаются независимо.` : (state.lastError || 'Только этот поток временно ожидает разрешённого интервала WB.') }
       }
       if (state.status === 'retry_scheduled') {
         const due = state.nextAllowedAt && new Date(state.nextAllowedAt).getTime() <= Date.now()

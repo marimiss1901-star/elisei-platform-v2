@@ -204,6 +204,42 @@ async function recoverRetryableErrorStates() {
 }
 
 
+async function recoverLegacyFinanceCooldowns({ connectionId = null } = {}) {
+  if (!pool) return []
+  const params=[]
+  let connectionFilter=''
+  if (connectionId) {
+    params.push(connectionId)
+    connectionFilter=' AND connection_id=$1'
+  }
+  // До 5.10.2 ELISEI ошибочно держал базовый финансовый поток 12 часов между
+  // страницами. WB уже расширил лимит sales-reports/detailed до 1 запроса
+  // примерно раз в 20 секунд. Сбрасываем только явно legacy-паузы, не трогая
+  // реальные Retry-After от WB.
+  const result=await pool.query(`
+    UPDATE wb_sync_states
+    SET status='queued',
+        next_allowed_at=NOW(),
+        last_error=NULL,
+        metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object(
+          'legacyFinanceCooldownRecovered',true,
+          'legacyFinanceCooldownRecoveredAt',NOW(),
+          'limitNote','Финансовая детализация WB продолжает пагинацию примерно раз в 20 секунд.'
+        ),
+        updated_at=NOW()
+    WHERE stage='finance'
+      AND status='queued'
+      AND COALESCE(last_count,0) > 0
+      AND next_allowed_at > NOW() + INTERVAL '5 minutes'
+      AND COALESCE(metadata->>'limitNote','') ILIKE '%12 час%'
+      ${connectionFilter}
+    RETURNING connection_id,stage,last_count
+  `,params)
+  if (result.rows.length) console.warn(`Recovered ${result.rows.length} legacy WB finance cooldown(s) from pre-5.10.2 schedule.`)
+  return result.rows
+}
+
+
 const backgroundWorkerState = {
   running: false,
   promise: null,
@@ -221,6 +257,7 @@ function kickBackgroundWorkers(reason = 'timer') {
   backgroundWorkerState.lastError = null
   const promise = (async () => {
     await recoverStaleSyncStates({ reason:`worker:${reason}` })
+    await recoverLegacyFinanceCooldowns()
     // Выполняем последовательно, чтобы два тяжёлых запроса WB одного продавца
     // не стартовали в одну секунду и не провоцировали глобальный лимитер.
     await processPendingStockReports()
@@ -596,8 +633,14 @@ function retryAfterSeconds(response, attempt) {
 }
 
 function retryDelayMs(response, attempt) {
+  const explicit = Number(response.headers.get('x-ratelimit-retry') || response.headers.get('retry-after'))
+  if (Number.isFinite(explicit) && explicit > 0) {
+    // X-Ratelimit-Retry уже является точным указанием WB. Не уменьшаем его
+    // случайным jitter: ранний повтор сам создавал повторные 429.
+    return Math.max(1000,Math.ceil(explicit * 1000) + 350)
+  }
   const base = retryAfterSeconds(response, attempt) * 1000
-  const jitter = 0.85 + Math.random() * 0.3
+  const jitter = 0.9 + Math.random() * 0.2
   return Math.max(1000, Math.round(base * jitter))
 }
 
@@ -631,7 +674,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.22.1 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.22.2 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -5009,7 +5052,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.22.1',
+    version: '2.22.2',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -5215,6 +5258,7 @@ app.all('/api/wb/oauth/callback',(req,res)=>{
 app.get('/api/wb/connection', authRequired, async (req, res) => {
   let connection = await getConnection(req.auth.sub)
   if (!connection) return res.json(publicConnection(null))
+  await recoverLegacyFinanceCooldowns({ connectionId:connection.id })
   let [tokens, states] = await Promise.all([getWbTokens(req.auth.sub, connection.id), getSyncStates(connection.id)])
   // 5.10.1 migration: уже подключённому кабинету не нужно перевыпускать ключ
   // после обновления ELISEI. Первый просмотр сам поставит в очередь новые

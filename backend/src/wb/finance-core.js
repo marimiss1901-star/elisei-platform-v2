@@ -5,10 +5,10 @@ const number = value => {
 }
 
 export const FINANCE_METHOD_LIMITS = Object.freeze({
-  baseDetailIntervalMs: 12 * 60 * 60 * 1000,
+  baseDetailIntervalMs: 21 * 1000,
   baseBalanceIntervalMs: 24 * 60 * 60 * 1000,
   baseDocumentsIntervalMs: 11 * 1000,
-  privilegedIntervalMs: 65 * 1000,
+  privilegedIntervalMs: 21 * 1000,
   documentsPrivilegedIntervalMs: 11 * 1000,
 })
 
@@ -56,8 +56,8 @@ export function financeProgressCopy({ tokenInfo = {}, rows = 0, page = 0, nextAl
     page:Number(page || 0),
     nextAllowedAt:nextAllowedAt || null,
     limitNote:base
-      ? 'Базовый токен WB: не более двух запросов финансовой детализации в сутки с интервалом 12 часов.'
-      : 'Персональный/Сервисный токен WB: продолжение возможно после минутного интервала.',
+      ? 'Финансовая детализация WB: официальный лимит — 1 запрос на аккаунт примерно раз в 20 секунд. ELISEI продолжает пагинацию автоматически.'
+      : 'Финансовая детализация WB: официальный лимит — 1 запрос на аккаунт примерно раз в 20 секунд. ELISEI продолжает пагинацию автоматически.',
   }
 }
 

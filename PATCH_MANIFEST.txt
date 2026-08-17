@@ -1,24 +1,14 @@
-ELISEI 5.10.1 PATCH
-Base: deployed ELISEI 5.10.0
-Frontend: 5.10.1
-Backend: 2.22.1
-El Core: 5.10.1
+ELISEI 5.10.2 PATCH
+Base: ELISEI 5.10.1
+Frontend: 5.10.2
+Backend: 2.22.2
+El Core: 5.10.2
 
 Purpose:
-- one user-facing Wildberries API connection;
-- core finance through the Finance category of the connected key;
-- automatic initial/core sync and migration of legacy service-token block states;
-- unified cabinet digitization on Home;
-- hotfix for mixed-deploy shouldForceSalesModule runtime failure.
+1. Remove obsolete 12-hour finance pagination cooldown.
+2. Auto-recover the old queued finance cooldown without reconnecting WB.
+3. Respect explicit WB X-Ratelimit-Retry without negative jitter.
+4. Stop showing false zeroes while sales/finance/ads are incomplete.
+5. Explain rate limits as per-stream waits, not a cabinet-wide stop.
 
-Installation:
-1. Copy the elisei-platform-v2-main folder contents over the deployed 5.10.0 project with overwrite.
-2. Redeploy backend and frontend.
-3. Confirm /health reports backend 2.22.1 and El reports 5.10.1.
-4. Do not re-enter an already saved WB key solely because of this update; opening the connection state queues eligible missing core streams automatically.
-
-Validation:
-- 26/26 backend tests passed.
-- Node syntax checks passed for backend changed JS/CJS files.
-- TypeScript parser reports no JSX/JS parse diagnostics for DashboardPage.jsx and src/lib/api.js.
-- Full Vite production build was not executed in the working container because project dependencies are not installed there.
+Apply with replacement over ELISEI 5.10.1 and redeploy frontend + backend.
