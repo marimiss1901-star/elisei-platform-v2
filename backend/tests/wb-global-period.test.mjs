@@ -30,7 +30,7 @@ for (const marker of [
 
 for (const marker of [
   'renderSharedPeriodControls',
-  "['Аналитика','Остатки','Финансы'].includes(active)",
+  "['Главная','Аналитика','Остатки','Финансы'].includes(active)",
   "active !== 'Реклама'",
   'period={analyticsPeriod}',
   'query={query} onQueryChange={setQuery}',

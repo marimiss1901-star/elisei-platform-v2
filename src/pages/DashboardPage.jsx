@@ -213,6 +213,14 @@ const comparisonTone = (current, previous, enabled) => {
   return change == null || change === 0 ? '' : change > 0 ? 'positive' : 'negative'
 }
 
+const comparisonToneDirectional = (current, previous, enabled, lowerIsBetter = false) => {
+  if (!enabled) return ''
+  const change = percentChange(current,previous)
+  if (change == null || change === 0) return ''
+  const improved = lowerIsBetter ? change < 0 : change > 0
+  return improved ? 'positive' : 'negative'
+}
+
 const aggregateAnalyticsRows = (rows = [], baseSummary = {}, periodDays = 30, filtered = false) => {
   if (!filtered) return baseSummary || {}
   const sum = key => rows.reduce((total,row) => total + Number(row?.[key] || 0),0)
@@ -282,7 +290,6 @@ const defaultSettings = {
 const emptyConnection = {
   connected:false, connectionId:'', scopes:[], tokens:[], syncStates:[], lastSync:null,
   primaryToken:null, primaryTokenId:null, tokenMode:'none', coverageByStage:{},
-  serviceToken:null, serviceTokenConnected:false, serviceFinanceReady:false,
   serviceSecret:{ configured:false,valid:false,expiresAt:null,error:null }
 }
 
@@ -369,10 +376,6 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [tokenLabel, setTokenLabel] = useState('')
   const [showToken, setShowToken] = useState(false)
   const [checking, setChecking] = useState(false)
-  const [serviceTokenDraft, setServiceTokenDraft] = useState('')
-  const [serviceTokenLabel, setServiceTokenLabel] = useState('')
-  const [showServiceToken, setShowServiceToken] = useState(false)
-  const [checkingServiceToken, setCheckingServiceToken] = useState(false)
   const [liveSync, setLiveSync] = useState({ enabled:false,mode:'polling',intervals:{},webhooksEnabled:false,webhookCount:0,oauth:{},webhookSetupReady:false })
   const [liveSyncBusy, setLiveSyncBusy] = useState(false)
   const [syncing, setSyncing] = useState(false)
@@ -707,17 +710,17 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   }, [analyticsCompare])
 
   useEffect(() => {
-    if (!['Аналитика','Остатки','Финансы'].includes(active) || !connection.connected || !connection.connectionId) return undefined
+    if (!['Главная','Аналитика','Остатки','Финансы'].includes(active) || !connection.connected || !connection.connectionId) return undefined
     const timer = window.setTimeout(() => {
-      loadAnalyticsData(connection.connectionId,analyticsPeriod,active === 'Аналитика' ? analyticsCompare : false)
+      loadAnalyticsData(connection.connectionId,analyticsPeriod,['Главная','Аналитика'].includes(active) ? analyticsCompare : false)
     }, 320)
     return () => window.clearTimeout(timer)
   }, [active, connection.connected, connection.connectionId, connection.lastSync, analyticsPeriod.from, analyticsPeriod.to, analyticsCompare])
 
   useEffect(() => {
-    if (active !== 'Финансы' || !connection.connected || !connection.connectionId) return undefined
+    if (!['Главная','Финансы'].includes(active) || !connection.connected || !connection.connectionId) return undefined
     const timer = window.setTimeout(() => {
-      loadFinanceLedger(connection.connectionId).catch(() => {})
+      loadFinanceLedger(connection.connectionId, active === 'Главная' ? { tab:'overview', query:'', page:1 } : {}).catch(() => {})
     }, 280)
     return () => window.clearTimeout(timer)
   }, [active, connection.connected, connection.connectionId, financeTab, query, financePage, analyticsPeriod.from, analyticsPeriod.to,
@@ -953,24 +956,11 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       const result = await wbApi.connect(tokenDraft.trim(), tokenLabel.trim())
       setConnection(normalizeConnection(result))
       setTokenDraft(''); setTokenLabel('')
-      notify(result.tokenMode === 'universal' ? 'Основной токен подключён и назначен всем доступным потокам.' : 'Токен подключён. ELISEI использует его только для доступных категорий.')
+      notify(result.autoSyncStarted ? `Wildberries подключён. ELISEI уже начал фоновую загрузку: ${result.autoSyncStages?.length || 0} потоков.` : 'API-ключ сохранён. Доступные категории уже подключены.', 8000)
     } catch (error) { notify(error.message, 9000) }
     finally { setChecking(false) }
   }
 
-  const saveServiceConnection = async event => {
-    event.preventDefault()
-    if (!wbApi.configured) return notify('Добавьте VITE_API_BASE_URL в Render')
-    if (serviceTokenDraft.trim().length < 40) return notify('Сервисный токен выглядит слишком коротким')
-    setCheckingServiceToken(true)
-    try {
-      const result = await wbApi.connectService(serviceTokenDraft.trim(),serviceTokenLabel.trim())
-      setConnection(current => normalizeConnection(result,current))
-      setServiceTokenDraft(''); setServiceTokenLabel('')
-      notify(result.serviceFinanceReady ? 'Сервисный токен подключён. Финансовые сводки WB готовы к загрузке.' : 'Сервисный токен сохранён. Проверьте WB_CLIENT_SECRET в backend Render.')
-    } catch (error) { notify(error.message,10000) }
-    finally { setCheckingServiceToken(false) }
-  }
 
   const removeToken = async tokenId => {
     if (!window.confirm('Удалить этот API-токен из ELISEI? Уже загруженные данные сохранятся.')) return
@@ -1281,33 +1271,88 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     }
   }, [connection.connected, coreData?.syncWarnings, summary.operatingProfit, summary.zeroStock, summary.lowStock, recommendations, elSettings.character])
 
-  const renderHome = () => <>
-    <section className="brand-hero glass-panel">
-      <div className="brand-hero-copy">
-        <span className="brand-kicker"><Sparkles size={14}/> {connection.connected ? 'ЭЛ уже всё проверил' : 'ЭЛ готов к работе'}</span>
-        <h1>{greeting},<br/><em>{displayName || 'рады вас видеть'}</em></h1>
-        <p>{connection.connected
-          ? `Я проверил ${formatNumber(summary.activeProducts || productRows.length)} товаров. ${coreData?.availability?.sales ? 'Продажи загружены.' : 'Продажи ожидают синхронизации.'} ${coreData?.availability?.stocks ? 'Остатки загружены.' : 'Отчёт остатков формируется отдельно.'}`
-          : 'Подключите Wildberries — я соберу продажи, остатки и подготовлю план действий.'}</p>
-        <div className="brand-hero-actions">
-          <button className="primary-btn brand-primary" onClick={() => setActive('Спросить ЭЛа')}><MessageCircle size={18}/> Обсудить с ЭЛом</button>
-          <button className="brand-secondary" onClick={() => setActive(connection.connected ? 'Аналитика' : 'Подключения')}>{connection.connected ? 'Открыть аналитику' : 'Подключить WB'} <ChevronRight size={17}/></button>
+  const renderHome = () => {
+    const businessSummary = analyticsCore?.summary || summary || {}
+    const previousSummary = analyticsCompareCore?.summary || {}
+    const compareReady = Boolean(analyticsCompareCore)
+    const ledgerSummary = financeLedger?.summary || {}
+    const periodLabel = `${formatDate(analyticsPeriod.from)} — ${formatDate(analyticsPeriod.to)}`
+    const periodDays = periodDaysBetween(analyticsPeriod)
+    const metric = (label,value,current,previous,{ money=true,lowerIsBetter=false,note='',onClick='Аналитика' }={}) => ({
+      label,value:money ? formatMoney(value) : formatNumber(value),
+      delta:current == null ? note : compareReady ? comparisonLabel(current,previous,true) : note,
+      tone:comparisonToneDirectional(current,previous,compareReady,lowerIsBetter),onClick,
+    })
+    const digitizationMetrics = [
+      metric('Выручка',businessSummary.revenue,businessSummary.revenue,previousSummary.revenue,{ note:`${formatNumber(businessSummary.sales)} продаж` }),
+      { label:'К перечислению',value:financeLedgerLoading && !financeLedger ? 'Загружается…' : formatMoney(financeLedger ? ledgerSummary.sellerPayable : null),delta:financeLedger ? 'по финансовому реестру WB' : 'ожидаем финансовые данные',tone:'',onClick:'Финансы' },
+      metric('Опер. прибыль',businessSummary.operatingProfit,businessSummary.operatingProfit,previousSummary.operatingProfit,{ note:businessSummary.operatingProfit == null ? 'нужна себестоимость' : `маржа ${formatPercent(businessSummary.margin)}`,onClick:'Финансы' }),
+      metric('Заказы',businessSummary.orders,businessSummary.orders,previousSummary.orders,{ money:false,note:`${formatNumber(businessSummary.sales)} продаж` }),
+      metric('Продажи',businessSummary.sales,businessSummary.sales,previousSummary.sales,{ money:false,note:`выкуп ${businessSummary.orders ? formatPercent(Number(businessSummary.sales || 0)/Number(businessSummary.orders || 1)*100) : '—'}` }),
+      metric('Возвраты',businessSummary.returns,businessSummary.returns,previousSummary.returns,{ money:false,lowerIsBetter:true,note:`${formatPercent(businessSummary.returnRate)} от продаж` }),
+      metric('Комиссия WB',businessSummary.commission,businessSummary.commission,previousSummary.commission,{ lowerIsBetter:true,onClick:'Финансы' }),
+      metric('Логистика',businessSummary.logistics,businessSummary.logistics,previousSummary.logistics,{ lowerIsBetter:true,onClick:'Финансы' }),
+      metric('Реклама',businessSummary.advertising,businessSummary.advertising,previousSummary.advertising,{ lowerIsBetter:true,onClick:'Реклама' }),
+      metric('Хранение',businessSummary.storage,businessSummary.storage,previousSummary.storage,{ lowerIsBetter:true,onClick:'Финансы' }),
+      metric('Эквайринг',businessSummary.acquiring,businessSummary.acquiring,previousSummary.acquiring,{ lowerIsBetter:true,onClick:'Финансы' }),
+      metric('Штрафы + удержания',Number(businessSummary.penalties || 0)+Number(businessSummary.deductions || 0),Number(businessSummary.penalties || 0)+Number(businessSummary.deductions || 0),Number(previousSummary.penalties || 0)+Number(previousSummary.deductions || 0),{ lowerIsBetter:true,onClick:'Финансы' }),
+    ]
+    const topProducts = [...analyticsBaseProducts]
+      .sort((a,b)=>Number(b.revenue || 0)-Number(a.revenue || 0))
+      .slice(0,10)
+    const openProduct = row => { setSelectedProduct(row); setActive('Товары') }
+
+    return <>
+      <section className="brand-hero glass-panel">
+        <div className="brand-hero-copy">
+          <span className="brand-kicker"><Sparkles size={14}/> {connection.connected ? 'ЭЛ уже всё проверил' : 'ЭЛ готов к работе'}</span>
+          <h1>{greeting},<br/><em>{displayName || 'рады вас видеть'}</em></h1>
+          <p>{connection.connected
+            ? `Я проверил ${formatNumber(businessSummary.activeProducts || productRows.length)} товаров. ${coreData?.availability?.sales ? 'Продажи загружены.' : 'Продажи ожидают синхронизации.'} ${coreData?.availability?.stocks ? 'Остатки загружены.' : 'Отчёт остатков формируется отдельно.'}`
+            : 'Подключите Wildberries один раз — я сам определю доступные категории и начну собирать кабинет.'}</p>
+          <div className="brand-hero-actions">
+            <button className="primary-btn brand-primary" onClick={() => setActive('Спросить ЭЛа')}><MessageCircle size={18}/> Обсудить с ЭЛом</button>
+            <button className="brand-secondary" onClick={() => setActive(connection.connected ? 'Аналитика' : 'Подключения')}>{connection.connected ? 'Открыть аналитику' : 'Подключить WB'} <ChevronRight size={17}/></button>
+          </div>
+          <div className="brand-sync"><span className="status-dot"/>{connection.connected ? `Данные обновлены ${connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : '—'}` : 'Кабинет пока не подключён'}</div>
         </div>
-        <div className="brand-sync"><span className="status-dot"/>{connection.connected ? `Данные обновлены ${connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : '—'}` : 'Кабинет пока не подключён'}</div>
-      </div>
-      <div className="brand-mascot-stage"><span className="brand-orbit one"/><span className="brand-orbit two"/><ElMascot mood={homeElState.mood}/><div className="el-speech"><strong>ЭЛ · {elCharacterMeta[elSettings.character]?.title}</strong><span>{homeElState.line}</span></div></div>
-    </section>
-    <section className="brand-metrics">
-      <button className="brand-metric" onClick={() => setActive('Аналитика')}><span className="brand-3d-icon"><TrendingUp/></span><span><small>Выручка · 30 дней</small><strong>{formatMoney(summary.revenue)}</strong><em>{formatNumber(summary.sales)} продаж</em></span><ChevronRight/></button>
-      <button className="brand-metric pink" onClick={() => setActive('Финансы')}><span className="brand-3d-icon"><CircleDollarSign/></span><span><small>Операционная прибыль</small><strong>{formatMoney(summary.operatingProfit)}</strong><em>{summary.operatingProfit == null ? 'Добавьте себестоимость' : `Маржа ${formatPercent(summary.margin)}`}</em></span><ChevronRight/></button>
-      <button className="brand-metric blue" onClick={() => setActive('Товары')}><span className="brand-3d-icon"><PackageSearch/></span><span><small>Товары</small><strong>{formatNumber(summary.activeProducts || productRows.length)}</strong><em>{formatNumber(summary.zeroStock)} без остатка</em></span><ChevronRight/></button>
-      <button className="brand-metric cyan" onClick={() => setActive('Остатки')}><span className="brand-3d-icon"><Boxes/></span><span><small>Остатки</small><strong>{formatNumber(summary.stockUnits)}</strong><em>{formatNumber(summary.lowStock)} заканчиваются</em></span><ChevronRight/></button>
-    </section>
-    <section className="brand-grid">
-      <div className="el-recommendations glass-panel"><div className="brand-section-head"><div><span>ЭЛ рекомендует</span><h2>Что сделать сегодня</h2></div><button onClick={() => setActive('Спросить ЭЛа')}>Спросить ЭЛа <ChevronRight size={16}/></button></div><div className="recommendation-cards">{recommendations.slice(0,3).map((item,index) => <button className={`recommendation-tile ${recommendationTone(item.type)}`} key={item.id || index} onClick={() => setActive(item.type === 'stock' ? 'Остатки' : item.type === 'price' ? 'Цены и акции' : item.type === 'quality' ? 'Отзывы' : 'Аналитика')}><span className="rec-number">0{index+1}</span><div><small>{item.type || 'Рекомендация'}</small><h3>{item.title}</h3><p>{item.text}</p><strong>{item.effect}</strong></div><ChevronRight className="rec-arrow" size={18}/></button>)}</div></div>
-      <aside className="el-profile-card glass-panel"><div className="el-profile-top"><span className="mini-el"><ElMascot compact mood={homeElState.mood}/></span><div><span>ЭЛ · AI-помощник</span><h2>{homeElState.title}</h2></div><b className="live-pill">LIVE</b></div><p>Я связываю продажи, запасы, возвраты и экономику, чтобы подсказать конкретное действие.</p><div className="el-profile-stats"><div><span>Проверено товаров</span><strong>{formatNumber(summary.activeProducts || productRows.length)}</strong></div><div><span>Задач найдено</span><strong>{recommendations.length}</strong></div><div><span>Дней запаса</span><strong>{summary.stockCoverDays ?? '—'}</strong></div></div><button className="primary-btn brand-primary" onClick={() => setActive('Спросить ЭЛа')}>Задать вопрос</button></aside>
-    </section>
-  </>
+        <div className="brand-mascot-stage"><span className="brand-orbit one"/><span className="brand-orbit two"/><ElMascot mood={homeElState.mood}/><div className="el-speech"><strong>ЭЛ · {elCharacterMeta[elSettings.character]?.title}</strong><span>{homeElState.line}</span></div></div>
+      </section>
+
+      {connection.connected && <section className="digitization-panel glass-panel">
+        <div className="digitization-head">
+          <div><span>Оцифровка кабинета</span><h2>Весь бизнес на одном экране</h2><p>{periodLabel} · {periodDays} дн. {compareReady ? '· сравнение с предыдущим равным периодом' : '· сравнение загружается'}</p></div>
+          <div className="digitization-actions">
+            <div className="digitization-presets">{[['7','7 дней'],['30','30 дней'],['month','Месяц']].map(([key,label])=><button key={key} className={analyticsPeriod.preset===key?'active':''} onClick={()=>setAnalyticsPreset(key)}>{label}</button>)}</div>
+            <button className="secondary-btn" onClick={()=>setActive('Аналитика')}>Подробнее <ChevronRight size={16}/></button>
+          </div>
+        </div>
+        {analyticsLoading && !analyticsCore ? <div className="digitization-loading"><RefreshCw className="spin" size={20}/> Пересчитываю выбранный период…</div> : null}
+        <div className="digitization-metrics">{digitizationMetrics.map(item=><button key={item.label} className="digitization-metric" onClick={()=>setActive(item.onClick)}><span>{item.label}</span><strong>{item.value}</strong><small className={item.tone}>{item.delta || '—'}</small></button>)}</div>
+        <div className="digitization-table-card">
+          <div className="digitization-table-head"><div><span>Товары</span><h3>Что формирует результат</h3></div><small>Топ-10 по выручке за выбранный период</small></div>
+          {topProducts.length ? <div className="digitization-table-wrap"><div className="digitization-table">
+            <div className="digitization-row head"><span>Товар</span><span>Выручка</span><span>Продажи</span><span>Возвраты</span><span>Реклама</span><span>Расходы</span><span>Прибыль</span><span>Остаток</span></div>
+            {topProducts.map(row=><button className="digitization-row" key={row.id || row.key} onClick={()=>openProduct(row)}>
+              <span className="digitization-product">{row.photo?<img src={row.photo} alt=""/>:<span className="digitization-product-placeholder"><PackageSearch size={18}/></span>}<b>{row.vendorCode || row.nmID || '—'}<small>{row.title || row.brand || 'Товар'}</small></b></span>
+              <span>{formatMoney(row.revenue)}</span><span>{formatNumber(row.salesCount)}</span><span>{formatNumber(row.returnsCount)}<small>{formatPercent(row.returnRate)}</small></span><span>{formatMoney(row.advertising)}</span><span>{formatMoney(row.expenses)}</span><span className={row.profit != null && row.profit < 0 ? 'negative' : row.profit != null ? 'positive' : ''}>{formatMoney(row.profit)}</span><span>{row.stock == null ? '—' : formatNumber(row.stock)}</span>
+            </button>)}
+          </div></div> : <div className="digitization-empty"><PackageSearch size={24}/><div><strong>Товарная оцифровка ещё загружается</strong><span>После первой синхронизации здесь появятся продажи, расходы, прибыль и остатки по каждому SKU.</span></div></div>}
+        </div>
+      </section>}
+
+      {!connection.connected && <section className="brand-metrics">
+        <button className="brand-metric" onClick={() => setActive('Подключения')}><span className="brand-3d-icon"><PlugZap/></span><span><small>Wildberries</small><strong>1 подключение</strong><em>вставьте API-ключ один раз</em></span><ChevronRight/></button>
+        <button className="brand-metric pink" onClick={() => setActive('Подключения')}><span className="brand-3d-icon"><CircleDollarSign/></span><span><small>Финансы</small><strong>Автоматически</strong><em>если категория включена в ключе</em></span><ChevronRight/></button>
+        <button className="brand-metric blue" onClick={() => setActive('Подключения')}><span className="brand-3d-icon"><RefreshCw/></span><span><small>Первая загрузка</small><strong>Сама</strong><em>доступные потоки в фоне</em></span><ChevronRight/></button>
+      </section>}
+
+      <section className="brand-grid">
+        <div className="el-recommendations glass-panel"><div className="brand-section-head"><div><span>ЭЛ рекомендует</span><h2>Что сделать сегодня</h2></div><button onClick={() => setActive('Спросить ЭЛа')}>Спросить ЭЛа <ChevronRight size={16}/></button></div><div className="recommendation-cards">{recommendations.slice(0,3).map((item,index) => <button className={`recommendation-tile ${recommendationTone(item.type)}`} key={item.id || index} onClick={() => setActive(item.type === 'stock' ? 'Остатки' : item.type === 'price' ? 'Цены и акции' : item.type === 'quality' ? 'Коммуникации' : 'Аналитика')}><span className="rec-number">0{index+1}</span><div><small>{item.type || 'Рекомендация'}</small><h3>{item.title}</h3><p>{item.text}</p><strong>{item.effect}</strong></div><ChevronRight className="rec-arrow" size={18}/></button>)}</div></div>
+        <aside className="el-profile-card glass-panel"><div className="el-profile-top"><span className="mini-el"><ElMascot compact mood={homeElState.mood}/></span><div><span>ЭЛ · AI-помощник</span><h2>{homeElState.title}</h2></div><b className="live-pill">LIVE</b></div><p>Я связываю продажи, запасы, возвраты и экономику, чтобы подсказать конкретное действие.</p><div className="el-profile-stats"><div><span>Проверено товаров</span><strong>{formatNumber(businessSummary.activeProducts || productRows.length)}</strong></div><div><span>Задач найдено</span><strong>{recommendations.length}</strong></div><div><span>Дней запаса</span><strong>{businessSummary.stockCoverDays ?? '—'}</strong></div></div><button className="primary-btn brand-primary" onClick={() => setActive('Спросить ЭЛа')}>Задать вопрос</button></aside>
+      </section>
+    </>
+  }
 
   const renderAnalytics = () => {
     const analyticsAvailability = analyticsCore?.availability || (!connection.connected ? coreData?.availability : {}) || {}
@@ -1552,7 +1597,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     const financeComplete = financeReady && !financePartial
     const tabs = [
       ['overview','Обзор'],['all','Все операции'],['products','По товарам'],['fbs','FBS'],['fbo','FBO'],
-      ['penalties','Удержания и штрафы'],['compensations','Компенсации'],['subscriptions','Подписки и Джем'],['promotionCharges','Списания рекламы'],['reports','Отчёты WB'],['dynamics','Динамика'],['risks','Причины удержаний'],['reconciliation','Сверка с WB'],
+      ['penalties','Удержания и штрафы'],['compensations','Компенсации'],['subscriptions','Подписки и Джем'],['promotionCharges','Списания рекламы'],['dynamics','Динамика'],['risks','Причины удержаний'],['reconciliation','Сверка с WB'],
     ]
     const groupNames = {
       sales:'Продажи',settlement:'К перечислению',commission:'Комиссия WB',logistics:'Логистика',storage:'Хранение',
@@ -1584,7 +1629,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     const riskDetails = ledger.riskDetails || {}
     const riskRows = key => Array.isArray(riskDetails?.[key]?.rows) ? riskDetails[key].rows : []
     const timelineMax = Math.max(1,...timeline.map(row => Math.max(Math.abs(Number(row.sellerPayable || 0)),Math.abs(Number(row.expenses || 0)),Math.abs(Number(row.retentions || 0)))))
-    const reportStatus = state => state?.lastSuccessAt ? `обновлено ${new Date(state.lastSuccessAt).toLocaleString('ru-RU')}` : state?.lastError || 'ожидает загрузки'
+    const reportStatus = state => state?.lastSuccessAt ? `обновлено ${new Date(state.lastSuccessAt).toLocaleString('ru-RU')}` : state?.status === 'optional_unavailable' || /сервисн|service/i.test(String(state?.lastError || '')) ? 'необязательная сводка; основная финансовая детализация доступна в реестре' : state?.lastError || 'ожидает загрузки'
 
     const renderLedgerTable = () => <>
       <div className="finance-ledger-tools">
@@ -1634,8 +1679,8 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       {financeTab === 'products' && <div className="data-table finance-products-table"><div className="data-row head finance-products-row"><span>Товар</span><span>Схема</span><span>К перечислению</span><span>Расходы WB</span><span>Логистика</span><span>Штрафы</span><span>Удержания</span><span>Компенсации</span></div>{(ledger.products || []).map(row => <div className="data-row finance-products-row" key={`${row.nmId}-${row.vendorCode}-${row.fulfillmentMode}`}><span><strong>{titleForLedger(row)}</strong><small>{row.vendorCode || '—'} · nmID {row.nmId || '—'}</small></span><span><b className="mode-pill">{row.fulfillmentMode || '—'}</b></span><span>{formatMoney(row.sellerPayable)}</span><span>{formatMoney(row.expenses)}</span><span>{formatMoney(row.logistics)}</span><span>{formatMoney(row.penalties)}</span><span>{formatMoney(row.deductions)}</span><span>{formatMoney(row.compensations)}</span></div>)}</div>}
 
       {financeTab === 'reports' && <div className="finance-report-layout">
-        <div className="finance-report-card"><div className="finance-report-head"><div><span>Официальные сводки</span><h3>Отчёты реализации</h3></div><b>{formatNumber(ledger.reports?.sales?.totalRows || salesReports.length)}</b></div>{salesReports.length ? <div className="data-table finance-report-table"><div className="data-row head finance-report-row"><span>Период / ID</span><span>Розница</span><span>К перечислению</span><span>Логистика</span><span>Хранение</span><span>Приёмка</span><span>Штрафы и удержания</span><span>Банк</span></div>{salesReports.map((row,index) => <div className="data-row finance-report-row" key={row.reportId || index}><span><strong>{formatDate(row.dateFrom)} — {formatDate(row.dateTo)}</strong><small>№ {row.reportId || '—'} · создан {formatDate(row.createDate)}</small></span><span>{formatMoney(reportNumber(row,['retailAmountSum']))}</span><span>{formatMoney(reportNumber(row,['forPaySum']))}</span><span>{formatMoney(reportNumber(row,['deliveryServiceSum']))}</span><span>{formatMoney(reportNumber(row,['paidStorageSum']))}</span><span>{formatMoney(reportNumber(row,['paidAcceptanceSum']))}</span><span>{formatMoney(reportNumber(row,['penaltySum'])+reportNumber(row,['deductionSum']))}<small>штраф {formatMoney(reportNumber(row,['penaltySum']))} · удержание {formatMoney(reportNumber(row,['deductionSum']))}</small></span><span>{formatMoney(reportNumber(row,['bankPaymentSum']))}</span></div>)}</div> : <div className="finance-ledger-empty"><FileText size={24}/><strong>Сводки реализации ещё не загружены</strong><span>{reportStatus(ledger.coverage?.financeReports)}</span></div>}</div>
-        <div className="finance-report-card"><div className="finance-report-head"><div><span>Контроль платежей</span><h3>Отчёты эквайринга</h3></div><b>{formatNumber(ledger.reports?.acquiring?.totalRows || acquiringReports.length)}</b></div>{acquiringReports.length ? <div className="data-table acquiring-report-table"><div className="data-row head acquiring-report-row"><span>Период / ID</span><span>Комиссия эквайринга</span><span>НДС</span><span>Всего</span></div>{acquiringReports.map((row,index) => { const fee=reportNumber(row,['acquiringFeeSum']); const vat=reportNumber(row,['acquiringFeeVatSum']); return <div className="data-row acquiring-report-row" key={row.reportId || index}><span><strong>{formatDate(row.dateFrom)} — {formatDate(row.dateTo)}</strong><small>№ {row.reportId || '—'} · {row.currency || 'RUB'}</small></span><span>{formatMoney(fee)}</span><span>{formatMoney(vat)}</span><span>{formatMoney(fee+vat)}</span></div>})}</div> : <div className="finance-ledger-empty"><CreditCard size={24}/><strong>Сводки эквайринга ещё не загружены</strong><span>{reportStatus(ledger.coverage?.acquiringReports)}</span></div>}</div>
+        <div className="finance-report-card"><div className="finance-report-head"><div><span>Официальные сводки</span><h3>Отчёты реализации</h3></div><b>{formatNumber(ledger.reports?.sales?.totalRows || salesReports.length)}</b></div>{salesReports.length ? <div className="data-table finance-report-table"><div className="data-row head finance-report-row"><span>Период / ID</span><span>Розница</span><span>К перечислению</span><span>Логистика</span><span>Хранение</span><span>Приёмка</span><span>Штрафы и удержания</span><span>Банк</span></div>{salesReports.map((row,index) => <div className="data-row finance-report-row" key={row.reportId || index}><span><strong>{formatDate(row.dateFrom)} — {formatDate(row.dateTo)}</strong><small>№ {row.reportId || '—'} · создан {formatDate(row.createDate)}</small></span><span>{formatMoney(reportNumber(row,['retailAmountSum']))}</span><span>{formatMoney(reportNumber(row,['forPaySum']))}</span><span>{formatMoney(reportNumber(row,['deliveryServiceSum']))}</span><span>{formatMoney(reportNumber(row,['paidStorageSum']))}</span><span>{formatMoney(reportNumber(row,['paidAcceptanceSum']))}</span><span>{formatMoney(reportNumber(row,['penaltySum'])+reportNumber(row,['deductionSum']))}<small>штраф {formatMoney(reportNumber(row,['penaltySum']))} · удержание {formatMoney(reportNumber(row,['deductionSum']))}</small></span><span>{formatMoney(reportNumber(row,['bankPaymentSum']))}</span></div>)}</div> : <div className="finance-ledger-empty"><FileText size={24}/><strong>Дополнительная сводка реализации не загружена</strong><span>{reportStatus(ledger.coverage?.financeReports)}</span></div>}</div>
+        <div className="finance-report-card"><div className="finance-report-head"><div><span>Контроль платежей</span><h3>Отчёты эквайринга</h3></div><b>{formatNumber(ledger.reports?.acquiring?.totalRows || acquiringReports.length)}</b></div>{acquiringReports.length ? <div className="data-table acquiring-report-table"><div className="data-row head acquiring-report-row"><span>Период / ID</span><span>Комиссия эквайринга</span><span>НДС</span><span>Всего</span></div>{acquiringReports.map((row,index) => { const fee=reportNumber(row,['acquiringFeeSum']); const vat=reportNumber(row,['acquiringFeeVatSum']); return <div className="data-row acquiring-report-row" key={row.reportId || index}><span><strong>{formatDate(row.dateFrom)} — {formatDate(row.dateTo)}</strong><small>№ {row.reportId || '—'} · {row.currency || 'RUB'}</small></span><span>{formatMoney(fee)}</span><span>{formatMoney(vat)}</span><span>{formatMoney(fee+vat)}</span></div>})}</div> : <div className="finance-ledger-empty"><CreditCard size={24}/><strong>Дополнительная сводка эквайринга не загружена</strong><span>{reportStatus(ledger.coverage?.acquiringReports)}</span></div>}</div>
       </div>}
 
       {financeTab === 'dynamics' && <div className="finance-dynamics-card"><div className="section-title-row"><div><span>День за днём</span><h2>Движение денег</h2></div><small>{formatNumber(timeline.length)} дней</small></div>{timeline.length ? <div className="finance-timeline">{timeline.map(row => <div className="finance-timeline-row" key={String(row.date)}><span>{formatDate(row.date)}</span><div className="finance-timeline-bars"><i className="payable" style={{width:`${Math.max(2,Math.abs(Number(row.sellerPayable || 0))/timelineMax*100)}%`}} title={`К перечислению: ${formatMoney(row.sellerPayable)}`}></i><i className="expense" style={{width:`${Math.max(2,Math.abs(Number(row.expenses || 0))/timelineMax*100)}%`}} title={`Расходы: ${formatMoney(row.expenses)}`}></i><i className="retention" style={{width:`${Math.max(2,Math.abs(Number(row.retentions || 0))/timelineMax*100)}%`}} title={`Удержания: ${formatMoney(row.retentions)}`}></i></div><strong>{formatMoney(row.sellerPayable)}</strong><small>расходы {formatMoney(row.expenses)} · удержания {formatMoney(row.retentions)}</small></div>)}</div> : <div className="finance-ledger-empty"><TrendingUp size={24}/><strong>Динамика появится после финансовой детализации</strong><span>ELISEI строит её по датам операций WB, а не по дате загрузки файла.</span></div>}<div className="finance-timeline-legend"><span><i className="payable"></i>К перечислению</span><span><i className="expense"></i>Расходы</span><span><i className="retention"></i>Штрафы и удержания</span></div></div>}
@@ -1800,105 +1845,89 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
   const renderConnections = () => {
     const requirements = [
-      { scope:'content', stage:'products', title:'Товары', text:'Карточки, фото и артикулы' },
-      { scope:'statistics', stage:'orders', title:'Заказы', text:'Заказы за последние 30 дней' },
-      { scope:'statistics', stage:'sales', title:'Продажи', text:'Продажи и возвраты за 30 дней' },
-      { scope:'analytics', stage:'stocks', title:'Остатки FBO', text:'Остатки на складах Wildberries' },
-      { scope:'marketplace', stage:'sellerStocks', title:'Остатки FBS', text:'Остатки на складах продавца' },
-      { scope:'promotion', stage:'advertising', title:'Реклама', text:'Кампании и эффективность' },
-      { scope:'feedbacks', title:'Отзывы', text:'Вопросы, отзывы и рейтинг' },
-      { scope:'finance', stage:'finance', title:'Финансы', text:'Базовый токен: детализация реализации, комиссия, логистика, удержания и выплаты' },
-      { scope:'documents', stage:'documents', title:'Документы WB', text:'Акты, отчёты, УПД и подтверждающие документы кабинета' },
-      { scope:'finance', stage:'financeReports', title:'Сводки реализации', text:'Официальные сводки для сверки выплат · Персональный/Сервисный доступ' },
-      { scope:'analytics', stage:'paidStorage', title:'Хранение', text:'Платное хранение по товарам' },
-      { scope:'analytics', stage:'acceptance', title:'Приёмка', text:'Платные операции при приёмке' },
-      { scope:'finance', stage:'acquiring', title:'Эквайринг', text:'Издержки на приём платежей' },
-      { scope:'finance', stage:'acquiringReports', title:'Сводки эквайринга', text:'Контроль комиссии и НДС · Персональный/Сервисный доступ' },
-      { scope:'finance', stage:'jamSubscription', title:'Статус Джем', text:'Проверяется Сервисным токеном; денежное списание подтверждается финансами или документом' },
-      { scope:'marketplace', stage:'fbsArchive', title:'Архив FBS', text:'Сборочные задания старше трёх месяцев' },
-      { scope:'analytics', stage:'measurementPenalties', title:'Штрафы за габариты', text:'Удержания и замеры упаковки' },
-      { scope:'analytics', stage:'deductionsReport', title:'Подмены и вложения', text:'Детализация специальных удержаний' },
-      { scope:'analytics', stage:'warehouseMeasurements', title:'Замеры склада', text:'Фото и фактические размеры упаковки' },
-      { scope:'analytics', stage:'antifraudRetention', title:'Самовыкупы', text:'Официальная расшифровка удержаний' },
-      { scope:'analytics', stage:'labelingRetention', title:'Маркировка', text:'Штрафы и фото отсутствующей маркировки' },
-      { scope:'analytics', stage:'goodsReturns', title:'Возвраты и перемещения', text:'Возвраты товаров продавцу и движение' },
-      { scope:'content', stage:'tariffs', title:'Тарифы WB', text:'Комиссии, логистика, хранение и возврат' },
-      { scope:'analytics', stage:'funnel', title:'Воронка карточек', text:'Просмотры, корзина, заказы и выкупы' },
-      { scope:'analytics', stage:'searchQueries', title:'Поисковые запросы', text:'Фразы покупателей и позиции карточек · нужна подписка «Джем»' },
-      { scope:'analytics', stage:'stockHistory', title:'История остатков', text:'Ежедневный CSV-архив остатков за 90 дней' },
-      { scope:'feedbacks', stage:'reviews', title:'Отзывы', text:'Активные, отвеченные и архивные отзывы' },
-      { scope:'feedbacks', stage:'questions', title:'Вопросы', text:'Вопросы покупателей и статусы ответов' },
-      { scope:'chat', stage:'chats', title:'Чаты', text:'Диалоги и события в режиме чтения' },
-      { scope:'documents', stage:'documents', title:'Документы', text:'Список актов, УПД, УКД и уведомлений' },
+      { stage:'products', title:'Товары', text:'Карточки, фото, артикулы и характеристики' },
+      { stage:'orders', title:'Заказы', text:'Заказы и оперативная динамика' },
+      { stage:'sales', title:'Продажи', text:'Продажи, выкупы и возвраты' },
+      { stage:'stocks', title:'Остатки FBO', text:'Остатки на складах Wildberries' },
+      { stage:'sellerStocks', title:'Остатки FBS', text:'Остатки на складах продавца' },
+      { stage:'advertising', title:'Реклама', text:'Кампании, расходы и эффективность' },
+      { stage:'finance', title:'Финансы', text:'Детализация реализации, комиссия, логистика, удержания, выплаты и баланс' },
+      { stage:'paidStorage', title:'Хранение', text:'Платное хранение по товарам' },
+      { stage:'acceptance', title:'Приёмка', text:'Платные операции при приёмке' },
+      { stage:'acquiring', title:'Эквайринг', text:'Издержки на приём платежей; при необходимости рассчитываются из финансовой детализации' },
+      { stage:'fbsArchive', title:'Архив FBS', text:'Сборочные задания старше трёх месяцев' },
+      { stage:'measurementPenalties', title:'Штрафы за габариты', text:'Удержания и замеры упаковки' },
+      { stage:'deductionsReport', title:'Подмены и вложения', text:'Детализация специальных удержаний' },
+      { stage:'warehouseMeasurements', title:'Замеры склада', text:'Фактические размеры упаковки' },
+      { stage:'antifraudRetention', title:'Самовыкупы', text:'Расшифровка соответствующих удержаний' },
+      { stage:'labelingRetention', title:'Маркировка', text:'Штрафы и подтверждающие данные' },
+      { stage:'goodsReturns', title:'Возвраты и перемещения', text:'Возвраты продавцу и движение товара' },
+      { stage:'tariffs', title:'Тарифы WB', text:'Комиссии, логистика, хранение и возврат' },
+      { stage:'funnel', title:'Воронка карточек', text:'Просмотры, корзина, заказы и выкупы' },
+      { stage:'documents', title:'Документы WB', text:'Акты, отчёты, УПД, УКД и уведомления' },
+      { stage:'searchQueries', title:'Поисковые запросы', text:'Фразы покупателей и позиции карточек, если доступны кабинету' },
+      { stage:'stockHistory', title:'История остатков', text:'Исторические снимки остатков, если доступны кабинету' },
+      { stage:'reviews', title:'Отзывы', text:'Активные, отвеченные и архивные отзывы' },
+      { stage:'questions', title:'Вопросы', text:'Вопросы покупателей и статусы ответов' },
+      { stage:'chats', title:'Чаты', text:'Диалоги и события в режиме чтения' },
     ]
     const syncStatus = stage => connection.syncStates?.find(item => item.stage === stage)
     const stageLabel = state => {
-      if (!state) return 'Не запускалось'
+      if (!state) return 'Будет загружено автоматически'
       if (state.status === 'success') return `Загружено: ${formatNumber(state.lastCount)}`
-      if (state.status === 'pending') return 'Формируется в фоне'
-      if (state.status === 'queued') return 'Поставлено в фоновую очередь'
+      if (state.status === 'pending') return 'WB формирует данные'
+      if (state.status === 'queued') return 'В фоновой очереди'
+      if (state.status === 'running') return 'Загружается'
       if (state.status === 'retry_scheduled') return state.nextAllowedAt ? `Автоповтор после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : 'Автоповтор запланирован'
-      if (state.status === 'rate_limited') return state.nextAllowedAt ? `Пауза до ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : 'Лимит WB'
-      if (['service_token_required','service_secret_required','service_token_invalid','service_permission_required'].includes(state.status)) return 'Нужен сервисный доступ'
-      if (state.status === 'missing_token') return 'Нет подходящего токена'
-      if (state.status === 'running') return 'Загрузка'
-      return state.lastError || 'Не загружено'
+      if (state.status === 'rate_limited') return state.nextAllowedAt ? `Пауза WB до ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : 'Пауза по лимиту WB'
+      if (state.status === 'optional_unavailable') return 'Дополнительный источник недоступен'
+      if (state.status === 'missing_token') return 'Категория не включена в ключе'
+      if (state.status === 'forbidden') return 'WB не дал доступ этому ключу'
+      return state.lastError || 'Ожидает загрузку'
     }
-    const primary = connection.primaryToken || connection.tokens?.find(item => item.isPrimary)
+    const primary = connection.primaryToken || connection.tokens?.find(item => item.isPrimary) || connection.tokens?.[0]
     const modeCopy = connection.tokenMode === 'universal'
-      ? { tone:'universal', title:'Основной токен покрывает обычные потоки кабинета', text:'Товары, заказы, продажи, остатки, реклама и основная финансовая детализация работают через Базовый токен. Сводки реализации и эквайринга подключаются отдельно сервисным токеном.' }
+      ? { tone:'universal', title:'Один ключ покрывает рабочее ядро кабинета', text:'ELISEI сам определил категории и использует этот ключ для всех доступных потоков, включая финансы.' }
       : connection.tokenMode === 'combined'
-        ? { tone:'combined', title:'Обычные потоки собраны из нескольких токенов', text:'ELISEI использует основной Базовый токен в первую очередь, а дополнительные обычные ключи — только для недостающих категорий.' }
-        : connection.tokens?.some(item => !item.isServiceToken)
-          ? { tone:'partial', title:'Основной токен подключён не ко всем обычным потокам', text:'Добавьте обычный токен только для категорий, отмеченных ниже как недоступные. Сервисный токен не заменяет основной.' }
-          : { tone:'empty', title:'Подключите основной Базовый API-ключ WB', text:'Сначала подключается токен кабинета. Сервисный токен для двух официальных финансовых сводок добавляется отдельным полем.' }
-    const serviceSecretText = connection.serviceSecret?.valid
-      ? `Секрет сервиса настроен${connection.serviceSecret?.expiresAt ? ` до ${new Date(connection.serviceSecret.expiresAt).toLocaleDateString('ru-RU')}` : ''}`
-      : connection.serviceSecret?.configured
-        ? connection.serviceSecret?.error || 'WB_CLIENT_SECRET требует обновления'
-        : 'WB_CLIENT_SECRET ещё не настроен в backend Render'
+        ? { tone:'combined', title:'Кабинет собран из нескольких ключей', text:'Это допустимо для резервного доступа, но отдельный «финансовый» или «сервисный» ключ ELISEI не требует.' }
+        : connection.tokens?.length
+          ? { tone:'partial', title:'Ключ подключён, но часть категорий в нём не включена', text:'Ниже видно, какие разделы доступны. Чтобы открыть недостающий раздел, достаточно выпустить в WB ключ с нужной категорией доступа.' }
+          : { tone:'empty', title:'Вставьте один API-ключ Wildberries', text:'ELISEI определит его тип и категории, сохранит безопасно и сразу начнёт загружать всё доступное по кабинету.' }
 
     return <section className="app-page glass-panel connections-page">
-      <div className="page-title"><span>Интеграции</span><h1>Подключение Wildberries</h1><p>Обычный токен и сервисный токен разделены. Сервисный ключ никогда не становится основным и используется только для официальных сводок реализации и эквайринга.</p></div>
-      <div className={`token-mode-banner ${modeCopy.tone}`}><div className="token-mode-icon">{connection.tokenMode === 'universal' ? <CheckCircle2 size={24}/> : <ShieldCheck size={24}/>}</div><div><strong>{modeCopy.title}</strong><p>{modeCopy.text}</p>{primary && <small>Основной: {primary.label} · {primary.stageCoverageCount || 0} обычных потоков</small>}</div></div>
-
-      <div className={`service-access-banner ${connection.serviceFinanceReady ? 'ready' : connection.serviceTokenConnected ? 'warning' : 'missing'}`}>
-        <div><ShieldCheck size={24}/></div>
-        <div><strong>{connection.serviceFinanceReady ? 'Сервисный финансовый доступ готов' : connection.serviceTokenConnected ? 'Сервисный токен сохранён, но доступ не готов' : 'Сервисный токен ещё не подключён'}</strong><p>{connection.serviceFinanceReady ? 'Сводки реализации и эквайринга будут запрашиваться только этим токеном.' : serviceSecretText}</p></div>
-      </div>
+      <div className="page-title"><span>Интеграции</span><h1>Одно подключение Wildberries</h1><p>Один API-ключ — одна точка входа. Тип ключа и категории доступа определяются автоматически; отдельного сервисного токена для основного финансового контура нет.</p></div>
+      <div className={`token-mode-banner ${modeCopy.tone}`}><div className="token-mode-icon">{connection.tokens?.length ? <CheckCircle2 size={24}/> : <ShieldCheck size={24}/>}</div><div><strong>{modeCopy.title}</strong><p>{modeCopy.text}</p>{primary && <small>Основной: {primary.label} · доступно {primary.stageCoverageCount || 0} потоков</small>}</div></div>
 
       {connection.connected && <div className={`live-sync-card ${liveSync.enabled?'enabled':'disabled'}`}>
-        <div className="live-sync-head"><div className="live-sync-icon"><RefreshCw className={liveSync.enabled?'live-spin':''} size={24}/></div><div><span>Живое обновление</span><h3>{liveSync.enabled ? (liveSync.webhooksEnabled ? 'Гибридный режим включён' : 'Частая синхронизация включена') : 'Автоматическое обновление выключено'}</h3><p>{liveSync.webhooksEnabled ? 'События карточек, отзывов и готовых отчётов приходят через вебхуки; заказы и продажи обновляются инкрементально, остатки — свежим снимком.' : 'Заказы обновляются примерно раз в 2 минуты, продажи — инкрементально раз в 5 минут, остатки — свежим снимком по расписанию. Жёсткие лимиты финансов и документов сохраняются.'}</p></div><button className={liveSync.enabled?'secondary-btn':'primary-btn'} disabled={liveSyncBusy} onClick={()=>updateLiveSync({enabled:!liveSync.enabled})}>{liveSyncBusy?<RefreshCw className="spin" size={17}/>:<PlugZap size={17}/>} {liveSync.enabled?'Приостановить':'Включить'}</button></div>
-        <div className="live-sync-grid"><div><small>Заказы</small><strong>≈ 2 мин.</strong><span>инкрементально</span></div><div><small>Продажи и остатки</small><strong>≈ 5 мин.</strong><span>продажи — инкрементально, остатки — снимком</span></div><div><small>Вебхуки WB</small><strong>{liveSync.webhookCount || 0}</strong><span>{liveSync.webhooksEnabled?'активны':'ожидают регистрацию сервиса'}</span></div><div><small>Последнее событие</small><strong>{liveSync.lastEventAt?new Date(liveSync.lastEventAt).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}):'—'}</strong><span>{liveSync.lastEventAt?new Date(liveSync.lastEventAt).toLocaleDateString('ru-RU'):'событий пока нет'}</span></div></div>
-        <div className="live-sync-actions"><div><strong>OAuth и вебхуки</strong><p>{liveSync.oauth?.message || 'OAuth станет доступен после регистрации ELISEI в Каталоге решений WB. До этого живой режим работает через текущий токен.'}</p></div>{liveSync.webhookSetupReady?<button className="secondary-btn" disabled={liveSyncBusy} onClick={setupLiveWebhooks}><PlugZap size={17}/> Подключить вебхуки</button>:liveSync.oauth?.connectUrl?<button className="secondary-btn" onClick={()=>window.open(liveSync.oauth.connectUrl,'_blank','noopener,noreferrer')}><PlugZap size={17}/> Подключить через WB</button>:liveSync.oauth?.catalogUrl?<button className="secondary-btn" onClick={()=>window.open(liveSync.oauth.catalogUrl,'_blank','noopener,noreferrer')}><FileText size={17}/> Регистрация сервиса</button>:<span className="live-sync-wait">{liveSync.oauth?.catalogRegistered?'OAuth ожидает финальную активацию':'Нужна регистрация в Каталоге WB'}</span>}</div>
+        <div className="live-sync-head"><div className="live-sync-icon"><RefreshCw className={liveSync.enabled?'live-spin':''} size={24}/></div><div><span>Живое обновление</span><h3>{liveSync.enabled ? (liveSync.webhooksEnabled ? 'Гибридный режим включён' : 'Частая синхронизация включена') : 'Автоматическое обновление выключено'}</h3><p>{liveSync.webhooksEnabled ? 'События карточек, отзывов и готовых отчётов приходят через вебхуки; заказы и продажи обновляются инкрементально, остатки — свежим снимком.' : 'Первая загрузка уже запускается автоматически после подключения. Затем оперативные данные можно поддерживать частой синхронизацией.'}</p></div><button className={liveSync.enabled?'secondary-btn':'primary-btn'} disabled={liveSyncBusy} onClick={()=>updateLiveSync({enabled:!liveSync.enabled})}>{liveSyncBusy?<RefreshCw className="spin" size={17}/>:<PlugZap size={17}/>} {liveSync.enabled?'Приостановить':'Включить'}</button></div>
+        <div className="live-sync-grid"><div><small>Заказы</small><strong>≈ 2 мин.</strong><span>инкрементально</span></div><div><small>Продажи и остатки</small><strong>≈ 5 мин.</strong><span>по расписанию</span></div><div><small>Вебхуки WB</small><strong>{liveSync.webhookCount || 0}</strong><span>{liveSync.webhooksEnabled?'активны':'опционально'}</span></div><div><small>Последнее событие</small><strong>{liveSync.lastEventAt?new Date(liveSync.lastEventAt).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}):'—'}</strong><span>{liveSync.lastEventAt?new Date(liveSync.lastEventAt).toLocaleDateString('ru-RU'):'событий пока нет'}</span></div></div>
+        <div className="live-sync-actions"><div><strong>OAuth и вебхуки</strong><p>{liveSync.oauth?.message || 'Это серверное расширение для коммерческой версии ELISEI и не является вторым токеном продавца.'}</p></div>{liveSync.webhookSetupReady?<button className="secondary-btn" disabled={liveSyncBusy} onClick={setupLiveWebhooks}><PlugZap size={17}/> Подключить вебхуки</button>:liveSync.oauth?.connectUrl?<button className="secondary-btn" onClick={()=>window.open(liveSync.oauth.connectUrl,'_blank','noopener,noreferrer')}><PlugZap size={17}/> Подключить через WB</button>:liveSync.oauth?.catalogUrl?<button className="secondary-btn" onClick={()=>window.open(liveSync.oauth.catalogUrl,'_blank','noopener,noreferrer')}><FileText size={17}/> Регистрация сервиса</button>:<span className="live-sync-wait">Текущий ключ продолжает работать без этого шага</span>}</div>
       </div>}
 
       <div className="wb-coverage-grid">{requirements.map(item => {
-        const state = item.stage ? syncStatus(item.stage) : null
-        const source = item.stage ? connection.coverageByStage?.[item.stage] : connection.tokens?.find(token => !token.isServiceToken && token.scopes?.includes(item.scope))
-        const covered = item.stage ? Boolean(source) : Boolean(source)
-        return <div className={`wb-coverage-card ${covered?'covered':'missing'}`} key={`${item.scope}:${item.stage || item.title}`}><span className="coverage-icon">{covered?<CheckCircle2 size={20}/>:<AlertTriangle size={20}/>}</span><div><strong>{item.title}</strong><p>{item.text}</p><small>{covered ? `${source?.isServiceToken ? 'Сервисный токен' : source?.isPrimary ? 'Основной токен' : source?.label || 'Токен подключён'}${item.stage ? ` · ${stageLabel(state)}` : ''}` : item.stage && ['financeReports','acquiringReports'].includes(item.stage) ? 'Нужен отдельный Сервисный токен' : 'Нужна категория доступа'}</small></div></div>
+        const state = syncStatus(item.stage)
+        const source = connection.coverageByStage?.[item.stage]
+        const covered = Boolean(source)
+        return <div className={`wb-coverage-card ${covered?'covered':'missing'}`} key={item.stage}><span className="coverage-icon">{covered?<CheckCircle2 size={20}/>:<AlertTriangle size={20}/>}</span><div><strong>{item.title}</strong><p>{item.text}</p><small>{covered ? `${source?.isPrimary ? 'Основной ключ' : source?.label || 'Подключённый ключ'} · ${stageLabel(state)}` : `Нет доступа: ${stageLabel(state)}`}</small></div></div>
       })}</div>
 
-      {connection.tokens?.length > 0 && <div className="token-manager"><div className="section-title-row"><div><span>Безопасное хранилище</span><h2>API-токены кабинета</h2></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Синхронизация':'Синхронизировать доступные разделы'}</button></div><div className="token-card-grid">{connection.tokens.map(item => <div className={`saved-token-card ${item.isPrimary?'primary-token-card':''} ${item.isServiceToken?'service-token-card':''}`} key={item.id}><div className="saved-token-head"><div className="token-shield"><ShieldCheck size={20}/></div><div><div className="token-title-line"><strong>{item.label}</strong>{item.isPrimary && <b className="primary-token-badge">Основной</b>}{item.isServiceToken && <b className="service-token-badge">Сервисный</b>}</div><span>{item.tokenType} · {item.readOnly?'только чтение':'чтение и запись'}</span></div><button className="token-remove" onClick={() => removeToken(item.id)} title="Удалить токен"><X size={17}/></button></div><div className="token-flow-coverage"><strong>{item.stageCoverageCount || 0}/{connection.stageTotal || item.stageTotal || 28} потоков</strong><span>{item.isServiceToken ? 'Расширенные сводки и статус Джем' : item.coversAllCoreFlows ? 'Покрывает обычное рабочее ядро' : 'Используется только по своим категориям'}</span></div><div className="token-scopes">{item.scopeLabels?.map(scope => <b key={scope}>{scope}</b>)}</div><div className="token-card-foot"><small>До: {item.expiresAt?new Date(item.expiresAt).toLocaleDateString('ru-RU'):'не указано'} · код {item.fingerprint}</small>{!item.isPrimary && !item.isServiceToken && <button className="token-primary-btn" onClick={() => setPrimaryToken(item.id)}>Сделать основным</button>}</div></div>)}</div></div>}
+      {connection.tokens?.length > 0 && <div className="token-manager"><div className="section-title-row"><div><span>Безопасное хранилище</span><h2>API-ключи кабинета</h2><p>Обычно достаточно одного. Резервный ключ можно добавить только если в основном не хватает категории.</p></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Синхронизация':'Обновить всё доступное'}</button></div><div className="token-card-grid">{connection.tokens.map(item => <div className={`saved-token-card ${item.isPrimary?'primary-token-card':''}`} key={item.id}><div className="saved-token-head"><div className="token-shield"><ShieldCheck size={20}/></div><div><div className="token-title-line"><strong>{item.label}</strong>{item.isPrimary && <b className="primary-token-badge">Основной</b>}</div><span>{item.tokenType} · {item.readOnly?'только чтение':'доступ по правам ключа'}</span></div><button className="token-remove" onClick={() => removeToken(item.id)} title="Удалить ключ"><X size={17}/></button></div><div className="token-flow-coverage"><strong>{item.stageCoverageCount || 0}/{connection.stageTotal || item.stageTotal || 25} потоков</strong><span>{item.coversAllCoreFlows ? 'Покрывает рабочее ядро' : 'Используется только по доступным категориям'}</span></div><div className="token-scopes">{item.scopeLabels?.map(scope => <b key={scope}>{scope}</b>)}</div><div className="token-card-foot"><small>До: {item.expiresAt?new Date(item.expiresAt).toLocaleDateString('ru-RU'):'не указано'} · код {item.fingerprint}</small>{!item.isPrimary && <button className="token-primary-btn" onClick={() => setPrimaryToken(item.id)}>Сделать основным</button>}</div></div>)}</div></div>}
 
-      <div className="connection-card add-token-card"><div className="connection-logo">WB</div><div className="connection-copy"><div className="connection-title"><h3>{connection.connected ? 'Добавить обычный резервный токен' : 'Подключить основной токен'}</h3><span className={connection.connected?'connection-status connected':'connection-status'}>{connection.connected ? 'Основной подключён' : 'Не подключён'}</span></div><p>Здесь принимаются Базовые токены кабинета. Сервисный токен в это поле не добавляется и не сможет случайно стать основным.</p><form className="token-form multi-token-form" onSubmit={saveConnection}><label>Название токена — необязательно<input type="text" value={tokenLabel} onChange={e => setTokenLabel(e.target.value)} placeholder={connection.connected ? 'Например: Резервный или Отзывы' : 'Например: Основной токен WB'} maxLength="80"/></label><label>Базовый API-ключ Wildberries</label><div className="token-input"><input type={showToken?'text':'password'} value={tokenDraft} onChange={e => setTokenDraft(e.target.value)} placeholder="Вставьте Базовый API-ключ" autoComplete="off"/><button type="button" onClick={() => setShowToken(value => !value)}>{showToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>Категории определятся автоматически. Сам токен обратно в браузер не возвращается.</small><button className="primary-btn" disabled={checking}>{checking?<><RefreshCw className="spin" size={17}/> Проверяем</>:<><PlugZap size={17}/> Проверить и добавить</>}</button></form></div></div>
+      <div className="connection-card add-token-card"><div className="connection-logo">WB</div><div className="connection-copy"><div className="connection-title"><h3>{connection.connected ? 'Добавить резервный ключ' : 'Подключить Wildberries'}</h3><span className={connection.connected?'connection-status connected':'connection-status'}>{connection.connected ? 'Кабинет подключён' : 'Не подключён'}</span></div><p>{connection.connected ? 'Резервный ключ нужен только если вы хотите добавить категорию, которой нет в основном.' : 'Вставьте один API-ключ кабинета. ELISEI сам определит его категории и начнёт фоновую загрузку доступных данных.'}</p><form className="token-form multi-token-form" onSubmit={saveConnection}><label>Название — необязательно<input type="text" value={tokenLabel} onChange={e => setTokenLabel(e.target.value)} placeholder={connection.connected ? 'Например: Резервный' : 'Например: Основной WB'} maxLength="80"/></label><label>API-ключ Wildberries</label><div className="token-input"><input type={showToken?'text':'password'} value={tokenDraft} onChange={e => setTokenDraft(e.target.value)} placeholder="Вставьте API-ключ WB" autoComplete="off"/><button type="button" onClick={() => setShowToken(value => !value)}>{showToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>Для полной экономики включите в ключе категорию «Финансы». Сам ключ обратно в браузер не возвращается.</small><button className="primary-btn" disabled={checking}>{checking?<><RefreshCw className="spin" size={17}/> Проверяем доступ</>:<><PlugZap size={17}/> {connection.connected?'Добавить ключ':'Подключить и загрузить кабинет'}</>}</button></form></div></div>
 
-      {connection.connected && <div className="connection-card service-token-connect-card"><div className="connection-logo service-logo"><ShieldCheck size={28}/></div><div className="connection-copy"><div className="connection-title"><h3>Сервисный токен для расширенных финансовых данных</h3><span className={`connection-status ${connection.serviceFinanceReady?'connected':''}`}>{connection.serviceFinanceReady ? 'Готов' : connection.serviceTokenConnected ? 'Проверить секрет' : 'Не подключён'}</span></div><p>Этот токен используется для официальных сводок реализации, сводок эквайринга и проверки статуса подписки «Джем». Основная финансовая детализация и документы продолжают работать через обычный токен кабинета с нужными категориями.</p><form className="token-form multi-token-form" onSubmit={saveServiceConnection}><label>Название — необязательно<input type="text" value={serviceTokenLabel} onChange={e => setServiceTokenLabel(e.target.value)} placeholder="Например: Расширенные финансы WB" maxLength="80"/></label><label>Сервисный токен Wildberries</label><div className="token-input"><input type={showServiceToken?'text':'password'} value={serviceTokenDraft} onChange={e => setServiceTokenDraft(e.target.value)} placeholder="Вставьте Сервисный токен" autoComplete="off"/><button type="button" onClick={() => setShowServiceToken(value => !value)}>{showServiceToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>{serviceSecretText}. Токен проверяется на backend и никогда не возвращается в браузер.</small><button className="primary-btn" disabled={checkingServiceToken}>{checkingServiceToken?<><RefreshCw className="spin" size={17}/> Проверяем сервисный доступ</>:<><PlugZap size={17}/> Проверить и подключить</>}</button></form></div></div>}
-
-      <div className="security-note"><RefreshCw size={22}/><div><strong>Автоповторы без сброса прогресса</strong><p>После 429, 502, 503 или 504 ELISEI сохраняет taskId, страницу и курсор, назначает время следующей попытки и продолжает тот же этап автоматически.</p></div></div>
-      <div className="security-note"><ShieldCheck size={22}/><div><strong>Один токен — один набор запросов</strong><p>Обычные потоки не переключаются на сервисный токен. Финансовые сводки, наоборот, никогда не запускаются Базовым ключом.</p></div></div>
-      <div className="security-note"><Warehouse size={22}/><div><strong>СГТ-склады — только чтение</strong><p>После 5 августа 2026 года ELISEI показывает уже созданные СГТ-склады и их остатки, но не создаёт и не редактирует такие склады через API.</p></div></div>
-      {connection.connected && <div className="connection-danger-zone"><div><strong>Отключить магазин полностью</strong><p>Удалятся токены и загруженные данные этого магазина.</p></div><button className="danger-btn" onClick={disconnect}>Отключить Wildberries</button></div>}
+      <div className="security-note"><RefreshCw size={22}/><div><strong>Первая загрузка запускается сама</strong><p>После подключения ELISEI ставит в фоновую очередь товары, заказы, продажи, остатки, финансы, рекламу, документы и остальные доступные категории. Ручной обход разделов не нужен.</p></div></div>
+      <div className="security-note"><CircleDollarSign size={22}/><div><strong>Финансы — часть общего подключения</strong><p>Если в ключе включена категория «Финансы», основная детализация WB, выплаты, комиссии, логистика, удержания и расчёт эквайринга загружаются без отдельного сервисного токена.</p></div></div>
+      <div className="security-note"><ShieldCheck size={22}/><div><strong>Нет ложных требований второго токена</strong><p>Если WB не разрешил конкретный метод этому ключу, ELISEI покажет недостающую категорию или ограничение доступа, но не заблокирует весь финансовый контур.</p></div></div>
+      {connection.connected && <div className="connection-danger-zone"><div><strong>Отключить магазин полностью</strong><p>Удалятся ключи и загруженные данные этого магазина.</p></div><button className="danger-btn" onClick={disconnect}>Отключить Wildberries</button></div>}
     </section>
   }
 
   const renderSyncHistory = () => {
     const stages = [
       ['products','Товары'], ['orders','Заказы'], ['sales','Продажи'], ['stocks','Остатки FBO'], ['sellerStocks','Остатки FBS'], ['advertising','Реклама'],
-      ['finance','Финансы WB'], ['paidStorage','Хранение'], ['acceptance','Приёмка'], ['acquiring','Эквайринг'], ['financeReports','Сводки реализации'], ['acquiringReports','Сводки эквайринга'],
+      ['finance','Финансы WB'], ['paidStorage','Хранение'], ['acceptance','Приёмка'], ['acquiring','Эквайринг'],
       ['fbsArchive','Архив FBS'], ['measurementPenalties','Штрафы за габариты'], ['deductionsReport','Подмены и вложения'], ['warehouseMeasurements','Замеры склада'], ['antifraudRetention','Самовыкупы'], ['labelingRetention','Маркировка'],
-      ['goodsReturns','Возвраты и перемещения'], ['tariffs','Тарифы WB'], ['funnel','Воронка карточек'], ['documents','Документы WB'], ['jamSubscription','Подписка Джем'], ['searchQueries','Поисковые запросы'], ['stockHistory','История остатков'], ['reviews','Отзывы'], ['questions','Вопросы'], ['chats','Чаты']
+      ['goodsReturns','Возвраты и перемещения'], ['tariffs','Тарифы WB'], ['funnel','Воронка карточек'], ['documents','Документы WB'], ['searchQueries','Поисковые запросы'], ['stockHistory','История остатков'], ['reviews','Отзывы'], ['questions','Вопросы'], ['chats','Чаты']
     ]
     const stateFor = stage => connection.syncStates?.find(item => item.stage === stage)
     const statusCopy = (state, stage) => {
@@ -1978,11 +2007,8 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
           ? { tone:'pending', title:'Повтор запускается автоматически', text:`Прогресс сохранён${state.taskId ? ' вместе с taskId' : ''}. Очередь продолжает этап с прежней страницы.` }
           : { tone:'warning', title:'Временная ошибка WB', text:`Прогресс не потерян. Автоповтор${attempt ? ` №${attempt}` : ''}${state.nextAllowedAt ? ` после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : ' запланирован'}.` }
       }
-      if (state.status === 'service_token_required') return { tone:'danger', title:'Требуется сервисный токен', text:state.lastError || 'Подключите отдельный Сервисный токен в разделе «Подключения».' }
-      if (state.status === 'service_secret_required') return { tone:'danger', title:'Не настроен секрет сервиса', text:state.lastError || 'Добавьте действующий WB_CLIENT_SECRET в backend Render.' }
-      if (state.status === 'service_token_invalid') return { tone:'danger', title:'Сервисный токен недействителен', text:state.lastError || 'Замените сервисный токен в разделе «Подключения».' }
-      if (state.status === 'service_permission_required') return { tone:'danger', title:'WB не дал доступ к сводке', text:state.lastError || 'Проверьте тип токена, категорию «Финансы» и принадлежность сервису.' }
-      if (state.status === 'token_invalid') return { tone:'danger', title:'Токен недействителен', text:state.lastError || 'Обновите токен кабинета.' }
+      if (state.status === 'optional_unavailable') return { tone:'idle', title:'Необязательный источник недоступен', text:state.lastError || 'Основные данные кабинета продолжают загружаться без этого метода.' }
+      if (state.status === 'token_invalid') return { tone:'danger', title:'Ключ недействителен', text:state.lastError || 'Обновите API-ключ кабинета.' }
       if (state.status === 'missing_token') return { tone:'danger', title:'Нет подходящего токена', text:state.lastError || 'Добавьте нужную категорию доступа.' }
       if (state.status === 'running') return { tone:'pending', title:'Загрузка', text:'Запрос выполняется.' }
       return { tone:'danger', title:'Не загружено', text:state.lastError || 'Запустите этап повторно.' }
@@ -2037,7 +2063,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       </div>}
     </div>}{integrationDiagnostics && <div className="data-integrity-strip"><div><strong>Единое ядро товаров</strong><span>{formatNumber(integrationDiagnostics.productMaster?.products)} карточек · {formatNumber(integrationDiagnostics.productMaster?.withBarcodes)} со ШК</span></div><div><strong>Остатки</strong><span>{integrationDiagnostics.stockAllocation?`${formatNumber(integrationDiagnostics.stockAllocation.matchedQuantity)} шт. сопоставлено`:'снимок ожидается'}</span></div><div><strong>Реклама</strong><span>{formatNumber(integrationDiagnostics.advertisingMeta?.campaigns)} кампаний · {formatNumber(integrationDiagnostics.advertisingMeta?.campaignsWithStats)} со статистикой</span></div></div>}{!connection.connected ? <div className="empty-state"><RefreshCw size={38}/><h3>Wildberries не подключён</h3><button className="primary-btn" onClick={() => setActive('Подключения')}>Подключить</button></div> : <>
       <div className="sync-summary"><div><span>Последнее успешное обновление</span><strong>{connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : 'Ещё не выполнялось'}</strong></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Запускаем этапы':'Запустить доступные этапы'}</button></div>
-      <div className="sync-stage-grid">{stages.map(([stage,label]) => { const state=stateFor(stage); const copy=statusCopy(state,stage); const serviceBlocked=['service_token_required','service_secret_required','service_token_invalid','service_permission_required'].includes(state?.status); const blocked=syncing || state?.status === 'pending' || (state?.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now()); const buttonText=serviceBlocked?'Открыть подключения':blocked?(state?.status==='pending'?'Ожидаем WB':'Повтор будет автоматически'):(['rate_limited','retry_scheduled'].includes(state?.status)?'Повторить сейчас':'Обновить отдельно'); return <div id={`sync-stage-${stage}`} className={`sync-stage-card ${copy.tone}`} key={stage}><div className="sync-stage-head"><span>{copy.tone==='success'?<CheckCircle2 size={19}/>:copy.tone==='pending'?<RefreshCw className="spin" size={19}/>:<AlertTriangle size={19}/>}</span><div><small>{label}</small><strong>{copy.title}</strong></div></div><p>{copy.text}</p><button disabled={blocked && !serviceBlocked} onClick={() => serviceBlocked ? setActive('Подключения') : syncConnection(connection.connectionId,[stage],{period:['advertising','searchQueries','stockHistory','finance','acquiring','documents'].includes(stage)?analyticsPeriod:null})}>{buttonText}</button></div> })}</div>
+      <div className="sync-stage-grid">{stages.map(([stage,label]) => { const state=stateFor(stage); const copy=statusCopy(state,stage); const blocked=syncing || state?.status === 'pending' || (state?.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now()); const buttonText=blocked?(state?.status==='pending'?'Ожидаем WB':'Повтор будет автоматически'):(['rate_limited','retry_scheduled'].includes(state?.status)?'Повторить сейчас':'Обновить отдельно'); return <div id={`sync-stage-${stage}`} className={`sync-stage-card ${copy.tone}`} key={stage}><div className="sync-stage-head"><span>{copy.tone==='success'?<CheckCircle2 size={19}/>:copy.tone==='pending'?<RefreshCw className="spin" size={19}/>:<AlertTriangle size={19}/>}</span><div><small>{label}</small><strong>{copy.title}</strong></div></div><p>{copy.text}</p><button disabled={blocked} onClick={() => syncConnection(connection.connectionId,[stage],{period:['advertising','searchQueries','stockHistory','finance','acquiring','documents'].includes(stage)?analyticsPeriod:null})}>{buttonText}</button></div> })}</div>
       {coreData?.syncWarnings?.length > 0 && <div className="warning-stack">{coreData.syncWarnings.map((warning,index) => <div key={index}><AlertTriangle size={17}/>{warning}</div>)}</div>}
       <div className="sync-log">{syncHistory.length === 0 ? <div className="sync-empty">В журнале пока нет записей.</div> : syncHistory.map(item => { const warnings=Boolean(item.warnings?.length); const counts=item.counts || {}; return <div className={`sync-log-row ${warnings?'warning':item.status}`} key={item.id}><div className="sync-log-icon">{item.status==='success'&&!warnings?<CheckCircle2 size={18}/>:<AlertTriangle size={18}/>}</div><div><strong>{item.automatic?'Автоматический повтор':item.status==='success'?(warnings?'Завершено частично':'Завершено успешно'):'Не все этапы завершены'}</strong><span>{new Date(item.at).toLocaleString('ru-RU')}</span></div><div className="sync-log-details"><span>{counts.products ?? 0} товаров</span><span>{counts.orders ?? 0} заказов</span><span>{counts.sales ?? 0} продаж</span><span>{counts.stocks ?? 0} строк остатков</span><span>{counts.advertising ?? 0} кампаний</span>{warnings&&<span className="sync-warning-text">{item.warnings[0]}</span>}</div></div>})}</div>
     </>}</section>

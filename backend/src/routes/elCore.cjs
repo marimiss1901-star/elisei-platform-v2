@@ -11,7 +11,18 @@ const { publicCapabilities } = require('../services/elModuleRegistry.cjs');
 const { resolveElPlan, normalizeMode, canUseMode, publicPlan, modeLabel } = require('../services/elPlans.cjs');
 const { DEFAULT_EL_PROFILE, normalizeElProfile, mergeElProfiles } = require('../services/elPersonality.cjs');
 const { parseElTemporalRange } = require('../services/elTemporal.cjs');
-const { resolveConversationFollowup, buildAnalysisContext, shouldForceSalesModule } = require('../services/elConversationContext.cjs');
+const conversationContext = require('../services/elConversationContext.cjs');
+const { resolveConversationFollowup, buildAnalysisContext } = conversationContext;
+// 5.10.1 hotfix: патч должен переживать смешанную выкладку, когда новый elCore
+// уже попал на Render, а старый elConversationContext ещё не заменён.
+const shouldForceSalesModule = typeof conversationContext.shouldForceSalesModule === 'function'
+  ? conversationContext.shouldForceSalesModule
+  : ({ metric, isFollowup, inheritedModules = [], detectedModules = [] } = {}) => {
+      const explicit = [...new Set((Array.isArray(detectedModules) ? detectedModules : []).filter(Boolean))];
+      if (explicit.length > 1) return false;
+      if (['fbs_orders','fbo_orders','orders','sales','revenue'].includes(metric)) return true;
+      return Boolean(isFollowup && ['returns','products'].includes(metric) && inheritedModules.includes('sales'));
+    };
 
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 
@@ -46,7 +57,7 @@ function createRouter(express) {
     const plan = await resolveElPlan(req, identity);
     res.json({
       ok: true,
-      version: '5.10.0',
+      version: '5.10.1',
       name: 'El Tiered Intelligence',
       configured: Boolean(process.env.OPENAI_API_KEY && (process.env.ELISEI_GPT_MODEL || process.env.ELISEI_PRO_MODEL || process.env.ELISEI_AI_MODEL)),
       models: {
@@ -97,7 +108,7 @@ function createRouter(express) {
   router.get('/capabilities', asyncRoute(async (req, res) => {
     const identity = identityFromRequest(req);
     const plan = await resolveElPlan(req, identity);
-    res.json({ ok: true, version: '5.10.0', modules: publicCapabilities(), plan, writeActions: false });
+    res.json({ ok: true, version: '5.10.1', modules: publicCapabilities(), plan, writeActions: false });
   }));
 
   router.post('/chat', asyncRoute(async (req, res) => {

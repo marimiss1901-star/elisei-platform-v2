@@ -76,6 +76,17 @@ function resolveConversationFollowup({ message,history,clock,defaultPeriod } = {
   };
 }
 
+
+function shouldForceSalesModule({ metric, isFollowup, inheritedModules = [], detectedModules = [] } = {}) {
+  const explicit = [...new Set((Array.isArray(detectedModules) ? detectedModules : []).filter(Boolean))]
+  // Явный запрос на сопоставление нескольких разделов нельзя схлопывать в продажи.
+  if (explicit.length > 1) return false
+  if (['fbs_orders','fbo_orders','orders','sales','revenue'].includes(metric)) return true
+  // Короткие продолжения «а возвратов?» / «а какие товары?» после ответа о продажах
+  // сохраняют контекст продаж. Самостоятельные запросы идут в свои модули.
+  return Boolean(isFollowup && ['returns','products'].includes(metric) && inheritedModules.includes('sales'))
+}
+
 function buildAnalysisContext({ period,modules,message,followup } = {}) {
   return {
     period:cleanPeriod(period || {}),
@@ -90,5 +101,6 @@ module.exports = {
   metricFromText,
   resolveConversationFollowup,
   buildAnalysisContext,
+  shouldForceSalesModule,
   cleanPeriod,
 };

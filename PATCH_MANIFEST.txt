@@ -1,12 +1,24 @@
-ELISEI PATCH MANIFEST
-Release: 5.10.0
-Base release: 5.9.4
-Frontend: 5.10.0
-Backend: 2.22.0
-El Core: 5.10.0
-Purpose: first El 2.0 decision engine — compare periods, explain drivers, estimate money impact, choose one action
-Project files in patch: 19
-Archive limit: fewer than 100 files
-Checksum entries: 17 (checksum files excluded)
-Backend tests: 25/25 passed
-Frontend build: not executed in container because node_modules/vite are not installed
+ELISEI 5.10.1 PATCH
+Base: deployed ELISEI 5.10.0
+Frontend: 5.10.1
+Backend: 2.22.1
+El Core: 5.10.1
+
+Purpose:
+- one user-facing Wildberries API connection;
+- core finance through the Finance category of the connected key;
+- automatic initial/core sync and migration of legacy service-token block states;
+- unified cabinet digitization on Home;
+- hotfix for mixed-deploy shouldForceSalesModule runtime failure.
+
+Installation:
+1. Copy the elisei-platform-v2-main folder contents over the deployed 5.10.0 project with overwrite.
+2. Redeploy backend and frontend.
+3. Confirm /health reports backend 2.22.1 and El reports 5.10.1.
+4. Do not re-enter an already saved WB key solely because of this update; opening the connection state queues eligible missing core streams automatically.
+
+Validation:
+- 26/26 backend tests passed.
+- Node syntax checks passed for backend changed JS/CJS files.
+- TypeScript parser reports no JSX/JS parse diagnostics for DashboardPage.jsx and src/lib/api.js.
+- Full Vite production build was not executed in the working container because project dependencies are not installed there.

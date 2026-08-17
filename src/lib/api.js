@@ -59,8 +59,7 @@ export const authApi = {
 
 export const wbApi = {
   current: () => request('/api/wb/connection'),
-  connect: (token, label = '', purpose = 'general') => request('/api/wb/connect', { method: 'POST', body: JSON.stringify({ token, label, purpose }) }),
-  connectService: (token, label = '') => request('/api/wb/connect', { method: 'POST', body: JSON.stringify({ token, label, purpose:'service' }) }),
+  connect: (token, label = '') => request('/api/wb/connect', { method: 'POST', body: JSON.stringify({ token, label }) }),
   status: (connectionId) => request(`/api/wb/status/${encodeURIComponent(connectionId)}`),
   live: (connectionId) => request(`/api/wb/live/${encodeURIComponent(connectionId)}`),
   updateLive: (connectionId, settings = {}) => request(`/api/wb/live/${encodeURIComponent(connectionId)}`, { method:'PUT',body:JSON.stringify(settings) }),

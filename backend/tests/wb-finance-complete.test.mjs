@@ -37,7 +37,7 @@ assert.ok(ledger.includes('timeline:timelineRows.rows'))
 assert.ok(ledger.includes("operation_group IN ('penalties','deductions')"))
 
 const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')
-for (const marker of ['Отчёты WB','Динамика','Причины удержаний','Сводки реализации','Самовыкупы','Нарушения маркировки']) {
+for (const marker of ['Динамика','Причины удержаний','Отчёты реализации','Самовыкупы','Нарушения маркировки']) {
   assert.ok(dashboard.includes(marker),`Dashboard must contain ${marker}`)
 }
 

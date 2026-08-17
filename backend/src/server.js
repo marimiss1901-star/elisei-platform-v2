@@ -491,8 +491,11 @@ const WB_SYNC_STAGES = Object.freeze({
   questions: { label: 'Вопросы покупателей', scope: 'feedbacks' },
   chats: { label: 'Чаты с покупателями', scope: 'chat' },
 })
-const SERVICE_TOKEN_STAGES = new Set(['financeReports','acquiringReports','jamSubscription'])
-const GENERAL_SYNC_STAGE_NAMES = Object.keys(WB_SYNC_STAGES).filter(stage => !SERVICE_TOKEN_STAGES.has(stage))
+const OPTIONAL_PRIVILEGED_STAGES = new Set(['financeReports','acquiringReports','jamSubscription'])
+// 5.10.1: продавцу достаточно одного подключения WB. Эти три метода — только
+// дополнительное обогащение для поддерживаемых типов токенов и не входят в
+// обязательное ядро кабинета/готовность финансов.
+const GENERAL_SYNC_STAGE_NAMES = Object.keys(WB_SYNC_STAGES).filter(stage => !OPTIONAL_PRIVILEGED_STAGES.has(stage))
 const CORE_SYNC_SCOPES = [...new Set(GENERAL_SYNC_STAGE_NAMES.map(stage => WB_SYNC_STAGES[stage].scope))]
 const STOCK_DATA_SCHEMA_VERSION = 5
 const STOCK_DATA_SOURCE = 'wb_warehouse_remains'
@@ -607,7 +610,7 @@ function humanWait(seconds) {
 function transientRetryPlan(state, stage, error) {
   const previous = Math.max(0,Number(state?.metadata?.automaticRetryAttempt || 0))
   const attempt = Math.min(MAX_AUTOMATIC_RETRY_ATTEMPTS,previous + 1)
-  const baseSeconds = SERVICE_TOKEN_STAGES.has(stage) ? 120 : stage === 'fbsArchive' ? 90 : 60
+  const baseSeconds = stage === 'fbsArchive' ? 90 : 60
   const seconds = Math.min(6 * 3600,baseSeconds * (2 ** Math.max(0,attempt - 1)))
   const jitter = 0.85 + Math.random() * 0.3
   const delaySeconds = Math.max(30,Math.round(seconds * jitter))
@@ -628,7 +631,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.22.0 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.22.1 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -840,18 +843,11 @@ function parseZipCsvRows(buffer) {
     .flatMap(entry=>parseCsvRows(entry.data.toString('utf8')).map(row=>({ sourceFile:entry.name,...row })))
 }
 
-async function probeToken(token, { purpose='general' } = {}) {
+async function probeToken(token) {
   const info = inspectWbToken(token)
-  if (purpose === 'service' && info.typeId !== 4) {
-    throw Object.assign(new Error('В это поле нужен именно Сервисный токен Wildberries (тип acc=4). Базовый токен оставьте в основном подключении.'), { status:400, code:'WB_SERVICE_TOKEN_REQUIRED' })
-  }
-  if (purpose !== 'service' && info.typeId === 4) {
-    throw Object.assign(new Error('Сервисный токен подключается отдельно в блоке «Сервисный токен для финансовых сводок».'), { status:400, code:'WB_SERVICE_TOKEN_SEPARATE_FIELD' })
-  }
-  if (purpose === 'service' && !info.scopes.includes('finance')) {
-    throw Object.assign(new Error('В сервисном токене не включена категория «Финансы».'), { status:403, code:'WB_SERVICE_FINANCE_SCOPE_REQUIRED' })
-  }
-  // Лёгкий официальный /ping подтверждает, что токен активен и принимается WB.
+  // 5.10.1: в интерфейсе одно поле подключения. Тип и категории ключа
+  // определяются автоматически; дальше каждый поток использует только тот
+  // доступ, который реально есть у этого ключа.
   await wbFetch('https://common-api.wildberries.ru/ping', token, {
     label: 'Проверка токена WB',
     timeoutMs: 15000,
@@ -899,9 +895,12 @@ function isServiceTokenRow(row) {
 function tokenEligibleForStage(row, stage) {
   const definition = WB_SYNC_STAGES[stage]
   if (!definition || !rowScopes(row).includes(definition.scope)) return false
-  if (stage === 'acquiring') return true
-  if (SERVICE_TOKEN_STAGES.has(stage)) return isServiceTokenRow(row)
-  return !isServiceTokenRow(row)
+  // Основное ядро WB работает с одним ключом по его категориям. Методы
+  // списков финансовых отчётов и статуса «Джем» остаются необязательным
+  // обогащением: WB ограничивает их типом токена.
+  if (stage === 'financeReports' || stage === 'acquiringReports') return [3,4].includes(rowTokenType(row))
+  if (stage === 'jamSubscription') return rowTokenType(row) === 4
+  return true
 }
 
 function tokenStageCoverage(row) {
@@ -929,13 +928,13 @@ function publicWbToken(row) {
     tokenType: row.token_type_label,
     tokenTypeId: rowTokenType(row),
     isServiceToken: isServiceTokenRow(row),
-    purpose: isServiceTokenRow(row) ? 'service' : 'general',
+    purpose: 'general',
     readOnly: Boolean(row.read_only),
     isPrimary: Boolean(row.is_primary),
     coversAllCoreFlows: coversAllCoreFlows(row),
     stageCoverage,
-    stageCoverageCount: stageCoverage.length,
-    stageTotal: Object.keys(WB_SYNC_STAGES).length,
+    stageCoverageCount: tokenCoreCoverage(row),
+    stageTotal: GENERAL_SYNC_STAGE_NAMES.length,
     expiresAt: row.expires_at || null,
     status: row.status,
     lastCheckedAt: row.last_checked_at || null,
@@ -1009,19 +1008,12 @@ function tokenSort(a,b) {
 
 function selectTokenRow(tokens, scope) {
   return [...tokens]
-    .filter(item => rowScopes(item).includes(scope) && !isServiceTokenRow(item))
+    .filter(item => rowScopes(item).includes(scope))
     .sort(tokenSort)[0] || null
 }
 
 function selectTokenRowForStage(tokens, stage) {
-  const eligible = [...tokens].filter(item => tokenEligibleForStage(item,stage))
-  if (stage === 'acquiring') {
-    const secretReady = publicServiceSecretStatus().valid
-    const service = secretReady ? eligible.filter(isServiceTokenRow).sort(tokenSort)[0] : null
-    if (service) return service
-    return eligible.filter(item => !isServiceTokenRow(item)).sort(tokenSort)[0] || null
-  }
-  return eligible.sort(tokenSort)[0] || null
+  return [...tokens].filter(item => tokenEligibleForStage(item,stage)).sort(tokenSort)[0] || null
 }
 
 function chooseToken(tokens, scope) {
@@ -1043,13 +1035,13 @@ async function recomputePrimaryToken(connectionId) {
   try {
     await client.query('BEGIN')
     const result = await client.query(`SELECT * FROM wb_tokens WHERE connection_id=$1 AND status='active' ORDER BY created_at`, [connectionId])
-    const generalTokens = result.rows.filter(row => !isServiceTokenRow(row))
-    if (!generalTokens.length) {
+    const usableTokens = result.rows
+    if (!usableTokens.length) {
       await client.query('UPDATE wb_tokens SET is_primary=FALSE,updated_at=NOW() WHERE connection_id=$1 AND is_primary=TRUE', [connectionId])
       await client.query('COMMIT')
       return null
     }
-    const selected = [...generalTokens].sort(tokenSort)[0]
+    const selected = [...usableTokens].sort(tokenSort)[0]
     await client.query('UPDATE wb_tokens SET is_primary=FALSE,updated_at=NOW() WHERE connection_id=$1 AND is_primary=TRUE', [connectionId])
     await client.query('UPDATE wb_tokens SET is_primary=TRUE,updated_at=NOW() WHERE id=$1 AND connection_id=$2', [selected.id, connectionId])
     await client.query('UPDATE marketplace_connections SET token_encrypted=$1,updated_at=NOW() WHERE id=$2', [selected.token_encrypted, connectionId])
@@ -1217,10 +1209,9 @@ function publicConnection(row, tokens = [], syncStates = []) {
     const selected = selectTokenRowForStage(tokens,stage)
     return [stage, selected ? { tokenId:selected.id, label:selected.label, isPrimary:Boolean(selected.is_primary), isServiceToken:isServiceTokenRow(selected) } : null]
   }))
-  const serviceTokenRow = tokens.find(isServiceTokenRow) || null
   const serviceSecret = publicServiceSecretStatus()
   return {
-    connected: Boolean(row && tokens.some(token => !isServiceTokenRow(token))),
+    connected: Boolean(row && tokens.length),
     hasConnection: Boolean(row),
     connectionId: row?.id || null,
     sellerId: row?.seller_id || null,
@@ -1231,11 +1222,8 @@ function publicConnection(row, tokens = [], syncStates = []) {
     primaryTokenId: primaryToken?.id || null,
     tokenMode: universal ? 'universal' : allCoreCovered ? 'combined' : tokens.length ? 'partial' : 'none',
     coverageByStage,
-    serviceToken: serviceTokenRow ? publicWbToken(serviceTokenRow) : null,
-    serviceTokenConnected:Boolean(serviceTokenRow),
     serviceSecret,
-    serviceFinanceReady:Boolean(serviceTokenRow && serviceSecret.valid && SERVICE_TOKEN_STAGES.every(stage => tokenEligibleForStage(serviceTokenRow,stage))),
-    stageTotal:Object.keys(WB_SYNC_STAGES).length,
+    stageTotal:GENERAL_SYNC_STAGE_NAMES.length,
     syncStates: syncStates.map(publicSyncState),
     status: row?.status || 'disconnected',
     connectedAt: row?.created_at || null,
@@ -3340,7 +3328,7 @@ async function deriveAcquiringSnapshot(connectionId, period) {
   return {
     rows:preview,totalRows:derived.length,totals:{acquiring:Math.round(total*100)/100},period,complete:true,
     derivedFrom:'finance',vatBreakdownAvailable:false,
-    note:'Эквайринг подтверждён строками детализации реализации. Разбивка НДС появится после подключения Персонального/Сервисного метода отчётов эквайринга.',
+    note:'Эквайринг подтверждён строками детализации реализации. Отдельная разбивка НДС показывается только если тип текущего ключа поддерживает соответствующий метод WB; для основной экономики второй ключ не требуется.',
   }
 }
 
@@ -4710,26 +4698,19 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
   }
   const selectedRow = selectTokenRowForStage(tokens,stage)
   if (!selectedRow) {
-    const serviceOnly = SERVICE_TOKEN_STAGES.has(stage)
-    const status = serviceOnly ? 'service_token_required' : 'missing_token'
-    const message = serviceOnly
-      ? 'Для этого метода нужен отдельный Сервисный токен WB с категорией «Финансы».'
-      : `Нужен токен с категорией «${WB_SCOPE_BITS[definition.scope].label}»`
+    const optionalPrivileged = OPTIONAL_PRIVILEGED_STAGES.has(stage)
+    const status = optionalPrivileged ? 'optional_unavailable' : 'missing_token'
+    const message = optionalPrivileged
+      ? 'Дополнительный источник недоступен для типа текущего ключа. Основной финансовый реестр ELISEI продолжает работать через категорию «Финансы».'
+      : `В подключённом ключе не включена категория «${WB_SCOPE_BITS[definition.scope].label}»`
     state = await updateSyncState(connection.id, stage, { status, lastAttemptAt:new Date().toISOString(), lastError:message, nextAllowedAt:null })
     return { stage, status, value:fallback, warning:`${definition.label}: ${message}`, state }
-  }
-  if (SERVICE_TOKEN_STAGES.has(stage)) {
-    const secret = publicServiceSecretStatus()
-    if (!secret.valid) {
-      state = await updateSyncState(connection.id,stage,{ status:'service_secret_required',lastAttemptAt:new Date().toISOString(),lastError:secret.error || 'WB_CLIENT_SECRET не настроен.',nextAllowedAt:null,metadata:{ ...(state?.metadata || {}),tokenId:selectedRow.id,tokenLabel:selectedRow.label } })
-      return { stage,status:'service_secret_required',value:fallback,warning:`${definition.label}: ${secret.error || 'WB_CLIENT_SECRET не настроен в backend.'}`,state }
-    }
   }
   let selected
   try {
     selected = chooseTokenForStage(tokens,stage)
   } catch (error) {
-    const status = SERVICE_TOKEN_STAGES.has(stage) ? 'service_token_invalid' : 'token_invalid'
+    const status = 'token_invalid'
     state = await updateSyncState(connection.id,stage,{ status,lastAttemptAt:new Date().toISOString(),lastError:error.message,nextAllowedAt:null,metadata:{ ...(state?.metadata || {}),tokenId:selectedRow.id,tokenLabel:selectedRow.label } })
     return { stage,status,value:fallback,warning:`${definition.label}: ${error.message}`,state }
   }
@@ -4950,7 +4931,7 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
         : stage === 'searchQueries' && [402,403].includes(Number(error?.status))
           ? 'subscription_required'
           : Number(error?.status) === 403
-            ? (SERVICE_TOKEN_STAGES.has(stage) ? 'service_permission_required' : 'forbidden')
+            ? (OPTIONAL_PRIVILEGED_STAGES.has(stage) ? 'optional_unavailable' : 'forbidden')
             : 'error'
     const retryMessage = retryable
       ? `${Number(error?.status) === 504 ? 'Wildberries не ответил вовремя' : 'Временная ошибка Wildberries'}. Прогресс сохранён; автоматический повтор после ${new Date(nextAllowedAt).toLocaleString('ru-RU')}.`
@@ -5028,7 +5009,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.22.0',
+    version: '2.22.1',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -5234,30 +5215,66 @@ app.all('/api/wb/oauth/callback',(req,res)=>{
 app.get('/api/wb/connection', authRequired, async (req, res) => {
   let connection = await getConnection(req.auth.sub)
   if (!connection) return res.json(publicConnection(null))
+  let [tokens, states] = await Promise.all([getWbTokens(req.auth.sub, connection.id), getSyncStates(connection.id)])
+  // 5.10.1 migration: уже подключённому кабинету не нужно перевыпускать ключ
+  // после обновления ELISEI. Первый просмотр сам поставит в очередь новые
+  // доступные потоки и очистит старый ложный service-token блок у core-этапов.
+  const oldServiceStatuses = new Set(['service_token_required','service_secret_required','service_token_invalid','service_permission_required'])
+  const byStage = new Map(states.map(item => [item.stage,item]))
+  const missingCoreStages = GENERAL_SYNC_STAGE_NAMES.filter(stage => {
+    if (!selectTokenRowForStage(tokens,stage)) return false
+    const state = byStage.get(stage)
+    return !state || oldServiceStatuses.has(String(state.status || ''))
+  })
+  if (missingCoreStages.length) {
+    await queueInitialCabinetSync(connection,tokens,{stages:missingCoreStages})
+    states = await getSyncStates(connection.id)
+  }
   // Render может приостанавливать обычные таймеры между обращениями. Каждый
   // просмотр кабинета дополнительно будит очередь просроченных этапов.
   const kick = kickBackgroundWorkers(`connection:${connection.id}`)
   await Promise.race([kick, sleep(650)])
   connection = await getConnection(req.auth.sub, connection.id)
-  const [tokens, states] = await Promise.all([getWbTokens(req.auth.sub, connection.id), getSyncStates(connection.id)])
+  const refreshedConnectionState = await Promise.all([getWbTokens(req.auth.sub, connection.id), getSyncStates(connection.id)])
+  tokens = refreshedConnectionState[0]
+  states = refreshedConnectionState[1]
   res.json(publicConnection(connection, tokens, states))
 })
+
+async function queueInitialCabinetSync(connection, tokens, { stages = null } = {}) {
+  const nowIso = new Date().toISOString()
+  const today = nowIso.slice(0,10)
+  const from = isoDaysAgo(29).slice(0,10)
+  const range = analyticsPeriodRange({ from, to:today })
+  const requested = (Array.isArray(stages) ? stages : GENERAL_SYNC_STAGE_NAMES)
+    .filter(stage => WB_SYNC_STAGES[stage] && selectTokenRowForStage(tokens,stage))
+  for (const stage of requested) {
+    const period = ['advertising','searchQueries','stockHistory','finance','acquiring','documents'].includes(stage)
+      ? syncPeriodForStage(stage,range)
+      : null
+    await updateSyncState(connection.id,stage,{
+      status:'queued',lastAttemptAt:null,nextAllowedAt:nowIso,lastError:null,lastCount:0,taskId:null,
+      metadata:initialPeriodStageMetadata(stage,period),
+    })
+  }
+  if (requested.length) setTimeout(() => kickBackgroundWorkers(`initial-sync:${connection.id}`),25).unref?.()
+  return requested
+}
 
 app.post('/api/wb/connect', authRequired, async (req, res) => {
   try {
     const token = String(req.body?.token || '').trim()
     const requestedLabel = String(req.body?.label || '').trim().slice(0, 80)
-    const purpose = String(req.body?.purpose || 'general') === 'service' ? 'service' : 'general'
     if (token.length < 40) return res.status(400).json({ error: 'API-ключ выглядит слишком коротким' })
-    const info = await probeToken(token,{ purpose })
-    const label = requestedLabel || (purpose === 'service' ? 'Сервисный токен WB' : (CORE_SYNC_SCOPES.every(scope => info.scopes.includes(scope)) ? 'Основной токен WB' : 'Дополнительный токен WB'))
+    const info = await probeToken(token)
     let connection = await getConnection(req.auth.sub)
-    if (purpose === 'service' && !connection) {
-      return res.status(409).json({ error:'Сначала подключите основной Базовый токен кабинета, затем добавьте сервисный токен для финансовых сводок.' })
-    }
+    const wasConnected = Boolean(connection)
+    const beforeTokens = connection ? await getWbTokens(req.auth.sub,connection.id) : []
+    const previousScopes = new Set(unionTokenScopes(beforeTokens))
     if (connection?.seller_id && info.sellerId && connection.seller_id !== info.sellerId) {
       return res.status(409).json({ error: 'Этот токен относится к другому кабинету продавца. Для другого кабинета потребуется отдельный магазин ELISEI.' })
     }
+    const label = requestedLabel || (!wasConnected ? 'Основной токен WB' : 'Резервный токен WB')
     if (!connection) {
       const result = await pool.query(`
         INSERT INTO marketplace_connections (id,user_id,marketplace,token_encrypted,scopes,status,seller_id)
@@ -5276,12 +5293,24 @@ app.post('/api/wb/connect', authRequired, async (req, res) => {
         token_type=EXCLUDED.token_type,token_type_label=EXCLUDED.token_type_label,scopes=EXCLUDED.scopes,
         read_only=EXCLUDED.read_only,expires_at=EXCLUDED.expires_at,status='active',last_checked_at=NOW(),updated_at=NOW()
     `, [crypto.randomUUID(), connection.id, req.auth.sub, label, encrypted, fingerprint, info.sellerId || null, info.typeId, info.tokenType, JSON.stringify(info.scopes), info.readOnly, info.expiresAt])
-    if (purpose === 'general') await recomputePrimaryToken(connection.id)
+    await recomputePrimaryToken(connection.id)
     const tokens = await getWbTokens(req.auth.sub, connection.id)
     const scopes = unionTokenScopes(tokens)
     const updated = await pool.query(`UPDATE marketplace_connections SET seller_id=COALESCE(seller_id,$1),scopes=$2::jsonb,status='connected',updated_at=NOW() WHERE id=$3 AND user_id=$4 RETURNING *`, [info.sellerId || null, JSON.stringify(scopes), connection.id, req.auth.sub])
+    const stagesToQueue = wasConnected
+      ? GENERAL_SYNC_STAGE_NAMES.filter(stage => {
+          const scope = WB_SYNC_STAGES[stage]?.scope
+          return scope && !previousScopes.has(scope) && scopes.includes(scope)
+        })
+      : GENERAL_SYNC_STAGE_NAMES
+    const autoSyncStages = await queueInitialCabinetSync(updated.rows[0],tokens,{ stages:stagesToQueue })
     const states = await getSyncStates(connection.id)
-    res.json(publicConnection(updated.rows[0], tokens, states))
+    res.json({
+      ...publicConnection(updated.rows[0], tokens, states),
+      autoSyncStarted:autoSyncStages.length > 0,
+      autoSyncStages,
+      autoSyncMessage:autoSyncStages.length ? 'ELISEI начал автоматическую загрузку доступных данных кабинета.' : 'Ключ сохранён; доступные потоки уже подключены.',
+    })
   } catch (error) {
     res.status(error.status || 400).json({ error: error.message })
   }
@@ -5295,8 +5324,8 @@ app.delete('/api/wb/tokens/:tokenId', authRequired, async (req, res) => {
   if (remaining.rows.length) await recomputePrimaryToken(connection.id)
   const tokens = await getWbTokens(req.auth.sub, connection.id)
   const scopes = unionTokenScopes(tokens)
-  const hasGeneralToken = tokens.some(token => !isServiceTokenRow(token))
-  const updated = await pool.query(`UPDATE marketplace_connections SET scopes=$1::jsonb,status=$2,updated_at=NOW() WHERE id=$3 AND user_id=$4 RETURNING *`, [JSON.stringify(scopes), hasGeneralToken ? 'connected' : 'needs_token', connection.id, req.auth.sub])
+  const hasToken = tokens.length > 0
+  const updated = await pool.query(`UPDATE marketplace_connections SET scopes=$1::jsonb,status=$2,updated_at=NOW() WHERE id=$3 AND user_id=$4 RETURNING *`, [JSON.stringify(scopes), hasToken ? 'connected' : 'needs_token', connection.id, req.auth.sub])
   const states = await getSyncStates(connection.id)
   res.json(publicConnection(updated.rows[0], tokens, states))
 })
@@ -5307,7 +5336,6 @@ app.post('/api/wb/tokens/:tokenId/primary', authRequired, async (req, res) => {
     if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
     const tokenResult = await pool.query(`SELECT * FROM wb_tokens WHERE id=$1 AND user_id=$2 AND connection_id=$3 AND status='active'`, [req.params.tokenId, req.auth.sub, connection.id])
     if (!tokenResult.rows[0]) return res.status(404).json({ error: 'API-токен не найден' })
-    if (isServiceTokenRow(tokenResult.rows[0])) return res.status(409).json({ error:'Сервисный токен закреплён за расширенными финансовыми сводками и статусом «Джем» и не может быть основным токеном кабинета.' })
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
@@ -5490,7 +5518,7 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, String(req.body?.connectionId || '') || null)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено. Подключите Wildberries.' })
   await recoverStaleSyncStates({ connectionId:connection.id, reason:'manual-sync' })
-  const allRequestedStages = Array.isArray(req.body?.stages) ? req.body.stages.filter(stage => WB_SYNC_STAGES[stage]) : Object.keys(WB_SYNC_STAGES)
+  const allRequestedStages = Array.isArray(req.body?.stages) ? req.body.stages.filter(stage => WB_SYNC_STAGES[stage]) : [...GENERAL_SYNC_STAGE_NAMES]
   if (!allRequestedStages.length) return res.status(400).json({ error: 'Не выбраны этапы синхронизации' })
   const backgroundArchiveStages = allRequestedStages.length > 1 ? allRequestedStages.filter(stage => ARCHIVE_SYNC_STAGES.includes(stage)) : []
   const requestedStages = allRequestedStages.filter(stage => !backgroundArchiveStages.includes(stage))

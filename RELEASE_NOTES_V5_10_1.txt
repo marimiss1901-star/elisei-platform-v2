@@ -1,0 +1,27 @@
+ELISEI 5.10.1 / Backend 2.22.1 / El Core 5.10.1
+
+1. ONE WB CONNECTION
+- Removed separate service-token form from seller UX.
+- One WB API key is inspected once; scopes/type are detected automatically.
+- Core finance runs through the Finance category of the connected key.
+- Token-type-limited finance report lists remain optional enrichment only.
+
+2. AUTO INITIAL SYNC
+- First connection automatically queues every core stream allowed by the key.
+- Existing connections auto-queue missing core stages on the first cabinet load after upgrade.
+- Legacy service-token block statuses are migrated for eligible core stages.
+
+3. HOME DIGITIZATION
+- New unified cabinet view on Home.
+- Revenue, payable, operating profit, orders, sales, returns, WB commission, logistics, ads, storage, acquiring, penalties/deductions.
+- Previous equal-period comparison.
+- Top-10 product economy table.
+
+4. EL 5.10.0 HOTFIX
+- Fixed mixed-deploy crash: shouldForceSalesModule is not a function.
+- Added resilient fallback and ships elConversationContext.cjs in the patch.
+
+5. SAFETY
+- Optional privileged endpoints do not block finance readiness.
+- Missing token categories are reported as missing categories, not a generic second-token requirement.
+- Chats remain read-only.

@@ -57,7 +57,8 @@ const DATE_KEYS = Object.freeze({
   chats:['addTimestamp','eventTime','createdAt','updatedAt'],
 })
 
-const BLOCKED_STATUSES = new Set(['service_token_required','service_secret_required','service_token_invalid','service_permission_required','token_invalid','missing_token'])
+const LEGACY_SERVICE_STATUSES = new Set(['service_token_required','service_secret_required','service_token_invalid','service_permission_required'])
+const BLOCKED_STATUSES = new Set(['token_invalid','missing_token'])
 const WAITING_STATUSES = new Set(['pending','queued','rate_limited','retry_scheduled','running'])
 
 function dateKey(value) {
@@ -174,7 +175,8 @@ function evaluateStream({stage,state,row,requested,now}) {
   const backgroundPending = WAITING_STATUSES.has(rawStatus)
   let status = 'missing'
 
-  if (BLOCKED_STATUSES.has(rawStatus)) status='blocked'
+  if (config.optional && LEGACY_SERVICE_STATUSES.has(rawStatus)) status='missing'
+  else if (BLOCKED_STATUSES.has(rawStatus) || LEGACY_SERVICE_STATUSES.has(rawStatus)) status='blocked'
   else if (!hasSavedResult && rawStatus === 'running') status='running'
   else if (!hasSavedResult && backgroundPending) status='waiting'
   else if (hasSavedResult) {
