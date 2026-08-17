@@ -74,4 +74,4 @@ assert.ok(drawer.includes('!hasPayload && !error'),'drawer must show a loading s
 assert.ok(!drawer.includes('const overview = view.overview || item'),'drawer must never use raw table zeros as SKU 360 metrics while loading')
 assert.ok(drawer.includes('Частичные нули скрываются до завершения потока.'),'drawer must explain partial data policy')
 
-console.log('WB 5.11.1 SKU 360 readiness regression tests passed')
+console.log('WB 5.11.2 SKU 360 readiness regression tests passed')

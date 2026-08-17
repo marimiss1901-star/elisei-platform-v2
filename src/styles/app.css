@@ -471,3 +471,9 @@ body{background:radial-gradient(circle at 72% 7%,rgba(124,58,237,.18),transparen
 @media(max-width:1200px){.sku360-kpis{grid-template-columns:repeat(3,1fr)}.sku360-skeleton-grid{grid-template-columns:repeat(3,1fr)}.sku360-hero{grid-template-columns:110px minmax(0,1fr)}.sku360-photo{width:110px;height:132px}.sku360-health{grid-column:1/-1}.sku360-daily-tail{grid-template-columns:repeat(4,1fr)}}
 @media(max-width:880px){.sku360-backdrop{padding:0}.sku360-readiness-banner{align-items:flex-start;flex-direction:column}.sku360-skeleton-grid{grid-template-columns:repeat(2,1fr)}.sku360-drawer{width:100vw;height:100vh;border-radius:0;padding:18px}.sku360-grid.two{grid-template-columns:1fr}.sku360-kpis{grid-template-columns:repeat(2,1fr)}.sku360-hero{grid-template-columns:82px minmax(0,1fr);padding-right:42px}.sku360-photo{width:82px;height:104px;border-radius:16px}.sku360-hero-copy h2{font-size:22px}.sku360-health{grid-column:1/-1}.sku360-decision{align-items:flex-start;flex-direction:column}.sku360-decision>small{text-align:left}.sku360-daily-tail{grid-template-columns:repeat(3,1fr)}}
 .product-drill-row{width:100%;text-align:left;color:inherit;background:transparent;border-left:0;border-right:0;border-top:0;cursor:pointer;font:inherit}.product-drill-row:hover{background:rgba(126,87,255,.055)}
+
+/* ELISEI 5.11.2 · SKU 360 unified data-state language */
+.sku360-kpis strong.is-status,.sku360-price-grid strong.is-status{font-size:12px;line-height:1.25;color:#a5a1b7;font-weight:650;white-space:normal}
+.sku360-kpis strong.is-status.is-partial,.sku360-money-list strong.is-status.is-partial,.sku360-price-grid strong.is-status.is-partial{color:#e6bd79}
+.sku360-money-list strong.is-status{max-width:52%;font-size:11px;line-height:1.25;text-align:right;color:#9e9aac;font-weight:650}
+.sku360-kpis>div:has(strong.is-status.is-partial),.sku360-price-grid>div:has(strong.is-status.is-partial){border-color:rgba(255,181,72,.13);background:rgba(255,181,72,.025)}

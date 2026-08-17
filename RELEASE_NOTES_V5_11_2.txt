@@ -1,0 +1,10 @@
+ELISEI 5.11.2 / backend 2.23.2 / El Core 5.11.2
+
+SKU 360 STATE LANGUAGE HOTFIX
+- unified ready / partial / waiting / missing wording across SKU 360
+- partial missing values are no longer labelled as simply not loaded
+- confirmed zero values remain visible
+- per-metric economics readiness states
+- explicit FBS/FBO stock state explanation
+- state-aware empty messages for ads, search, reviews, stocks and finance
+- stream count clarified in SKU coverage banner

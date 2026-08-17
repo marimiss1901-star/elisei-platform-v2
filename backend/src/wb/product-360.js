@@ -355,6 +355,9 @@ export function buildProduct360({
   const adMetric = value => safeMetric(value,readiness.advertising,{zeroUnsafe:true})
   const fbsStockMetric = value => safeMetric(value,readiness.fbsStocks,{zeroUnsafe:true})
   const fboStockMetric = value => safeMetric(value,readiness.fboStocks,{zeroUnsafe:true})
+  const storageState = syncReadiness(coverage?.stages?.paidStorage,Boolean(coverage?.core?.paidStorage))
+  const acceptanceState = syncReadiness(coverage?.stages?.acceptance,Boolean(coverage?.core?.acceptance))
+  const acquiringState = syncReadiness(coverage?.stages?.acquiring,Boolean(coverage?.core?.acquiring))
   const economicsState = usable(readiness.sales) && usable(readiness.finance)
     ? (readiness.sales === 'ready' && readiness.finance === 'ready' ? 'ready' : 'partial')
     : (readiness.sales === 'waiting' || readiness.finance === 'waiting' ? 'waiting' : 'missing')
@@ -401,15 +404,30 @@ export function buildProduct360({
     },
     economics:{
       state:economicsState,
+      metricStates:{
+        revenue:readiness.sales,
+        sellerPayable:readiness.finance,
+        cogs:readiness.sales,
+        commission:readiness.finance,
+        logistics:readiness.finance,
+        storage:usable(readiness.finance) ? readiness.finance : storageState,
+        acceptance:usable(readiness.finance) ? readiness.finance : acceptanceState,
+        acquiring:usable(readiness.finance) ? readiness.finance : acquiringState,
+        advertising:readiness.advertising,
+        penalties:readiness.finance,
+        tax:readiness.sales,
+        fixedExpenses:readiness.sales,
+        profit:economicsState,
+      },
       revenue:salesMetric(product?.revenue),
       sellerPayable:financeMetric(product?.sellerPayable),
       unitCost:usable(readiness.sales) ? nullable(product?.unitCost) : null,
       cogs:salesMetric(product?.cogs),
       commission:financeMetric(product?.commission),
       logistics:financeMetric(product?.logistics),
-      storage:usable(readiness.finance) ? financeMetric(product?.storage) : safeMetric(product?.storage,syncReadiness(coverage?.stages?.paidStorage,Boolean(coverage?.core?.paidStorage)),{zeroUnsafe:true}),
-      acceptance:usable(readiness.finance) ? financeMetric(product?.acceptance) : safeMetric(product?.acceptance,syncReadiness(coverage?.stages?.acceptance,Boolean(coverage?.core?.acceptance)),{zeroUnsafe:true}),
-      acquiring:usable(readiness.finance) ? financeMetric(product?.acquiring) : safeMetric(product?.acquiring,syncReadiness(coverage?.stages?.acquiring,Boolean(coverage?.core?.acquiring)),{zeroUnsafe:true}),
+      storage:usable(readiness.finance) ? financeMetric(product?.storage) : safeMetric(product?.storage,storageState,{zeroUnsafe:true}),
+      acceptance:usable(readiness.finance) ? financeMetric(product?.acceptance) : safeMetric(product?.acceptance,acceptanceState,{zeroUnsafe:true}),
+      acquiring:usable(readiness.finance) ? financeMetric(product?.acquiring) : safeMetric(product?.acquiring,acquiringState,{zeroUnsafe:true}),
       penalties:financeMetric(product?.penalties),
       deductions:financeMetric(product?.deductions),
       additionalPayment:financeMetric(product?.additionalPayment),

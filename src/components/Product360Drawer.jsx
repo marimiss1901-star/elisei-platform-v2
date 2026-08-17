@@ -15,6 +15,10 @@ const tone = value => Number(value || 0) < 0 ? 'negative' : 'positive'
 
 const readinessText = state => state === 'ready' ? 'готово' : state === 'partial' ? 'частично' : state === 'waiting' ? 'ожидается' : 'нет данных'
 const readinessSuffix = state => state === 'partial' ? ' · предварительно' : ''
+const emptyMetricText = (state,{ partial='Пока нет в загруженной части', waiting='Ожидается', ready='Нет данных', missing='Нет данных' } = {}) =>
+  state === 'partial' ? partial : state === 'waiting' ? waiting : state === 'ready' ? ready : missing
+const metricText = (value,state,formatter,options) => value == null ? emptyMetricText(state,options) : formatter(value)
+const metricClass = (value,state,base='') => [base, value == null ? 'is-status' : '', state === 'partial' ? 'is-partial' : ''].filter(Boolean).join(' ')
 
 function CoveragePill({ label, state = 'missing' }) {
   const Icon = state === 'ready' ? CheckCircle2 : state === 'partial' || state === 'waiting' ? Clock3 : AlertTriangle
@@ -61,6 +65,10 @@ export default function Product360Drawer({ product, data, loading, error, period
   const financeRows = Array.isArray(economics.financeMovements) ? economics.financeMovements : []
   const penaltiesAndDeductions = economics.penalties == null && economics.deductions == null ? null : Number(economics.penalties || 0) + Number(economics.deductions || 0)
   const unansweredTotal = quality.reviewSummary?.unanswered == null && quality.questionSummary?.unanswered == null ? null : Number(quality.reviewSummary?.unanswered || 0) + Number(quality.questionSummary?.unanswered || 0)
+  const economicsState = economics.state || 'missing'
+  const metricStates = economics.metricStates || {}
+  const streamTotal = readinessSummary.total || Object.keys(readiness).length
+  const stockStateNote = `FBS ${readinessText(readiness.fbsStocks)} · FBO ${readinessText(readiness.fboStocks)}`
 
   return <div className="sku360-backdrop" onClick={onClose}>
     <aside className="sku360-drawer" onClick={event=>event.stopPropagation()}>
@@ -90,7 +98,7 @@ export default function Product360Drawer({ product, data, loading, error, period
       {!hasPayload && !error && <div className="sku360-preload"><div><RefreshCw className="spin" size={22}/><span><b>Готовлю рентген товара</b><small>Пока ответ сервера не готов, ELISEI не подставляет нули из общей карточки.</small></span></div><div className="sku360-skeleton-grid">{Array.from({length:6}).map((_,index)=><i key={index}/>)}</div></div>}
 
       {hasPayload && <>
-      <div className="sku360-readiness-banner"><span><ShieldCheck size={16}/><b>Покрытие SKU:</b> {readinessSummary.ready || 0} готово{readinessSummary.partial ? ` · ${readinessSummary.partial} частично` : ''}{readinessSummary.waiting ? ` · ${readinessSummary.waiting} ожидают` : ''}</span><small>Частичные нули скрываются до завершения потока.</small></div>
+      <div className="sku360-readiness-banner"><span><ShieldCheck size={16}/><b>Источники SKU:</b> {streamTotal} потоков · {readinessSummary.ready || 0} готово{readinessSummary.partial ? ` · ${readinessSummary.partial} частично` : ''}{readinessSummary.waiting ? ` · ${readinessSummary.waiting} ожидают` : ''}{readinessSummary.missing ? ` · ${readinessSummary.missing} без данных` : ''}</span><small>Группы ниже объединяют несколько потоков. Частичные нули скрываются до завершения потока.</small></div>
       <div className="sku360-coverage">
         <CoveragePill label="Продажи" state={readiness.sales}/>
         <CoveragePill label="Финансы" state={readiness.finance}/>
@@ -101,19 +109,32 @@ export default function Product360Drawer({ product, data, loading, error, period
       </div>
 
       <div className="sku360-kpis">
-        <div><span>Выручка</span><strong>{fmtMoney(overview.revenue)}</strong><small>{overview.sales == null ? readinessText(readiness.sales) : `${fmtNum(overview.sales)} продаж${readinessSuffix(readiness.sales)}`}</small></div>
-        <div><span>Опер. прибыль</span><strong className={overview.profit == null ? '' : tone(overview.profit)}>{fmtMoney(overview.profit)}</strong><small>{overview.margin == null ? readinessText(economics.state) : `маржа ${fmtPercent(overview.margin)}${readinessSuffix(economics.state)}`}</small></div>
-        <div><span>Возвраты</span><strong>{fmtPercent(overview.returnRate,'Не загружено')}</strong><small>{overview.returns == null ? readinessText(readiness.sales) : `${fmtNum(overview.returns)} шт.${readinessSuffix(readiness.sales)}`}</small></div>
-        <div><span>Остаток</span><strong>{overview.stock == null ? 'Не загружено' : `${fmtNum(overview.stock)} шт.`}</strong><small>{overview.stockCoverDays == null ? readinessText(readiness.stocks) : `≈ ${fmtNum(overview.stockCoverDays)} дней${readinessSuffix(readiness.stocks)}`}</small></div>
-        <div><span>Реклама</span><strong>{fmtMoney(demand.advertising?.summary?.spend ?? overview.advertising)}</strong><small>{demand.advertising?.summary?.crr == null ? readinessText(readiness.advertising) : `ДРР ${fmtPercent(demand.advertising?.summary?.crr)}${readinessSuffix(readiness.advertising)}`}</small></div>
-        <div><span>Средняя цена</span><strong>{fmtMoney(pricing.averagePrice ?? overview.averagePrice)}</strong><small>{pricing.breakevenPrice == null ? readinessText(pricing.state) : `цена в 0 ${fmtMoney(pricing.breakevenPrice)}${readinessSuffix(economics.state)}`}</small></div>
+        <div><span>Выручка</span><strong className={metricClass(overview.revenue,readiness.sales)}>{metricText(overview.revenue,readiness.sales,fmtMoney)}</strong><small>{overview.sales == null ? emptyMetricText(readiness.sales,{partial:'Продажи ещё догружаются'}) : `${fmtNum(overview.sales)} продаж${readinessSuffix(readiness.sales)}`}</small></div>
+        <div><span>Опер. прибыль</span><strong className={metricClass(overview.profit,economicsState,overview.profit == null ? '' : tone(overview.profit))}>{metricText(overview.profit,economicsState,fmtMoney)}</strong><small>{overview.margin == null ? emptyMetricText(economicsState,{partial:'Экономика предварительная'}) : `маржа ${fmtPercent(overview.margin)}${readinessSuffix(economicsState)}`}</small></div>
+        <div><span>Возвраты</span><strong className={metricClass(overview.returnRate,readiness.sales)}>{metricText(overview.returnRate,readiness.sales,value=>fmtPercent(value))}</strong><small>{overview.returns == null ? emptyMetricText(readiness.sales,{partial:'Продажи ещё догружаются'}) : `${fmtNum(overview.returns)} шт.${readinessSuffix(readiness.sales)}`}</small></div>
+        <div><span>Остаток</span><strong className={metricClass(overview.stock,readiness.stocks)}>{metricText(overview.stock,readiness.stocks,value=>`${fmtNum(value)} шт.`,{partial:'Частично'})}</strong><small>{overview.stockCoverDays == null ? stockStateNote : `≈ ${fmtNum(overview.stockCoverDays)} дней${readinessSuffix(readiness.stocks)}`}</small></div>
+        <div><span>Реклама</span><strong className={metricClass(demand.advertising?.summary?.spend ?? overview.advertising,readiness.advertising)}>{metricText(demand.advertising?.summary?.spend ?? overview.advertising,readiness.advertising,fmtMoney)}</strong><small>{demand.advertising?.summary?.crr == null ? emptyMetricText(readiness.advertising,{ready:'Подтверждено'}) : `ДРР ${fmtPercent(demand.advertising?.summary?.crr)}${readinessSuffix(readiness.advertising)}`}</small></div>
+        <div><span>Средняя цена</span><strong className={metricClass(pricing.averagePrice ?? overview.averagePrice,pricing.state)}>{metricText(pricing.averagePrice ?? overview.averagePrice,pricing.state,fmtMoney)}</strong><small>{pricing.breakevenPrice == null ? emptyMetricText(economicsState,{partial:'Цена в 0 ещё предварительная'}) : `цена в 0 ${fmtMoney(pricing.breakevenPrice)}${readinessSuffix(economicsState)}`}</small></div>
       </div>
 
       <div className="sku360-grid two">
         <Section icon={CircleDollarSign} eyebrow="Экономика" title="Куда уходят деньги">
           <div className="sku360-money-list">
-            {[['Выручка',economics.revenue,'plus'],['К перечислению',economics.sellerPayable,'plus'],['Себестоимость',economics.cogs],['Комиссия WB',economics.commission],['Логистика',economics.logistics],['Хранение',economics.storage],['Приёмка',economics.acceptance],['Эквайринг',economics.acquiring],['Реклама',economics.advertising],['Штрафы + удержания',penaltiesAndDeductions],['Налог',economics.tax],['Общие расходы',economics.fixedExpenses]].map(([label,value,kind])=><div key={label}><span>{label}</span><strong className={kind==='plus'?'positive':''}>{fmtMoney(value)}</strong></div>)}
-            <div className="total"><span>Операционная прибыль</span><strong className={economics.profit == null ? '' : tone(economics.profit)}>{fmtMoney(economics.profit)}</strong></div>
+            {[
+              ['Выручка',economics.revenue,'plus',metricStates.revenue || readiness.sales],
+              ['К перечислению',economics.sellerPayable,'plus',metricStates.sellerPayable || readiness.finance],
+              ['Себестоимость',economics.cogs,null,metricStates.cogs || readiness.sales],
+              ['Комиссия WB',economics.commission,null,metricStates.commission || readiness.finance],
+              ['Логистика',economics.logistics,null,metricStates.logistics || readiness.finance],
+              ['Хранение',economics.storage,null,metricStates.storage || readiness.finance],
+              ['Приёмка',economics.acceptance,null,metricStates.acceptance || readiness.finance],
+              ['Эквайринг',economics.acquiring,null,metricStates.acquiring || readiness.finance],
+              ['Реклама',economics.advertising,null,metricStates.advertising || readiness.advertising],
+              ['Штрафы + удержания',penaltiesAndDeductions,null,metricStates.penalties || readiness.finance],
+              ['Налог',economics.tax,null,metricStates.tax || readiness.sales],
+              ['Общие расходы',economics.fixedExpenses,null,metricStates.fixedExpenses || readiness.sales],
+            ].map(([label,value,kind,state])=><div key={label}><span>{label}</span><strong className={metricClass(value,state,kind==='plus'?'positive':'')}>{metricText(value,state,fmtMoney)}</strong></div>)}
+            <div className="total"><span>Операционная прибыль</span><strong className={metricClass(economics.profit,economicsState,economics.profit == null ? '' : tone(economics.profit))}>{metricText(economics.profit,economicsState,fmtMoney)}</strong></div>
           </div>
           {economics.modeBreakdown && <div className="sku360-mode-grid">{['FBS','FBO'].map(mode=>{const row=economics.modeBreakdown?.[mode]; return row?.active?<div key={mode}><b>{mode}</b><span>{fmtNum(row.sales)} продаж · {fmtMoney(row.revenue)}</span><strong className={row.profit == null?'':tone(row.profit)}>{fmtMoney(row.profit)}</strong></div>:null})}</div>}
         </Section>
@@ -127,36 +148,36 @@ export default function Product360Drawer({ product, data, loading, error, period
       <div className="sku360-grid two">
         <Section icon={Megaphone} eyebrow="Реклама" title="Эффективность кампаний">
           <div className="sku360-inline-metrics"><span>Расход <b>{fmtMoney(demand.advertising?.summary?.spend)}</b></span><span>Заказы <b>{fmtNum(demand.advertising?.summary?.orders)}</b></span><span>CTR <b>{fmtPercent(demand.advertising?.summary?.ctr)}</b></span><span>CPC <b>{fmtMoney(demand.advertising?.summary?.cpc)}</b></span><span>ДРР <b>{fmtPercent(demand.advertising?.summary?.crr)}</b></span></div>
-          {adRows.length ? <div className="sku360-list">{adRows.slice(0,8).map((row,index)=><div key={`${row.advertId}-${index}`}><span><strong>{row.campaignName || `Кампания ${row.advertId || ''}`}</strong><small>{fmtNum(row.orders)} заказов · {fmtPercent(row.crr)}</small></span><b>{fmtMoney(row.spend)}</b></div>)}</div> : <div className="sku360-empty">По этому товару рекламная статистика пока не подтверждена.</div>}
+          {adRows.length ? <div className="sku360-list">{adRows.slice(0,8).map((row,index)=><div key={`${row.advertId}-${index}`}><span><strong>{row.campaignName || `Кампания ${row.advertId || ''}`}</strong><small>{fmtNum(row.orders)} заказов · {fmtPercent(row.crr)}</small></span><b>{fmtMoney(row.spend)}</b></div>)}</div> : <div className="sku360-empty">{readiness.advertising === 'ready' ? 'Подтверждено: по этому SKU в выбранной выборке рекламных кампаний или расходов нет.' : readiness.advertising === 'partial' ? 'Реклама загружена частично; по этому SKU в текущей части кампаний пока нет.' : 'Рекламная статистика по товару ещё ожидается.'}</div>}
         </Section>
 
         <Section icon={Search} eyebrow="Поисковая видимость" title="Что приводит покупателей" side={streams.searchQueries?.periodExact===false?<span className="sku360-warning-chip">снимок другого периода</span>:null}>
-          {searchRows.length ? <div className="sku360-search-table"><div className="head"><span>Запрос</span><span>Позиция</span><span>Заказы</span><span>Выручка</span></div>{searchRows.slice(0,12).map(row=><div key={row.id}><span><strong>{row.phrase || 'Запрос'}</strong><small>{row.frequency!=null?`частотность ${fmtNum(row.frequency)}`:''}</small></span><b>{row.avgPosition==null?'—':fmtNum(row.avgPosition)}</b><b>{fmtNum(row.orders)}</b><b>{fmtMoney(row.revenue)}</b></div>)}</div> : <div className="sku360-empty">Фразы по этому SKU ещё не загружены или не совпадают с выбранным периодом.</div>}
+          {searchRows.length ? <div className="sku360-search-table"><div className="head"><span>Запрос</span><span>Позиция</span><span>Заказы</span><span>Выручка</span></div>{searchRows.slice(0,12).map(row=><div key={row.id}><span><strong>{row.phrase || 'Запрос'}</strong><small>{row.frequency!=null?`частотность ${fmtNum(row.frequency)}`:''}</small></span><b>{row.avgPosition==null?'—':fmtNum(row.avgPosition)}</b><b>{fmtNum(row.orders)}</b><b>{fmtMoney(row.revenue)}</b></div>)}</div> : <div className="sku360-empty">{readiness.search === 'ready' ? 'Подтверждено: поисковых фраз по этому SKU в выбранной выборке нет.' : readiness.search === 'partial' ? 'Поиск загружен частично; фразы по SKU ещё могут появиться.' : 'Поисковые данные по SKU ещё ожидаются.'}</div>}
         </Section>
       </div>
 
       <div className="sku360-grid two">
         <Section icon={Star} eyebrow="Качество" title="Отзывы, вопросы и возвраты">
           <div className="sku360-inline-metrics"><span>Отзывы <b>{fmtNum(quality.reviewSummary?.total)}</b></span><span>Рейтинг <b>{quality.reviewSummary?.averageRating==null?'—':`${Number(quality.reviewSummary.averageRating).toFixed(1)} ★`}</b></span><span>1–3 ★ <b>{fmtNum(quality.reviewSummary?.lowRated)}</b></span><span>Без ответа <b>{fmtNum(unansweredTotal)}</b></span></div>
-          {quality.lowRatedTexts?.length ? <div className="sku360-complaints">{quality.lowRatedTexts.slice(0,5).map((line,index)=><p key={index}>“{line}”</p>)}</div> : <div className="sku360-empty compact">Негативных текстов по выбранной выборке нет или отзывы ещё не загружены.</div>}
+          {quality.lowRatedTexts?.length ? <div className="sku360-complaints">{quality.lowRatedTexts.slice(0,5).map((line,index)=><p key={index}>“{line}”</p>)}</div> : <div className="sku360-empty compact">{readiness.reviews === 'ready' ? 'Подтверждено: негативных текстов 1–3 ★ в выбранной выборке нет.' : readiness.reviews === 'partial' ? 'Отзывы загружены частично; негативные тексты ещё могут появиться.' : 'Отзывы по SKU ещё ожидаются.'}</div>}
           {(reviewRows.length || questionRows.length) ? <div className="sku360-feedback-tail">{[...reviewRows.map(row=>({...row,kind:'Отзыв'})),...questionRows.map(row=>({...row,kind:'Вопрос'}))].sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||''))).slice(0,8).map((row,index)=><div key={`${row.kind}-${row.id}-${index}`}><span><b>{row.kind}{row.rating!=null?` · ${row.rating} ★`:''}</b><small>{fmtDate(row.createdAt)} · {row.answered?'ответ есть':'без ответа'}</small></span><p>{row.text || 'Текст не передан WB'}</p></div>)}</div>:null}
         </Section>
 
         <Section icon={Boxes} eyebrow="Запасы" title="Размеры, склады и история">
           <div className="sku360-inline-metrics"><span>FBS <b>{fmtNum(stock.fbsStock)}</b></span><span>FBO <b>{fmtNum(stock.fboStock)}</b></span><span>Всего <b>{overview.stock==null?'—':fmtNum(overview.stock)}</b></span></div>
-          {stockCurrent.length ? <div className="sku360-stock-table"><div className="head"><span>Размер / ШК</span><span>Склад</span><span>Остаток</span></div>{stockCurrent.slice(0,18).map((row,index)=><div key={row.key || index}><span><strong>{row.techSize || '—'}</strong><small>{row.barcode || row.nmID || '—'}</small></span><span>{row.warehouseName || '—'}</span><b>{fmtNum(row.quantity)}</b></div>)}</div> : <div className="sku360-empty compact">Текущая детализация по размерам ещё не подтверждена.</div>}
+          {stockCurrent.length ? <div className="sku360-stock-table"><div className="head"><span>Размер / ШК</span><span>Склад</span><span>Остаток</span></div>{stockCurrent.slice(0,18).map((row,index)=><div key={row.key || index}><span><strong>{row.techSize || '—'}</strong><small>{row.barcode || row.nmID || '—'}</small></span><span>{row.warehouseName || '—'}</span><b>{fmtNum(row.quantity)}</b></div>)}</div> : <div className="sku360-empty compact">{readiness.stocks === 'ready' ? 'Подтверждено: текущих остатков по SKU нет.' : readiness.stocks === 'partial' ? `Остатки загружены частично: ${stockStateNote}.` : 'Текущая детализация остатков по SKU ещё ожидается.'}</div>}
           <div className="sku360-history"><span>История остатка</span><MiniTrend rows={stock.history?.daily || []} metric="quantity"/></div>
         </Section>
       </div>
 
       <div className="sku360-grid two">
         <Section icon={Tag} eyebrow="Цена" title="Безопасный коридор">
-          <div className="sku360-price-grid"><div><span>Средняя по продажам</span><strong>{fmtMoney(pricing.averagePrice)}</strong></div><div><span>Цена в 0</span><strong>{fmtMoney(pricing.breakevenPrice)}</strong></div><div><span>Целевая</span><strong>{fmtMoney(pricing.targetPrice)}</strong></div><div><span>Пиковая</span><strong>{fmtMoney(pricing.peakPrice)}</strong></div></div>
+          <div className="sku360-price-grid"><div><span>Средняя по продажам</span><strong className={metricClass(pricing.averagePrice,pricing.state)}>{metricText(pricing.averagePrice,pricing.state,fmtMoney)}</strong></div><div><span>Цена в 0</span><strong className={metricClass(pricing.breakevenPrice,economicsState)}>{metricText(pricing.breakevenPrice,economicsState,fmtMoney)}</strong></div><div><span>Целевая</span><strong className={metricClass(pricing.targetPrice,economicsState)}>{metricText(pricing.targetPrice,economicsState,fmtMoney)}</strong></div><div><span>Пиковая</span><strong className={metricClass(pricing.peakPrice,economicsState)}>{metricText(pricing.peakPrice,economicsState,fmtMoney)}</strong></div></div>
           <p className="sku360-note">{pricing.note || 'Live-цена WB пока не подключена отдельным потоком и не подменяется средней ценой.'}</p>
         </Section>
 
         <Section icon={ShieldCheck} eyebrow="Финансовый след" title="Последние операции WB">
-          {financeRows.length ? <div className="sku360-finance-list">{financeRows.slice(0,12).map((row,index)=><div key={`${row.operationDate}-${row.operationCode}-${index}`}><span><strong>{row.operationName || row.operationCode || 'Операция WB'}</strong><small>{fmtDate(row.operationDate)} · {row.fulfillmentMode || '—'}</small></span><b className={Number(row.amount||0)<0?'negative':'positive'}>{fmtMoney(row.amount)}</b></div>)}</div> : <div className="sku360-empty">Финансовые операции по товару ещё не найдены в загруженной части реестра.</div>}
+          {financeRows.length ? <div className="sku360-finance-list">{financeRows.slice(0,12).map((row,index)=><div key={`${row.operationDate}-${row.operationCode}-${index}`}><span><strong>{row.operationName || row.operationCode || 'Операция WB'}</strong><small>{fmtDate(row.operationDate)} · {row.fulfillmentMode || '—'}</small></span><b className={Number(row.amount||0)<0?'negative':'positive'}>{fmtMoney(row.amount)}</b></div>)}</div> : <div className="sku360-empty">{readiness.finance === 'partial' ? 'Финансы загружены частично: в текущей части реестра операций по этому SKU пока нет.' : readiness.finance === 'ready' ? 'Подтверждено: финансовых операций по SKU в выбранном периоде нет.' : 'Финансовый реестр по SKU ещё ожидается.'}</div>}
         </Section>
       </div>
 
