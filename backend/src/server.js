@@ -760,7 +760,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.23.0 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.23.1 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -5154,7 +5154,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.23.0',
+    version: '2.23.1',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -6069,6 +6069,17 @@ app.get('/api/wb/product-360/:id', authRequired, async (req, res) => {
         core:core?.availability || {},
         streams:streamCoverage,
         finance:stateMap.finance || null,
+        stages:{
+          orders:stateMap.orders || null,
+          sales:stateMap.sales || null,
+          stocks:stateMap.stocks || null,
+          sellerStocks:stateMap.sellerStocks || null,
+          advertising:stateMap.advertising || null,
+          finance:stateMap.finance || null,
+          paidStorage:stateMap.paidStorage || null,
+          acceptance:stateMap.acceptance || null,
+          acquiring:stateMap.acquiring || null,
+        },
       },
       sources:{
         core:sources,

@@ -5,7 +5,7 @@ import {
 
 const fmtMoney = value => value == null ? 'Не загружено' : `${new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))} ₽`
 const fmtNum = value => value == null ? 'Не загружено' : new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))
-const fmtPercent = value => value == null ? '—' : `${new Intl.NumberFormat('ru-RU',{maximumFractionDigits:1}).format(Number(value || 0))}%`
+const fmtPercent = (value,missing='—') => value == null ? missing : `${new Intl.NumberFormat('ru-RU',{maximumFractionDigits:1}).format(Number(value || 0))}%`
 const fmtDate = value => {
   if (!value) return '—'
   const date = new Date(String(value).length === 10 ? `${value}T00:00:00` : value)
@@ -13,11 +13,13 @@ const fmtDate = value => {
 }
 const tone = value => Number(value || 0) < 0 ? 'negative' : 'positive'
 
-function CoveragePill({ label, value }) {
-  const ready = value?.lastSuccessAt || value?.rows > 0 || value?.status === 'success'
-  const waiting = ['queued','pending','rate_limited','running','retry_scheduled'].includes(String(value?.status || ''))
-  return <span className={`sku360-coverage-pill ${ready ? 'ready' : waiting ? 'waiting' : 'muted'}`}>
-    {ready ? <CheckCircle2 size={13}/> : waiting ? <Clock3 size={13}/> : <AlertTriangle size={13}/>} {label}
+const readinessText = state => state === 'ready' ? 'готово' : state === 'partial' ? 'частично' : state === 'waiting' ? 'ожидается' : 'нет данных'
+const readinessSuffix = state => state === 'partial' ? ' · предварительно' : ''
+
+function CoveragePill({ label, state = 'missing' }) {
+  const Icon = state === 'ready' ? CheckCircle2 : state === 'partial' || state === 'waiting' ? Clock3 : AlertTriangle
+  return <span className={`sku360-coverage-pill ${state}`} title={`${label}: ${readinessText(state)}`}>
+    <Icon size={13}/> {label}<small>{readinessText(state)}</small>
   </span>
 }
 
@@ -38,15 +40,18 @@ function Section({ icon:Icon, eyebrow, title, children, side }) {
 }
 
 export default function Product360Drawer({ product, data, loading, error, period, onClose }) {
+  const hasPayload = Boolean(data)
   const view = data || {}
   const item = view.product || product || {}
-  const overview = view.overview || item
-  const economics = view.economics || item
+  const overview = view.overview || {}
+  const economics = view.economics || {}
   const demand = view.demand || {daily:[],advertising:{rows:[],summary:{}},search:{rows:[],summary:{}}}
   const quality = view.quality || {reviews:[],questions:[],reviewSummary:{},questionSummary:{},lowRatedTexts:[]}
   const stock = view.stock || {current:[],history:{daily:[],latest:[]}}
   const pricing = view.pricing || {}
+  const readiness = view.readiness || {}
   const streams = view.coverage?.streams || {}
+  const readinessSummary = view.readinessSummary || {}
   const primarySignal = view.signals?.[0]
   const stockCurrent = Array.isArray(stock.current) ? stock.current : []
   const searchRows = Array.isArray(demand.search?.rows) ? demand.search.rows : []
@@ -54,6 +59,8 @@ export default function Product360Drawer({ product, data, loading, error, period
   const reviewRows = Array.isArray(quality.reviews) ? quality.reviews : []
   const questionRows = Array.isArray(quality.questions) ? quality.questions : []
   const financeRows = Array.isArray(economics.financeMovements) ? economics.financeMovements : []
+  const penaltiesAndDeductions = economics.penalties == null && economics.deductions == null ? null : Number(economics.penalties || 0) + Number(economics.deductions || 0)
+  const unansweredTotal = quality.reviewSummary?.unanswered == null && quality.questionSummary?.unanswered == null ? null : Number(quality.reviewSummary?.unanswered || 0) + Number(quality.questionSummary?.unanswered || 0)
 
   return <div className="sku360-backdrop" onClick={onClose}>
     <aside className="sku360-drawer" onClick={event=>event.stopPropagation()}>
@@ -72,36 +79,40 @@ export default function Product360Drawer({ product, data, loading, error, period
         </div>
         <div className="sku360-health">
           <span>Главный сигнал</span>
-          <strong>{primarySignal?.title || item.recommendation || 'Проверяю данные'}</strong>
-          <small>{primarySignal?.text || (loading ? 'Собираю все потоки по этому SKU…' : 'Критичных отклонений не найдено.')}</small>
+          <strong>{hasPayload ? (primarySignal?.title || 'Проверяю подтверждённые данные') : 'Собираю SKU 360'}</strong>
+          <small>{hasPayload ? (primarySignal?.text || 'ELISEI использует только подтверждённые потоки.') : 'Сначала проверю доступность потоков. Нулевые значения до подтверждения не показываю.'}</small>
         </div>
       </header>
 
-      {loading && <div className="sku360-loading"><RefreshCw className="spin" size={19}/> Собираю продажи, финансы, рекламу, поиск, отзывы и остатки по одному товару…</div>}
+      {loading && !hasPayload && <div className="sku360-loading"><RefreshCw className="spin" size={19}/> Собираю продажи, финансы, рекламу, поиск, отзывы и остатки по одному товару…</div>}
       {error && <div className="sku360-alert danger"><AlertTriangle size={18}/><div><strong>Не удалось собрать SKU 360</strong><span>{error}</span></div></div>}
 
+      {!hasPayload && !error && <div className="sku360-preload"><div><RefreshCw className="spin" size={22}/><span><b>Готовлю рентген товара</b><small>Пока ответ сервера не готов, ELISEI не подставляет нули из общей карточки.</small></span></div><div className="sku360-skeleton-grid">{Array.from({length:6}).map((_,index)=><i key={index}/>)}</div></div>}
+
+      {hasPayload && <>
+      <div className="sku360-readiness-banner"><span><ShieldCheck size={16}/><b>Покрытие SKU:</b> {readinessSummary.ready || 0} готово{readinessSummary.partial ? ` · ${readinessSummary.partial} частично` : ''}{readinessSummary.waiting ? ` · ${readinessSummary.waiting} ожидают` : ''}</span><small>Частичные нули скрываются до завершения потока.</small></div>
       <div className="sku360-coverage">
-        <CoveragePill label="Продажи" value={{lastSuccessAt:view.coverage?.core?.sales ? 'ready' : null}}/>
-        <CoveragePill label="Финансы" value={view.coverage?.finance}/>
-        <CoveragePill label="Поиск" value={streams.searchQueries}/>
-        <CoveragePill label="Отзывы" value={streams.reviews}/>
-        <CoveragePill label="Вопросы" value={streams.questions}/>
-        <CoveragePill label="История остатков" value={streams.stockHistory}/>
+        <CoveragePill label="Продажи" state={readiness.sales}/>
+        <CoveragePill label="Финансы" state={readiness.finance}/>
+        <CoveragePill label="Реклама" state={readiness.advertising}/>
+        <CoveragePill label="Поиск" state={readiness.search}/>
+        <CoveragePill label="Отзывы" state={readiness.reviews}/>
+        <CoveragePill label="Остатки" state={readiness.stocks}/>
       </div>
 
       <div className="sku360-kpis">
-        <div><span>Выручка</span><strong>{fmtMoney(overview.revenue)}</strong><small>{fmtNum(overview.sales)} продаж</small></div>
-        <div><span>Опер. прибыль</span><strong className={overview.profit == null ? '' : tone(overview.profit)}>{fmtMoney(overview.profit)}</strong><small>маржа {fmtPercent(overview.margin)}</small></div>
-        <div><span>Возвраты</span><strong>{fmtPercent(overview.returnRate)}</strong><small>{fmtNum(overview.returns)} шт.</small></div>
-        <div><span>Остаток</span><strong>{overview.stock == null ? 'Не загружено' : `${fmtNum(overview.stock)} шт.`}</strong><small>{overview.stockCoverDays == null ? 'дни запаса —' : `≈ ${fmtNum(overview.stockCoverDays)} дней`}</small></div>
-        <div><span>Реклама</span><strong>{fmtMoney(demand.advertising?.summary?.spend ?? overview.advertising)}</strong><small>ДРР {fmtPercent(demand.advertising?.summary?.crr)}</small></div>
-        <div><span>Средняя цена</span><strong>{fmtMoney(pricing.averagePrice ?? overview.averagePrice)}</strong><small>цена в 0 {fmtMoney(pricing.breakevenPrice)}</small></div>
+        <div><span>Выручка</span><strong>{fmtMoney(overview.revenue)}</strong><small>{overview.sales == null ? readinessText(readiness.sales) : `${fmtNum(overview.sales)} продаж${readinessSuffix(readiness.sales)}`}</small></div>
+        <div><span>Опер. прибыль</span><strong className={overview.profit == null ? '' : tone(overview.profit)}>{fmtMoney(overview.profit)}</strong><small>{overview.margin == null ? readinessText(economics.state) : `маржа ${fmtPercent(overview.margin)}${readinessSuffix(economics.state)}`}</small></div>
+        <div><span>Возвраты</span><strong>{fmtPercent(overview.returnRate,'Не загружено')}</strong><small>{overview.returns == null ? readinessText(readiness.sales) : `${fmtNum(overview.returns)} шт.${readinessSuffix(readiness.sales)}`}</small></div>
+        <div><span>Остаток</span><strong>{overview.stock == null ? 'Не загружено' : `${fmtNum(overview.stock)} шт.`}</strong><small>{overview.stockCoverDays == null ? readinessText(readiness.stocks) : `≈ ${fmtNum(overview.stockCoverDays)} дней${readinessSuffix(readiness.stocks)}`}</small></div>
+        <div><span>Реклама</span><strong>{fmtMoney(demand.advertising?.summary?.spend ?? overview.advertising)}</strong><small>{demand.advertising?.summary?.crr == null ? readinessText(readiness.advertising) : `ДРР ${fmtPercent(demand.advertising?.summary?.crr)}${readinessSuffix(readiness.advertising)}`}</small></div>
+        <div><span>Средняя цена</span><strong>{fmtMoney(pricing.averagePrice ?? overview.averagePrice)}</strong><small>{pricing.breakevenPrice == null ? readinessText(pricing.state) : `цена в 0 ${fmtMoney(pricing.breakevenPrice)}${readinessSuffix(economics.state)}`}</small></div>
       </div>
 
       <div className="sku360-grid two">
         <Section icon={CircleDollarSign} eyebrow="Экономика" title="Куда уходят деньги">
           <div className="sku360-money-list">
-            {[['Выручка',economics.revenue,'plus'],['К перечислению',economics.sellerPayable,'plus'],['Себестоимость',economics.cogs],['Комиссия WB',economics.commission],['Логистика',economics.logistics],['Хранение',economics.storage],['Приёмка',economics.acceptance],['Эквайринг',economics.acquiring],['Реклама',economics.advertising],['Штрафы + удержания',Number(economics.penalties||0)+Number(economics.deductions||0)],['Налог',economics.tax],['Общие расходы',economics.fixedExpenses]].map(([label,value,kind])=><div key={label}><span>{label}</span><strong className={kind==='plus'?'positive':''}>{fmtMoney(value)}</strong></div>)}
+            {[['Выручка',economics.revenue,'plus'],['К перечислению',economics.sellerPayable,'plus'],['Себестоимость',economics.cogs],['Комиссия WB',economics.commission],['Логистика',economics.logistics],['Хранение',economics.storage],['Приёмка',economics.acceptance],['Эквайринг',economics.acquiring],['Реклама',economics.advertising],['Штрафы + удержания',penaltiesAndDeductions],['Налог',economics.tax],['Общие расходы',economics.fixedExpenses]].map(([label,value,kind])=><div key={label}><span>{label}</span><strong className={kind==='plus'?'positive':''}>{fmtMoney(value)}</strong></div>)}
             <div className="total"><span>Операционная прибыль</span><strong className={economics.profit == null ? '' : tone(economics.profit)}>{fmtMoney(economics.profit)}</strong></div>
           </div>
           {economics.modeBreakdown && <div className="sku360-mode-grid">{['FBS','FBO'].map(mode=>{const row=economics.modeBreakdown?.[mode]; return row?.active?<div key={mode}><b>{mode}</b><span>{fmtNum(row.sales)} продаж · {fmtMoney(row.revenue)}</span><strong className={row.profit == null?'':tone(row.profit)}>{fmtMoney(row.profit)}</strong></div>:null})}</div>}
@@ -126,7 +137,7 @@ export default function Product360Drawer({ product, data, loading, error, period
 
       <div className="sku360-grid two">
         <Section icon={Star} eyebrow="Качество" title="Отзывы, вопросы и возвраты">
-          <div className="sku360-inline-metrics"><span>Отзывы <b>{fmtNum(quality.reviewSummary?.total)}</b></span><span>Рейтинг <b>{quality.reviewSummary?.averageRating==null?'—':`${Number(quality.reviewSummary.averageRating).toFixed(1)} ★`}</b></span><span>1–3 ★ <b>{fmtNum(quality.reviewSummary?.lowRated)}</b></span><span>Без ответа <b>{fmtNum(Number(quality.reviewSummary?.unanswered||0)+Number(quality.questionSummary?.unanswered||0))}</b></span></div>
+          <div className="sku360-inline-metrics"><span>Отзывы <b>{fmtNum(quality.reviewSummary?.total)}</b></span><span>Рейтинг <b>{quality.reviewSummary?.averageRating==null?'—':`${Number(quality.reviewSummary.averageRating).toFixed(1)} ★`}</b></span><span>1–3 ★ <b>{fmtNum(quality.reviewSummary?.lowRated)}</b></span><span>Без ответа <b>{fmtNum(unansweredTotal)}</b></span></div>
           {quality.lowRatedTexts?.length ? <div className="sku360-complaints">{quality.lowRatedTexts.slice(0,5).map((line,index)=><p key={index}>“{line}”</p>)}</div> : <div className="sku360-empty compact">Негативных текстов по выбранной выборке нет или отзывы ещё не загружены.</div>}
           {(reviewRows.length || questionRows.length) ? <div className="sku360-feedback-tail">{[...reviewRows.map(row=>({...row,kind:'Отзыв'})),...questionRows.map(row=>({...row,kind:'Вопрос'}))].sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||''))).slice(0,8).map((row,index)=><div key={`${row.kind}-${row.id}-${index}`}><span><b>{row.kind}{row.rating!=null?` · ${row.rating} ★`:''}</b><small>{fmtDate(row.createdAt)} · {row.answered?'ответ есть':'без ответа'}</small></span><p>{row.text || 'Текст не передан WB'}</p></div>)}</div>:null}
         </Section>
@@ -150,9 +161,10 @@ export default function Product360Drawer({ product, data, loading, error, period
       </div>
 
       <section className="sku360-decision">
-        <div><Sparkles size={20}/><span><b>Что делать первым</b><strong>{primarySignal?.title || item.recommendation || 'Контролировать динамику'}</strong><p>{primarySignal?.text || 'ELISEI не видит критичного отклонения в подтверждённых данных.'}</p></span></div>
+        <div><Sparkles size={20}/><span><b>Что делать первым</b><strong>{primarySignal?.title || 'Дождаться подтверждения данных'}</strong><p>{primarySignal?.text || 'ELISEI не делает выводов по неподтверждённым значениям.'}</p></span></div>
         <small>{view.matchingPolicy || 'SKU сопоставляется только по подтверждённым идентификаторам.'}</small>
       </section>
+      </>}
     </aside>
   </div>
 }

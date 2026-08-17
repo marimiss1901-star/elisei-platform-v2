@@ -1,0 +1,11 @@
+ELISEI 5.11.1 / backend 2.23.1 / El Core 5.11.1
+
+SKU 360 DATA CONFIDENCE HOTFIX
+- no false zero metrics while product-360 request is loading
+- ready/partial/waiting/missing readiness per product data domain
+- partial zero is hidden until the source stream is complete
+- partial non-zero values remain available as preliminary data
+- separate FBS/FBO stock readiness
+- no "no critical problems" conclusion when source coverage is incomplete
+- automatic SKU 360 refresh after background sync state changes
+- strict SKU matching policy from 5.11.0 preserved

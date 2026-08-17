@@ -1,8 +1,7 @@
 README.md
-README_5_11_0.md
-RELEASE_NOTES_V5_11_0.txt
+README_5_11_1.md
+RELEASE_NOTES_V5_11_1.txt
 package.json
-src/lib/api.js
 src/pages/DashboardPage.jsx
 src/components/Product360Drawer.jsx
 src/styles/app.css
@@ -16,3 +15,4 @@ backend/tests/wb-finance-throttle-5102.test.mjs
 backend/tests/wb-live-sync-590.test.mjs
 backend/tests/wb-smart-scheduler-5105.test.mjs
 backend/tests/wb-product-360-5110.test.mjs
+backend/tests/wb-product-360-readiness-5111.test.mjs

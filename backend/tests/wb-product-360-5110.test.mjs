@@ -48,6 +48,12 @@ const result=buildProduct360({
   stockDetails:[{nmID:111,techSize:'M',barcode:'460001',warehouseName:'Коледино',quantity:8},{nmID:222,quantity:999}],
   financeMovements:[{nmId:111,operationDate:'2026-08-17',operationName:'Логистика',amount:-100}],
   period:{from:'2026-08-11',to:'2026-08-17',days:7},
+  coverage:{
+    core:{sales:true,orders:true,finance:true,advertising:true,stockDetails:true,fboStocks:true,sellerStocks:true},
+    stages:{sales:{status:'success'},orders:{status:'success'},finance:{status:'success'},advertising:{status:'success'},stocks:{status:'success'},sellerStocks:{status:'success'}},
+    streams:{searchQueries:{status:'success'},reviews:{status:'success'},questions:{status:'success'},stockHistory:{status:'success'}},
+    finance:{status:'success'},
+  },
 })
 
 assert.equal(result.demand.advertising.rows.length,1)

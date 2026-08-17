@@ -432,6 +432,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [product360Data, setProduct360Data] = useState(null)
   const [product360Loading, setProduct360Loading] = useState(false)
   const [product360Error, setProduct360Error] = useState('')
+  const product360RequestKeyRef = useRef('')
   const [importResult, setImportResult] = useState(null)
   const connectionRef = useRef(emptyConnection)
   const syncRevisionRef = useRef('')
@@ -701,16 +702,22 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     loadConnectionData(connection.connectionId).catch(() => {})
   }, [active, connection.connected, connection.connectionId])
 
+  const product360SyncRevision = syncDataRevision(connection)
+
   useEffect(() => {
     const selector = selectedProduct ? String(selectedProduct.key || selectedProduct.nmID || selectedProduct.vendorCode || selectedProduct.barcode || '') : ''
     if (!selector || !connection.connected || !connection.connectionId) {
+      product360RequestKeyRef.current = ''
       setProduct360Data(null)
       setProduct360Error('')
       setProduct360Loading(false)
       return undefined
     }
     let cancelled = false
-    setProduct360Data(null)
+    const requestKey = `${connection.connectionId}|${selector}|${analyticsPeriod.from || ''}|${analyticsPeriod.to || ''}`
+    const isNewSelection = product360RequestKeyRef.current !== requestKey
+    product360RequestKeyRef.current = requestKey
+    if (isNewSelection) setProduct360Data(null)
     setProduct360Error('')
     setProduct360Loading(true)
     wbApi.product360(connection.connectionId,selector,{ from:analyticsPeriod.from,to:analyticsPeriod.to })
@@ -718,7 +725,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       .catch(error => { if (!cancelled) setProduct360Error(error.message || 'Не удалось собрать SKU 360') })
       .finally(() => { if (!cancelled) setProduct360Loading(false) })
     return () => { cancelled = true }
-  }, [connection.connected,connection.connectionId,selectedProduct?.key,selectedProduct?.nmID,selectedProduct?.vendorCode,analyticsPeriod.from,analyticsPeriod.to])
+  }, [connection.connected,connection.connectionId,selectedProduct?.key,selectedProduct?.nmID,selectedProduct?.vendorCode,analyticsPeriod.from,analyticsPeriod.to,product360SyncRevision])
 
 
   useEffect(() => {
