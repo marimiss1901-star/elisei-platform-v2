@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildProduct360 } from '../src/wb/product-360.js'
+import { buildProduct360, SEARCH_BINDING_VERSION } from '../src/wb/product-360.js'
 
 const here=path.dirname(fileURLToPath(import.meta.url))
 const backendRoot=path.resolve(here,'..')
@@ -29,8 +29,8 @@ const view=buildProduct360({
   ],
   searchRows:[
     {rowType:'group',nmID:111,searchText:'зубная паста детская',orders:100,revenue:99999},
-    {rowType:'query',nmID:111,searchText:'сетевой фильтр 3м',orders:4,revenue:8000,avgPosition:8},
-    {rowType:'query',nmID:222,searchText:'коврик для мышки игровой',orders:50,revenue:50000},
+    {rowType:'query',nmID:111,sourceNmID:111,searchBindingVersion:SEARCH_BINDING_VERSION,searchOrigin:'organic_product_search_texts',searchText:'сетевой фильтр 3м',orders:4,revenue:8000,avgPosition:8},
+    {rowType:'query',nmID:222,sourceNmID:222,searchBindingVersion:SEARCH_BINDING_VERSION,searchOrigin:'organic_product_search_texts',searchText:'коврик для мышки игровой',orders:50,revenue:50000},
   ],
 })
 assert.equal(view.demand.search.rows.length,1,'overview/group search rows must never appear in a single SKU')

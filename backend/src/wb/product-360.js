@@ -4,6 +4,8 @@ const finite = value => Number.isFinite(Number(value)) ? Number(value) : 0
 const nullable = value => Number.isFinite(Number(value)) ? Number(value) : null
 const text = value => String(value ?? '').normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g,'').trim()
 const WAITING_STATUSES = new Set(['queued','pending','rate_limited','running','retry_scheduled'])
+export const SEARCH_BINDING_VERSION = 3
+const SEARCH_ORIGIN = 'organic_product_search_texts'
 
 function syncReadiness(state = null, coreAvailable = false) {
   const status = String(state?.status || '').toLowerCase()
@@ -131,7 +133,7 @@ export function bindWbSearchRowsToNmId(sourceRows = [], requestedNmIds = []) {
     const explicit = product360Identities(row).nmIDs[0] || cleanNumericId(parentNmID)
     if (!explicit) { droppedUnbound += 1; return }
     if (requested.size && !requested.has(explicit)) { droppedOutsideRequest += 1; return }
-    rows.push({ ...row, nmId:explicit, sourceNmID:explicit, rowType:'query' })
+    rows.push({ ...row, nmId:explicit, sourceNmID:explicit, rowType:'query', searchBindingVersion:SEARCH_BINDING_VERSION, searchOrigin:SEARCH_ORIGIN, isSubstitutedSKU:false })
   }
 
   for (const source of Array.isArray(sourceRows) ? sourceRows : []) {
@@ -148,6 +150,20 @@ export function bindWbSearchRowsToNmId(sourceRows = [], requestedNmIds = []) {
     pushBound(source, parentNmID)
   }
   return { rows, droppedUnbound, droppedOutsideRequest }
+}
+
+
+export function trustedWbSearchRowForProduct(row = {}, product = {}) {
+  if (String(row?.rowType || '').toLowerCase() !== 'query') return false
+  if (isSubstitutedSearch(row)) return false
+  if (Number(row?.searchBindingVersion || 0) < SEARCH_BINDING_VERSION) return false
+  if (String(row?.searchOrigin || '') !== SEARCH_ORIGIN) return false
+  const sourceNmID = cleanNumericId(row?.sourceNmID)
+  if (!sourceNmID) return false
+  const wanted = product360Identities(product).nmIDs.map(cleanNumericId).filter(Boolean)
+  if (!wanted.includes(sourceNmID)) return false
+  const actual = product360Identities(row).nmIDs.map(cleanNumericId).filter(Boolean)
+  return actual.includes(sourceNmID)
 }
 
 export function findProduct360Product(products = [], selector = '') {
@@ -345,12 +361,7 @@ export function buildProduct360({
   const searches = searchRows
     // Organic SKU search visibility: exact nmID only. WB substitute-SKU placements can be
     // semantically unrelated (the item may be injected into another query), so they are excluded.
-    .filter(row=>{
-      const match = product360Matches(row,product)
-      return String(row?.rowType || '').toLowerCase() === 'query' &&
-        !isSubstitutedSearch(row) &&
-        match.matched && match.method === 'nmID'
-    })
+    .filter(row=>trustedWbSearchRowForProduct(row,product))
     .map(normalizeSearch)
     .filter(row=>row.phrase)
     .sort((a,b)=>finite(b.orders)-finite(a.orders) || finite(b.revenue)-finite(a.revenue) || finite(b.frequency)-finite(a.frequency))

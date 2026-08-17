@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildProduct360, findProduct360Product, product360Matches } from '../src/wb/product-360.js'
+import { buildProduct360, findProduct360Product, product360Matches, SEARCH_BINDING_VERSION } from '../src/wb/product-360.js'
 
 const __dirname=path.dirname(fileURLToPath(import.meta.url))
 const backendRoot=path.resolve(__dirname,'..')
@@ -31,8 +31,8 @@ const result=buildProduct360({
     {nmID:222,advertId:2,campaignName:'B',spend:99999,views:1,clicks:1,orders:0,revenue:0},
   ],
   searchRows:[
-    {rowType:'query',nmID:111,searchText:'красная футболка',avgPosition:12,orders:4,orderSum:5000,frequency:1000},
-    {rowType:'query',nmID:222,searchText:'другая карточка',avgPosition:1,orders:99,orderSum:99999},
+    {rowType:'query',nmID:111,sourceNmID:111,searchBindingVersion:SEARCH_BINDING_VERSION,searchOrigin:'organic_product_search_texts',searchText:'красная футболка',avgPosition:12,orders:4,orderSum:5000,frequency:1000},
+    {rowType:'query',nmID:222,sourceNmID:222,searchBindingVersion:SEARCH_BINDING_VERSION,searchOrigin:'organic_product_search_texts',searchText:'другая карточка',avgPosition:1,orders:99,orderSum:99999},
   ],
   reviewRows:[
     {productDetails:{nmId:111,supplierArticle:'RED-1'},productValuation:2,text:'маломерит',isAnswered:false,createdDate:'2026-08-17'},

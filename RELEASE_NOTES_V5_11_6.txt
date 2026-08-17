@@ -1,0 +1,6 @@
+ELISEI 5.11.6 — Search Provenance Trust
+Frontend 5.11.6
+Backend 2.23.6
+El Core 5.11.6
+
+Legacy search rows without provable provenance are hidden from SKU 360. Search Queries are automatically re-queued after deployment and rebuilt with an explicit sourceNmID, binding schema version and product-search origin. SKU 360 accepts only verified rows from the product search-text endpoint.

@@ -373,3 +373,10 @@ npm run build
 - SKU 360 не использует vendorCode/barcode/chrtID как fallback для поисковых фраз.
 
 Версии: frontend **5.11.5**, backend **2.23.5**, El Core **5.11.5**.
+
+## ELISEI 5.11.6 — Search Provenance Trust
+
+SKU 360 больше не показывает исторические поисковые строки без доказанного происхождения. Старые записи без `sourceNmID`, `searchBindingVersion` и `searchOrigin` считаются недоверенными и скрываются. После обновления ELISEI автоматически ставит поток поисковых запросов на перепроверку; новая синхронизация сохраняет только product-level search texts с точной привязкой к nmID.
+
+Версии: frontend **5.11.6**, backend **2.23.6**, El Core **5.11.6**.
+

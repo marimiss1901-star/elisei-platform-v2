@@ -45,7 +45,7 @@ import {
   LIVE_SYNC_STAGES, defaultLiveSyncSettings, normalizeLiveSyncSettings, dueLiveStages, eventStages, safeEqualSecret, publicLiveSyncStatus,
 } from './wb/live-sync.js'
 import { buildDataQualityReport } from './wb/data-quality.js'
-import { buildProduct360, findProduct360Product, product360Matches, product360Identities, bindWbSearchRowsToNmId } from './wb/product-360.js'
+import { buildProduct360, findProduct360Product, product360Matches, product360Identities, bindWbSearchRowsToNmId, trustedWbSearchRowForProduct, SEARCH_BINDING_VERSION } from './wb/product-360.js'
 import {
   stagePriority, schedulerGroup, chooseCycleWinners, initialStageSchedule, schedulerVisualState,
 } from './wb/smart-scheduler.js'
@@ -214,6 +214,47 @@ async function recoverLegacyFinanceCooldowns({ connectionId = null } = {}) {
   // запросами детализации — 12 часов. Настоящие queued/rate_limited состояния
   // сохраняем и никогда не сбрасываем искусственно.
   return []
+}
+
+
+async function recoverLegacySearchQueryBindings({ connectionId = null } = {}) {
+  if (!pool) return []
+  const params = [String(SEARCH_BINDING_VERSION)]
+  let connectionFilter = ''
+  if (connectionId) {
+    params.push(connectionId)
+    connectionFilter = ` AND connection_id=$${params.length}`
+  }
+  const result = await pool.query(`
+    UPDATE wb_sync_states
+    SET status=CASE
+          WHEN status='rate_limited' AND next_allowed_at IS NOT NULL AND next_allowed_at > NOW() THEN 'rate_limited'
+          ELSE 'queued'
+        END,
+        next_allowed_at=CASE
+          WHEN status='rate_limited' AND next_allowed_at IS NOT NULL AND next_allowed_at > NOW() THEN next_allowed_at
+          ELSE NOW()
+        END,
+        task_id=NULL,
+        last_error='ELISEI перепроверяет поисковые фразы по строгой привязке nmID. Старые непроверенные строки скрыты.',
+        metadata=(COALESCE(metadata,'{}'::jsonb)
+          - 'syncId' - 'offset' - 'pageNumber' - 'productOffset' - 'persistedCount' - 'summary' - 'binding')
+          || jsonb_build_object(
+            'phase','overview',
+            'searchBindingVersion',$1::int,
+            'searchBindingMigration',true,
+            'searchBindingMigratedAt',NOW()
+          ),
+        updated_at=NOW()
+    WHERE stage='searchQueries'
+      AND COALESCE(metadata->>'searchBindingVersion','') <> $1::text
+      ${connectionFilter}
+    RETURNING connection_id,stage,status,next_allowed_at
+  `,params)
+  if (result.rows.length) {
+    console.warn(`Search binding migration queued ${result.rows.length} stage(s) for verified nmID refresh.`)
+  }
+  return result.rows
 }
 
 
@@ -474,6 +515,7 @@ async function initDatabase() {
   // 5.10.3: миграция старого длинного finance next_allowed_at выполняется
   // сразу при старте backend, ещё до первого открытия пользователем страницы.
   await recoverLegacyFinanceCooldowns()
+  await recoverLegacySearchQueryBindings()
 }
 
 function requireBackendConfig() {
@@ -760,7 +802,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.23.5 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.23.6 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -4216,7 +4258,7 @@ async function advanceSearchQueriesTask(connectionId, token, state, data, { dead
         currentPeriod:{start:period.dateFrom,end:period.dateTo},
         positionCluster:'all',
         orderBy:{field:'orders',mode:'desc'},
-        includeSubstitutedSKUs:true,
+        includeSubstitutedSKUs:false,
         includeSearchTexts:true,
         limit:1000,
         offset,
@@ -4237,16 +4279,16 @@ async function advanceSearchQueriesTask(connectionId, token, state, data, { dead
       currency:payload?.data?.currency || payload?.currency || null,
     }
     if (rows.length >= 1000) {
-      return {pending:true,nextAllowedAt:new Date(Date.now()+streamCooldownMs('searchQueries',tokenInfo)).toISOString(),metadata:{period,syncId,phase,offset:offset+rows.length,pageNumber:pageNumber+1,persistedCount,summary:nextSummary}}
+      return {pending:true,nextAllowedAt:new Date(Date.now()+streamCooldownMs('searchQueries',tokenInfo)).toISOString(),metadata:{period,syncId,phase,offset:offset+rows.length,pageNumber:pageNumber+1,persistedCount,summary:nextSummary,searchBindingVersion:SEARCH_BINDING_VERSION}}
     }
-    return {pending:true,nextAllowedAt:new Date(Date.now()+streamCooldownMs('searchQueries',tokenInfo)).toISOString(),metadata:{period,detailPeriod,syncId,phase:'products',offset:0,pageNumber:pageNumber+1,productOffset:0,persistedCount,summary:nextSummary}}
+    return {pending:true,nextAllowedAt:new Date(Date.now()+streamCooldownMs('searchQueries',tokenInfo)).toISOString(),metadata:{period,detailPeriod,syncId,phase:'products',offset:0,pageNumber:pageNumber+1,productOffset:0,persistedCount,summary:nextSummary,searchBindingVersion:SEARCH_BINDING_VERSION}}
   }
 
   const nmIds = [...new Set((Array.isArray(data?.products) ? data.products : []).flatMap(productNmIds).map(Number).filter(Number.isFinite))]
   const productOffset = Math.max(0,Number(state?.metadata?.productOffset || 0))
   if (!nmIds.length || productOffset >= nmIds.length) {
-    const value = await compactPersistedObjectStream(connectionId,'searchQueries',syncId,{period,extra:{summary,detailPeriod,productsScanned:nmIds.length,complete:true}})
-    return {pending:false,value,validation:{period,detailPeriod,totalRows:value.totalRows,productsScanned:nmIds.length,pages:pageNumber,memorySafe:true},endpoint:'https://seller-analytics-api.wildberries.ru/api/v2/search-report/report + /product/search-texts'}
+    const value = await compactPersistedObjectStream(connectionId,'searchQueries',syncId,{period,extra:{summary,detailPeriod,productsScanned:nmIds.length,complete:true,searchBindingVersion:SEARCH_BINDING_VERSION,searchBindingVerified:true}})
+    return {pending:false,value,validation:{period,detailPeriod,totalRows:value.totalRows,productsScanned:nmIds.length,pages:pageNumber,memorySafe:true,searchBindingVersion:SEARCH_BINDING_VERSION,searchBindingVerified:true},endpoint:'https://seller-analytics-api.wildberries.ru/api/v2/search-report/report + /product/search-texts'}
   }
 
   // WB product search-texts accepts at most 20 nmIds per request.
@@ -4282,10 +4324,10 @@ async function advanceSearchQueriesTask(connectionId, token, state, data, { dead
   }
   const nextProductOffset = productOffset + batch.length
   if (nextProductOffset < nmIds.length) {
-    return {pending:true,nextAllowedAt:new Date(Date.now()+streamCooldownMs('searchQueries',tokenInfo)).toISOString(),metadata:{period,detailPeriod,syncId,phase:'products',offset:0,pageNumber:pageNumber+1,productOffset:nextProductOffset,persistedCount,summary,binding}}
+    return {pending:true,nextAllowedAt:new Date(Date.now()+streamCooldownMs('searchQueries',tokenInfo)).toISOString(),metadata:{period,detailPeriod,syncId,phase:'products',offset:0,pageNumber:pageNumber+1,productOffset:nextProductOffset,persistedCount,summary,binding,searchBindingVersion:SEARCH_BINDING_VERSION}}
   }
-  const value = await compactPersistedObjectStream(connectionId,'searchQueries',syncId,{period,extra:{summary,detailPeriod,productsScanned:nmIds.length,complete:true,binding}})
-  return {pending:false,value,validation:{period,detailPeriod,totalRows:value.totalRows,productsScanned:nmIds.length,pages:pageNumber+1,memorySafe:true,binding},endpoint:'https://seller-analytics-api.wildberries.ru/api/v2/search-report/report + /product/search-texts'}
+  const value = await compactPersistedObjectStream(connectionId,'searchQueries',syncId,{period,extra:{summary,detailPeriod,productsScanned:nmIds.length,complete:true,binding,searchBindingVersion:SEARCH_BINDING_VERSION,searchBindingVerified:true}})
+  return {pending:false,value,validation:{period,detailPeriod,totalRows:value.totalRows,productsScanned:nmIds.length,pages:pageNumber+1,memorySafe:true,binding,searchBindingVersion:SEARCH_BINDING_VERSION,searchBindingVerified:true},endpoint:'https://seller-analytics-api.wildberries.ru/api/v2/search-report/report + /product/search-texts'}
 }
 
 function firstRowValue(row, keys = []) {
@@ -5164,7 +5206,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.23.5',
+    version: '2.23.6',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -5371,6 +5413,7 @@ app.get('/api/wb/connection', authRequired, async (req, res) => {
   let connection = await getConnection(req.auth.sub)
   if (!connection) return res.json(publicConnection(null))
   await recoverLegacyFinanceCooldowns({ connectionId:connection.id })
+  await recoverLegacySearchQueryBindings({ connectionId:connection.id })
   let [tokens, states] = await Promise.all([getWbTokens(req.auth.sub, connection.id), getSyncStates(connection.id)])
   // 5.10.1 migration: уже подключённому кабинету не нужно перевыпускать ключ
   // после обновления ELISEI. Первый просмотр сам поставит в очередь новые
@@ -5415,6 +5458,7 @@ async function queueInitialCabinetSync(connection, tokens, { stages = null } = {
       status:'queued',lastAttemptAt:null,nextAllowedAt:slot?.nextAllowedAt || nowIso,lastError:null,lastCount:0,taskId:null,
       metadata:{
         ...initialPeriodStageMetadata(stage,period),
+        ...(stage === 'searchQueries' ? {searchBindingVersion:SEARCH_BINDING_VERSION,phase:'overview'} : {}),
         ...smartSchedulerMeta(stage,{reason:'initial_sync',sequence:slot?.sequence || null,scheduledAt:slot?.nextAllowedAt || nowIso}),
       },
     })
@@ -5525,6 +5569,7 @@ app.get('/api/wb/status/:id', authRequired, async (req, res) => {
   // После перезапуска Render в БД мог остаться status=running, хотя процесса уже нет.
   // Watchdog переводит такой этап обратно в очередь и не позволяет ему блокировать остальные потоки.
   await recoverStaleSyncStates({ connectionId:connection.id, reason:'status-heartbeat' })
+  await recoverLegacySearchQueryBindings({ connectionId:connection.id })
   // Статус опрашивается открытым интерфейсом. Используем этот heartbeat как
   // надёжный запуск фоновой очереди после окончания next_allowed_at.
   const kick = kickBackgroundWorkers(`status:${connection.id}`)
@@ -6003,22 +6048,21 @@ function isSubstitutedSearchRow(row = {}) {
 function compactProduct360ExtendedRows(canonicalData, stream, product, range, limit = 120) {
   const payload = canonicalData?.[stream] && typeof canonicalData[stream] === 'object' ? canonicalData[stream] : {}
   const sample = elFilterExtendedRows(elExtendedPayloadRows(canonicalData,stream),stream,range)
-    .filter(row=>stream !== 'searchQueries' || (
-      String(row?.rowType || '').toLowerCase() === 'query' &&
-      !isSubstitutedSearchRow(row) &&
-      product360Matches(row,product).method === 'nmID'
-    ))
+    .filter(row=>stream !== 'searchQueries' || trustedWbSearchRowForProduct(row,product))
     .filter(row=>stream === 'searchQueries' || product360Matches(row,product).matched)
     .slice(0,Math.max(1,Math.min(200,Number(limit)||120)))
   const totalRows = Math.max(Number(payload?.totalRows || 0), Number(payload?.rows?.length || 0))
+  const searchBindingVerified = stream !== 'searchQueries' || Number(payload?.searchBindingVersion || 0) >= SEARCH_BINDING_VERSION
   return {
     rows:sample,
     total:sample.length,
-    source:sample.length ? 'wb_stream_data_sample' : (totalRows > 0 ? 'wb_stream_data_sample_no_match' : 'none'),
+    source:sample.length ? 'wb_stream_data_sample' : (totalRows > 0 ? (searchBindingVerified ? 'wb_stream_data_sample_no_match' : 'legacy_search_hidden') : 'none'),
     syncId:payload?.syncId || null,
     availablePeriod:payload?.period || null,
     truncated:totalRows > Number(payload?.rows?.length || 0),
     sampleOnly:totalRows > Number(payload?.rows?.length || 0),
+    searchBindingVersion:Number(payload?.searchBindingVersion || 0),
+    searchBindingVerified,
   }
 }
 
@@ -6042,8 +6086,12 @@ async function loadProduct360ExtendedRows(connectionId, canonicalData, stream, p
     if (!nmIDs.length) return compactProduct360ExtendedRows(canonicalData,stream,product,range,limit)
     params.push([...new Set(nmIDs)])
     const nmRef = `$${params.length}::text[]`
+    where.push(`COALESCE(payload->>'sourceNmID','')=ANY(${nmRef})`)
     where.push(`COALESCE(payload->>'nmID',payload->>'nmId',payload->>'nm_id')=ANY(${nmRef})`)
     where.push(`COALESCE(payload->>'rowType','')='query'`)
+    where.push(`COALESCE(payload->>'searchBindingVersion','0')=$${params.length+1}`)
+    params.push(String(SEARCH_BINDING_VERSION))
+    where.push(`COALESCE(payload->>'searchOrigin','')='organic_product_search_texts'`)
     where.push(`LOWER(COALESCE(payload->>'isSubstitutedSKU',payload->>'isSubstitutedSku',payload->>'isSubstituted','false')) NOT IN ('true','1','yes')`)
   } else {
     const identityClause = product360ExtendedIdentityClause(product,params)
@@ -6067,10 +6115,11 @@ async function loadProduct360ExtendedRows(connectionId, canonicalData, stream, p
   const matched = page.rows
     .map(item=>({rowKey:item.row_key,...item.payload}))
     .filter(row=>stream === 'searchQueries'
-      ? (!isSubstitutedSearchRow(row) && product360Matches(row,product).method === 'nmID')
+      ? trustedWbSearchRowForProduct(row,product)
       : product360Matches(row,product).matched)
   const compact = compactProduct360ExtendedRows(canonicalData,stream,product,range,limit)
   const rows = matched.length ? matched.slice(0,safeLimit) : compact.rows
+  const searchBindingVerified = stream !== 'searchQueries' || Number(canonicalData?.[stream]?.searchBindingVersion || 0) >= SEARCH_BINDING_VERSION
   return {
     rows,
     total:rows.length,
@@ -6079,6 +6128,8 @@ async function loadProduct360ExtendedRows(connectionId, canonicalData, stream, p
     availablePeriod:canonicalData?.[stream]?.period || compact.availablePeriod || null,
     truncated:page.rows.length > safeLimit || compact.truncated,
     sampleOnly:false,
+    searchBindingVersion:Number(canonicalData?.[stream]?.searchBindingVersion || compact.searchBindingVersion || 0),
+    searchBindingVerified,
   }
 }
 
@@ -6131,7 +6182,12 @@ app.get('/api/wb/product-360/:id', authRequired, async (req, res) => {
         source:result.source || 'none',
         availablePeriod:result.availablePeriod || null,
         truncated:Boolean(result.truncated),
-        partial:Boolean(detailLevel === 'core' && (result.sampleOnly || result.truncated || Number(data?.[stream]?.totalRows || 0) > Number(result.rows?.length || 0))),
+        searchBindingVersion:stream === 'searchQueries' ? Number(result.searchBindingVersion || stage?.metadata?.searchBindingVersion || 0) : undefined,
+        searchBindingVerified:stream === 'searchQueries' ? Boolean(result.searchBindingVerified && Number(stage?.metadata?.searchBindingVersion || 0) >= SEARCH_BINDING_VERSION) : undefined,
+        partial:Boolean(
+          (detailLevel === 'core' && (result.sampleOnly || result.truncated || Number(data?.[stream]?.totalRows || 0) > Number(result.rows?.length || 0)))
+          || (stream === 'searchQueries' && (!result.searchBindingVerified || Number(stage?.metadata?.searchBindingVersion || 0) < SEARCH_BINDING_VERSION))
+        ),
       }]
     }))
     const searchSnapshotPeriod=data?.searchQueries?.period || null

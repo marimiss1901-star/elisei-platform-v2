@@ -1,21 +1,21 @@
-ELISEI 5.11.5 PATCH MANIFEST
-Base: ELISEI 5.11.4
-Frontend: 5.11.5
-Backend: 2.23.5
-El Core: 5.11.5
+ELISEI 5.11.6 PATCH MANIFEST
+Base: ELISEI 5.11.5
+Frontend: 5.11.6
+Backend: 2.23.6
+El Core: 5.11.6
 
-Purpose: SKU 360 search-source integrity.
-- Search texts are persisted only with an explicit WB nmId that belongs to the requested batch.
-- Every persisted phrase is stamped with sourceNmID.
-- Unbound or out-of-batch rows are dropped and counted in binding diagnostics.
-- Substitute/promo SKU rows are excluded from organic search visibility.
-- /api/v2/search-report/product/search-texts uses includeSubstitutedSKUs=false and includeSearchTexts=true.
-- SKU 360 search joins only by exact nmID; vendorCode/barcode/chrtID fallback is forbidden.
+Purpose: SKU 360 search provenance trust and automatic legacy refresh.
+- Historical search rows without sourceNmID/binding version/origin are hidden.
+- Fresh product search-text rows are stamped with sourceNmID, searchBindingVersion=3 and searchOrigin=organic_product_search_texts.
+- SKU 360 requires exact nmID + verified provenance; no vendor/barcode/chrt fallback for search phrases.
+- Old Search Queries state is automatically re-queued once after deployment so trusted data replaces legacy rows.
+- Existing real WB rate_limit is preserved; migration does not force requests before next_allowed_at.
+- UI explicitly says that legacy unverified phrases are hidden while revalidation runs.
 
 Files:
 README.md
-README_5_11_5.md
-RELEASE_NOTES_V5_11_5.txt
+README_5_11_6.md
+RELEASE_NOTES_V5_11_6.txt
 backend/package.json
 backend/src/routes/elCore.cjs
 backend/src/server.js
@@ -24,8 +24,10 @@ backend/tests/el-hotfix-5101.test.mjs
 backend/tests/wb-finance-legacy-cooldown-5103.test.mjs
 backend/tests/wb-finance-throttle-5102.test.mjs
 backend/tests/wb-live-sync-590.test.mjs
+backend/tests/wb-product-360-5110.test.mjs
 backend/tests/wb-product-360-isolation-5114.test.mjs
 backend/tests/wb-product-360-search-source-5115.test.mjs
+backend/tests/wb-product-360-search-trust-5116.test.mjs
 backend/tests/wb-smart-scheduler-5105.test.mjs
 package.json
 src/components/Product360Drawer.jsx
