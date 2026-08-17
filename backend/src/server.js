@@ -45,7 +45,7 @@ import {
   LIVE_SYNC_STAGES, defaultLiveSyncSettings, normalizeLiveSyncSettings, dueLiveStages, eventStages, safeEqualSecret, publicLiveSyncStatus,
 } from './wb/live-sync.js'
 import { buildDataQualityReport } from './wb/data-quality.js'
-import { buildProduct360, findProduct360Product, product360Matches, product360Identities, bindWbSearchRowsToNmId, trustedWbSearchRowForProduct, SEARCH_BINDING_VERSION } from './wb/product-360.js'
+import { buildProduct360, buildProduct360Comparison, findProduct360Product, product360Matches, product360Identities, bindWbSearchRowsToNmId, trustedWbSearchRowForProduct, SEARCH_BINDING_VERSION } from './wb/product-360.js'
 import {
   stagePriority, schedulerGroup, chooseCycleWinners, initialStageSchedule, schedulerVisualState,
 } from './wb/smart-scheduler.js'
@@ -802,7 +802,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.23.6 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.24.0 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -5206,7 +5206,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.23.6',
+    version: '2.24.0',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -6151,6 +6151,35 @@ app.get('/api/wb/product-360/:id', authRequired, async (req, res) => {
     const product = findProduct360Product(core.products || [],selector)
     if (!product) return res.status(404).json({ error:'Товар не найден в едином ядре ELISEI' })
 
+    // 5.12.0: SKU 360 compares the selected period with the immediately preceding
+    // period of the same length. This uses only already persisted cabinet data —
+    // no extra WB API calls and no historical-current stock substitution.
+    const compareRange = range ? previousEqualPeriod(range) : null
+    const previousData = compareRange ? analyticsFilterConnectionData(data,compareRange) : null
+    const previousCore = previousData ? buildCoreAnalytics(previousData,settings) : null
+    const previousProduct = previousCore
+      ? findProduct360Product(previousCore.products || [],String(product.nmID || product.vendorCode || selector))
+      : null
+    const comparisonCoverage = Boolean(
+      range && compareRange && previousCore
+      && elStageRangeCovered(core?.periodCoverage?.sales || {},range)
+      && elStageRangeCovered(previousCore?.periodCoverage?.sales || {},compareRange)
+    )
+    const currentComparisonAvailability = {
+      ...(core?.availability || {}),
+      sales:Boolean(core?.availability?.sales && elStageRangeCovered(core?.periodCoverage?.sales || {},range)),
+      orders:Boolean(core?.availability?.orders && elStageRangeCovered(core?.periodCoverage?.orders || {},range)),
+      finance:Boolean(core?.availability?.finance && elStageRangeCovered(core?.periodCoverage?.finance || {},range)),
+      advertising:Boolean(core?.availability?.advertising && elStageRangeCovered(core?.periodCoverage?.advertising || {},range)),
+    }
+    const previousComparisonAvailability = {
+      ...(previousCore?.availability || {}),
+      sales:Boolean(previousCore?.availability?.sales && elStageRangeCovered(previousCore?.periodCoverage?.sales || {},compareRange)),
+      orders:Boolean(previousCore?.availability?.orders && elStageRangeCovered(previousCore?.periodCoverage?.orders || {},compareRange)),
+      finance:Boolean(previousCore?.availability?.finance && elStageRangeCovered(previousCore?.periodCoverage?.finance || {},compareRange)),
+      advertising:Boolean(previousCore?.availability?.advertising && elStageRangeCovered(previousCore?.periodCoverage?.advertising || {},compareRange)),
+    }
+
     const streamNames = ['searchQueries','reviews','questions','stockHistory']
     const detailLevel = String(req.query.depth || req.query.detail || 'core').toLowerCase() === 'full' ? 'full' : 'core'
     const streamResults = detailLevel === 'full'
@@ -6226,6 +6255,17 @@ app.get('/api/wb/product-360/:id', authRequired, async (req, res) => {
         core:sources,
         extended:Object.fromEntries(streamNames.map(stream=>[stream,streamMap[stream]?.source || 'none'])),
       },
+    })
+    payload.comparison = buildProduct360Comparison({
+      currentProduct:product,
+      previousProduct:previousProduct || {},
+      currentAdvertisingRows:core?.advertising?.productRows || [],
+      previousAdvertisingRows:previousCore?.advertising?.productRows || [],
+      currentAvailability:currentComparisonAvailability,
+      previousAvailability:previousComparisonAvailability,
+      currentPeriod:range ? {from:range.from,to:range.to,days:range.days} : null,
+      previousPeriod:compareRange,
+      comparisonCoverage,
     })
     res.json({
       product360:{...payload,detailLevel,enrichmentPending:detailLevel !== 'full'},
@@ -6737,16 +6777,18 @@ async function elLoadExtendedStream(connectionId, canonicalData, stream, range, 
   }
 }
 
+function elStageRangeCovered(item = {}, range = null) {
+  if (!range) return true
+  const from = dateKey(item?.from)
+  const to = dateKey(item?.to)
+  if (!from || !to) return false
+  return range.from >= from && range.to <= to
+}
+
 function elRangeCovered(periodCoverage = {}, range = null) {
   if (!range) return true
   const stages = ['sales','orders']
-  return stages.some(stage => {
-    const item = periodCoverage?.[stage] || {}
-    const from = dateKey(item.from)
-    const to = dateKey(item.to)
-    if (!from || !to) return false
-    return range.from >= from && range.to <= to
-  })
+  return stages.some(stage => elStageRangeCovered(periodCoverage?.[stage] || {},range))
 }
 
 function elDataCoverage(connection, core, range) {

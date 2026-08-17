@@ -12,6 +12,10 @@ const fmtDate = value => {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString('ru-RU')
 }
 const tone = value => Number(value || 0) < 0 ? 'negative' : 'positive'
+const fmtSignedMoney = value => value == null ? '—' : `${Number(value) > 0 ? '+' : ''}${new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))} ₽`
+const fmtSignedNum = value => value == null ? '—' : `${Number(value) > 0 ? '+' : ''}${new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))}`
+const fmtSignedPoints = value => value == null ? '—' : `${Number(value) > 0 ? '+' : ''}${new Intl.NumberFormat('ru-RU',{maximumFractionDigits:1}).format(Number(value || 0))} п.п.`
+const comparisonTone = metric => !metric?.available || metric?.delta == null ? 'neutral' : Number(metric.delta) < 0 ? 'down' : Number(metric.delta) > 0 ? 'up' : 'neutral'
 
 const readinessText = state => state === 'ready' ? 'готово' : state === 'partial' ? 'частично' : state === 'waiting' ? 'ожидается' : 'нет данных'
 const readinessSuffix = state => state === 'partial' ? ' · предварительно' : ''
@@ -56,6 +60,8 @@ export default function Product360Drawer({ product, data, loading, error, period
   const readiness = view.readiness || {}
   const streams = view.coverage?.streams || {}
   const readinessSummary = view.readinessSummary || {}
+  const comparison = view.comparison || {}
+  const comparisonMetrics = comparison.metrics || {}
   const primarySignal = view.signals?.[0]
   const stockCurrent = Array.isArray(stock.current) ? stock.current : []
   const searchRows = Array.isArray(demand.search?.rows) ? demand.search.rows : []
@@ -117,6 +123,32 @@ export default function Product360Drawer({ product, data, loading, error, period
         <div><span>Реклама</span><strong className={metricClass(demand.advertising?.summary?.spend,readiness.advertising)}>{metricText(demand.advertising?.summary?.spend,readiness.advertising,fmtMoney)}</strong><small>{demand.advertising?.summary?.crr == null ? emptyMetricText(readiness.advertising,{ready:'Подтверждено'}) : `ДРР ${fmtPercent(demand.advertising?.summary?.crr)}${readinessSuffix(readiness.advertising)}`}</small></div>
         <div><span>Средняя цена</span><strong className={metricClass(pricing.averagePrice ?? overview.averagePrice,pricing.state)}>{metricText(pricing.averagePrice ?? overview.averagePrice,pricing.state,fmtMoney)}</strong><small>{pricing.breakevenPrice == null ? emptyMetricText(economicsState,{partial:'Цена в 0 ещё предварительная'}) : `цена в 0 ${fmtMoney(pricing.breakevenPrice)}${readinessSuffix(economicsState)}`}</small></div>
       </div>
+
+      <section className={`sku360-change ${comparison.state || 'unknown'}`}>
+        <div className="sku360-change-head">
+          <div><span><TrendingUp size={15}/> Изменение товара</span><h3>Что изменилось и почему</h3><small>{comparison.comparePeriod?.from ? `Сравнение с ${fmtDate(comparison.comparePeriod.from)} — ${fmtDate(comparison.comparePeriod.to)}` : 'Сравниваю с предыдущим периодом той же длины'}</small></div>
+          {comparison.available && <div className={`sku360-confidence ${comparison.confidence || 'low'}`}>уверенность · {comparison.confidence === 'high' ? 'высокая' : comparison.confidence === 'medium' ? 'средняя' : 'предварительно'}</div>}
+        </div>
+        {!comparison.available ? <div className="sku360-empty compact">{comparison.warning || comparison.warnings?.[0] || 'Для сравнения пока не хватает подтверждённых данных предыдущего периода.'}</div> : <>
+          <div className="sku360-change-metrics">
+            {[
+              ['Выручка',comparisonMetrics.revenue,fmtSignedMoney],
+              ['Продажи',comparisonMetrics.sales,fmtSignedNum],
+              ['Возвраты',comparisonMetrics.returnRate,fmtSignedPoints],
+              ['Реклама',comparisonMetrics.advertising,fmtSignedMoney],
+              ['Средняя цена',comparisonMetrics.averagePrice,fmtSignedMoney],
+              ['Прибыль',comparisonMetrics.profit,fmtSignedMoney],
+            ].map(([label,metric,formatter])=><div key={label} className={comparisonTone(metric)}><span>{label}</span><strong>{metric?.available ? formatter(metric.delta) : '—'}</strong><small>{metric?.available && metric.pct != null && label !== 'Возвраты' ? `${metric.pct > 0 ? '+' : ''}${Number(metric.pct).toFixed(1)}%` : metric?.available ? 'к прошлому периоду' : 'нет подтверждённого сравнения'}</small></div>)}
+          </div>
+          <div className="sku360-change-body">
+            <div className="sku360-factor-list">
+              {(comparison.factors || []).length ? comparison.factors.slice(0,3).map((factor,index)=><div key={`${factor.type}-${index}`}><span><b>{factor.title}</b><small>{factor.evidence}</small></span>{factor.impact != null && <strong>≈ {fmtMoney(factor.impact)}</strong>}</div>) : <div className="sku360-empty compact">Существенных негативных факторов относительно прошлого периода не найдено.</div>}
+            </div>
+            <div className="sku360-next-action"><span>Одно действие</span><strong>{comparison.action?.title || 'Не менять всё сразу'}</strong><p>{comparison.action?.text || 'Сохрани текущие настройки и наблюдай следующий сопоставимый период.'}</p>{comparison.action?.estimatedImpact != null && <small>денежный масштаб фактора ≈ {fmtMoney(comparison.action.estimatedImpact)}</small>}</div>
+          </div>
+          <p className="sku360-comparison-note">{comparison.note}</p>
+        </>}
+      </section>
 
       <div className="sku360-grid two">
         <Section icon={CircleDollarSign} eyebrow="Экономика" title="Куда уходят деньги">

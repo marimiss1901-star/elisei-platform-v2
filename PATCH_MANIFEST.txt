@@ -1,21 +1,25 @@
-ELISEI 5.11.6 PATCH MANIFEST
-Base: ELISEI 5.11.5
-Frontend: 5.11.6
-Backend: 2.23.6
-El Core: 5.11.6
+ELISEI 5.12.0 PATCH MANIFEST
+Base: ELISEI 5.11.6
+Frontend: 5.12.0
+Backend: 2.24.0
+El Core: 5.12.0
 
-Purpose: SKU 360 search provenance trust and automatic legacy refresh.
-- Historical search rows without sourceNmID/binding version/origin are hidden.
-- Fresh product search-text rows are stamped with sourceNmID, searchBindingVersion=3 and searchOrigin=organic_product_search_texts.
-- SKU 360 requires exact nmID + verified provenance; no vendor/barcode/chrt fallback for search phrases.
-- Old Search Queries state is automatically re-queued once after deployment so trusted data replaces legacy rows.
-- Existing real WB rate_limit is preserved; migration does not force requests before next_allowed_at.
-- UI explicitly says that legacy unverified phrases are hidden while revalidation runs.
+Purpose: SKU 360 product-level change diagnostics.
+- Compare the selected period with the immediately preceding period of equal length.
+- Show verified deltas for revenue, orders/sales, returns, average selling price, advertising and confirmed economics.
+- Rank up to four diagnostic factors by significance and monetary scale.
+- Surface one first action instead of recommending simultaneous changes.
+- Never invent historical stock from the current snapshot.
+- Suppress comparisons when prior sales/finance/advertising coverage is not confirmed.
+- Comparison uses already persisted ELISEI data and makes no additional WB API calls.
+- Factors are diagnostic correlations, not claims of proven causality.
+
+Regression: 37/37 backend tests passed.
 
 Files:
 README.md
-README_5_11_6.md
-RELEASE_NOTES_V5_11_6.txt
+README_5_12_0.md
+RELEASE_NOTES_V5_12_0.txt
 backend/package.json
 backend/src/routes/elCore.cjs
 backend/src/server.js
@@ -24,10 +28,8 @@ backend/tests/el-hotfix-5101.test.mjs
 backend/tests/wb-finance-legacy-cooldown-5103.test.mjs
 backend/tests/wb-finance-throttle-5102.test.mjs
 backend/tests/wb-live-sync-590.test.mjs
-backend/tests/wb-product-360-5110.test.mjs
-backend/tests/wb-product-360-isolation-5114.test.mjs
-backend/tests/wb-product-360-search-source-5115.test.mjs
-backend/tests/wb-product-360-search-trust-5116.test.mjs
+backend/tests/wb-product-360-change-5120.test.mjs
 backend/tests/wb-smart-scheduler-5105.test.mjs
 package.json
 src/components/Product360Drawer.jsx
+src/styles/app.css

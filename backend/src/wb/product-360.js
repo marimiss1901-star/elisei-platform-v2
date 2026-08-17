@@ -319,6 +319,198 @@ function summarizeAdvertising(rows = [], readiness = 'missing') {
   }
 }
 
+const compareNullable = (current, previous, available = true) => {
+  const a = available && current !== undefined && current !== null && Number.isFinite(Number(current)) ? Number(current) : null
+  const b = available && previous !== undefined && previous !== null && Number.isFinite(Number(previous)) ? Number(previous) : null
+  if (a == null || b == null) return { current:a, previous:b, delta:null, pct:null, available:false }
+  const delta = a - b
+  const pct = b === 0 ? (a === 0 ? 0 : null) : delta / Math.abs(b) * 100
+  return { current:a, previous:b, delta, pct, available:true }
+}
+
+const significantChange = (metric, { abs = 1, pct = 5 } = {}) => {
+  if (!metric?.available || metric.delta == null || Math.abs(metric.delta) < abs) return false
+  return metric.pct == null || Math.abs(metric.pct) >= pct
+}
+
+const exactNmAdvertisingRows = (rows = [], product = {}) => (Array.isArray(rows) ? rows : []).filter(row => {
+  const match = product360Matches(row,product)
+  return match.matched && match.method === 'nmID'
+})
+
+export function buildProduct360Comparison({
+  currentProduct = {},
+  previousProduct = {},
+  currentAdvertisingRows = [],
+  previousAdvertisingRows = [],
+  currentAvailability = {},
+  previousAvailability = {},
+  currentPeriod = null,
+  previousPeriod = null,
+  comparisonCoverage = true,
+} = {}) {
+  if (!currentPeriod?.from || !currentPeriod?.to || !previousPeriod?.from || !previousPeriod?.to) {
+    return { available:false, warning:'Для сравнения нужен выбранный период и предыдущий период той же длины.' }
+  }
+
+  const salesAvailable = Boolean(currentAvailability?.sales && previousAvailability?.sales && comparisonCoverage !== false)
+  const ordersAvailable = Boolean(currentAvailability?.orders && previousAvailability?.orders && comparisonCoverage !== false)
+  const financeAvailable = Boolean(currentAvailability?.finance && previousAvailability?.finance && salesAvailable)
+  const adsAvailable = Boolean(currentAvailability?.advertising && previousAvailability?.advertising)
+
+  const currentAds = summarizeAdvertising(exactNmAdvertisingRows(currentAdvertisingRows,currentProduct), adsAvailable ? 'ready' : 'missing')
+  const previousAds = summarizeAdvertising(exactNmAdvertisingRows(previousAdvertisingRows,currentProduct), adsAvailable ? 'ready' : 'missing')
+
+  const metrics = {
+    revenue:compareNullable(currentProduct?.revenue,previousProduct?.revenue,salesAvailable),
+    orders:compareNullable(currentProduct?.ordersCount,previousProduct?.ordersCount,ordersAvailable),
+    sales:compareNullable(currentProduct?.salesCount,previousProduct?.salesCount,salesAvailable),
+    returns:compareNullable(currentProduct?.returnsCount,previousProduct?.returnsCount,salesAvailable),
+    returnRate:compareNullable(currentProduct?.returnRate,previousProduct?.returnRate,salesAvailable),
+    averagePrice:compareNullable(currentProduct?.averagePrice,previousProduct?.averagePrice,salesAvailable),
+    profit:compareNullable(currentProduct?.profit,previousProduct?.profit,financeAvailable),
+    margin:compareNullable(currentProduct?.margin,previousProduct?.margin,financeAvailable),
+    commission:compareNullable(currentProduct?.commission,previousProduct?.commission,financeAvailable),
+    logistics:compareNullable(currentProduct?.logistics,previousProduct?.logistics,financeAvailable),
+    advertising:compareNullable(currentAds?.spend,previousAds?.spend,adsAvailable),
+    adOrders:compareNullable(currentAds?.orders,previousAds?.orders,adsAvailable),
+    crr:compareNullable(currentAds?.crr,previousAds?.crr,adsAvailable),
+  }
+
+  const headlineMetric = metrics.profit.available ? 'profit' : 'revenue'
+  const headline = metrics[headlineMetric]
+  let state = 'stable'
+  if (significantChange(headline,{abs:headlineMetric === 'profit' ? 300 : 500,pct:3})) state = headline.delta < 0 ? 'down' : 'up'
+
+  const factors = []
+  const addFactor = (priority,type,title,evidence,impact = null,action = '',confidence='medium') => {
+    factors.push({priority,type,title,evidence,impact:impact == null ? null : Math.max(0,Math.round(Math.abs(Number(impact)||0))),action,confidence})
+  }
+
+  if (metrics.profit.available && metrics.profit.delta < 0 && significantChange(metrics.profit,{abs:300,pct:3})) {
+    addFactor(1,'profit','Прибыль снизилась',
+      `Операционная прибыль изменилась на ${Math.round(metrics.profit.delta)} ₽ к предыдущему сопоставимому периоду.`,
+      metrics.profit.delta,
+      'Проверь, какой из прямых расходов вырос, и не меняй цену/рекламу одновременно до проверки.',
+      'high')
+  }
+
+  if (metrics.revenue.available && metrics.revenue.delta < 0 && significantChange(metrics.revenue,{abs:500,pct:3})) {
+    const salesText = metrics.sales.available ? ` Продажи: ${metrics.sales.delta >= 0 ? '+' : ''}${Math.round(metrics.sales.delta)} шт.` : ''
+    addFactor(2,'sales','Просела выручка',
+      `Выручка изменилась на ${Math.round(metrics.revenue.delta)} ₽.${salesText}`,
+      metrics.revenue.delta,
+      'Проверь динамику продаж по дням, наличие товара и изменение конверсии до корректировки цены.',
+      'high')
+  }
+
+  if (metrics.advertising.available && metrics.advertising.delta > 0 && significantChange(metrics.advertising,{abs:300,pct:8})) {
+    const revenueWeak = !metrics.revenue.available || Number(metrics.revenue.delta || 0) <= 0
+    addFactor(revenueWeak ? 1 : 3,'advertising',revenueWeak ? 'Реклама подорожала без роста выручки' : 'Рекламный расход вырос',
+      `Расход на рекламу вырос на ${Math.round(metrics.advertising.delta)} ₽${metrics.crr.available ? `, ДРР изменился на ${metrics.crr.delta >= 0 ? '+' : ''}${metrics.crr.delta.toFixed(1)} п.п.` : ''}.`,
+      metrics.advertising.delta,
+      'Открой кампании этого SKU и сначала проверь расход без заказов и рост ДРР.',
+      revenueWeak ? 'high' : 'medium')
+  }
+
+  const returnRateWorse = metrics.returnRate.available && metrics.returnRate.delta >= 3
+  const returnsMore = metrics.returns.available && metrics.returns.delta >= 2
+  if (returnRateWorse || returnsMore) {
+    const averagePrice = Number(currentProduct?.averagePrice || 0)
+    const estimated = returnsMore && averagePrice > 0 ? metrics.returns.delta * averagePrice : null
+    addFactor(2,'returns','Возвраты ухудшились',
+      `${returnsMore ? `Возвратов стало на ${Math.round(metrics.returns.delta)} шт. больше.` : ''}${returnRateWorse ? ` Доля возвратов выросла на ${metrics.returnRate.delta.toFixed(1)} п.п.` : ''}`.trim(),
+      estimated,
+      'Свяжи возвраты с отзывами по этому SKU и проверь описание, ожидания покупателя и качество партии.',
+      'medium')
+  }
+
+  if (metrics.averagePrice.available && metrics.averagePrice.delta < 0 && significantChange(metrics.averagePrice,{abs:50,pct:5})) {
+    addFactor(4,'price','Средняя цена снизилась',
+      `Средняя цена продажи изменилась на ${Math.round(metrics.averagePrice.delta)} ₽ (${metrics.averagePrice.pct == null ? '—' : `${metrics.averagePrice.pct.toFixed(1)}%`}).`,
+      null,
+      'Проверь, компенсировал ли рост количества продаж снижение цены и сохранилась ли маржа.',
+      'medium')
+  }
+
+  if (metrics.logistics.available && metrics.logistics.delta > 0 && significantChange(metrics.logistics,{abs:200,pct:8})) {
+    addFactor(3,'logistics','Логистика стала дороже',
+      `Расход на логистику вырос на ${Math.round(metrics.logistics.delta)} ₽.`,
+      metrics.logistics.delta,
+      'Проверь FBS/FBO, возвратную логистику и распределение продаж по схемам.',
+      'high')
+  }
+
+  if (metrics.commission.available && metrics.commission.delta > 0 && significantChange(metrics.commission,{abs:200,pct:8})) {
+    addFactor(4,'commission','Комиссия WB выросла',
+      `Комиссия выросла на ${Math.round(metrics.commission.delta)} ₽.`,
+      metrics.commission.delta,
+      'Сверь изменение комиссии с выручкой, ценой и категорией товара.',
+      'high')
+  }
+
+  factors.sort((a,b)=>a.priority-b.priority || Number(b.impact || 0)-Number(a.impact || 0))
+  const unique = []
+  const seen = new Set()
+  for (const factor of factors) {
+    if (seen.has(factor.type)) continue
+    seen.add(factor.type)
+    unique.push(factor)
+    if (unique.length >= 4) break
+  }
+
+  let action
+  if (unique[0]) {
+    action = {
+      title:'Сначала проверь главный фактор',
+      text:unique[0].action,
+      reason:unique[0].title,
+      estimatedImpact:unique[0].impact,
+      confidence:unique[0].confidence,
+    }
+  } else if (state === 'up') {
+    action = {
+      title:'Зафиксируй источник роста',
+      text:'Период лучше предыдущего. Не меняй несколько параметров сразу: зафиксируй цену, рекламу и остаток, чтобы понять, что именно дало рост.',
+      reason:'Положительная динамика',
+      estimatedImpact:null,
+      confidence:'medium',
+    }
+  } else {
+    action = {
+      title:'Не менять товар без сигнала',
+      text:'Существенного ухудшения относительно предыдущего равного периода не видно. Продолжай наблюдение и меняй только один фактор за раз.',
+      reason:'Стабильная динамика',
+      estimatedImpact:null,
+      confidence:'medium',
+    }
+  }
+
+  const confidence = comparisonCoverage === false || !salesAvailable ? 'low'
+    : financeAvailable && adsAvailable ? 'high'
+      : 'medium'
+  const warnings = []
+  if (!salesAvailable) warnings.push('Продажи предыдущего периода покрыты не полностью; сравнение продаж недоступно.')
+  if (!financeAvailable) warnings.push('Финансы не подтверждены в обоих периодах; прибыль и расходы могут быть недоступны.')
+  if (!adsAvailable) warnings.push('Реклама не подтверждена в обоих периодах; рекламные изменения не используются как фактор.')
+  if (comparisonCoverage === false) warnings.push('Предыдущий период покрыт данными не полностью; выводы предварительные.')
+
+  return {
+    available:Boolean(salesAvailable || ordersAvailable || financeAvailable || adsAvailable),
+    period:currentPeriod,
+    comparePeriod:previousPeriod,
+    state,
+    headlineMetric,
+    headline,
+    metrics,
+    factors:unique,
+    action,
+    confidence,
+    warnings,
+    note:'Факторы показывают совпадающие изменения и денежный масштаб, но не объявляются доказанной причинностью без подтверждающих данных.',
+  }
+}
+
 function buildSignals(product = {}, reviewSummary = {}, searchSummary = {}, adSummary = {}, readiness = {}) {
   const signals = []
   const push = (priority,type,title,textValue,effect='') => signals.push({priority,type,title,text:textValue,effect})
