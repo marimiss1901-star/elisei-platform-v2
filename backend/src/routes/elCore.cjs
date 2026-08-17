@@ -11,7 +11,7 @@ const { publicCapabilities } = require('../services/elModuleRegistry.cjs');
 const { resolveElPlan, normalizeMode, canUseMode, publicPlan, modeLabel } = require('../services/elPlans.cjs');
 const { DEFAULT_EL_PROFILE, normalizeElProfile, mergeElProfiles } = require('../services/elPersonality.cjs');
 const { parseElTemporalRange } = require('../services/elTemporal.cjs');
-const { resolveConversationFollowup, buildAnalysisContext } = require('../services/elConversationContext.cjs');
+const { resolveConversationFollowup, buildAnalysisContext, shouldForceSalesModule } = require('../services/elConversationContext.cjs');
 
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 
@@ -46,7 +46,7 @@ function createRouter(express) {
     const plan = await resolveElPlan(req, identity);
     res.json({
       ok: true,
-      version: '5.9.3',
+      version: '5.10.0',
       name: 'El Tiered Intelligence',
       configured: Boolean(process.env.OPENAI_API_KEY && (process.env.ELISEI_GPT_MODEL || process.env.ELISEI_PRO_MODEL || process.env.ELISEI_AI_MODEL)),
       models: {
@@ -97,7 +97,7 @@ function createRouter(express) {
   router.get('/capabilities', asyncRoute(async (req, res) => {
     const identity = identityFromRequest(req);
     const plan = await resolveElPlan(req, identity);
-    res.json({ ok: true, version: '5.9.3', modules: publicCapabilities(), plan, writeActions: false });
+    res.json({ ok: true, version: '5.10.0', modules: publicCapabilities(), plan, writeActions: false });
   }));
 
   router.post('/chat', asyncRoute(async (req, res) => {
@@ -127,10 +127,14 @@ function createRouter(express) {
     };
     const conversationFollowup = resolveConversationFollowup({ message, history, clock, defaultPeriod:body.period });
     const classification = classifyElRequest({ message, requestedMode, history, page: body.page });
-    const salesFollowupMetrics = new Set(['fbs_orders','fbo_orders','returns','orders','sales','revenue','products']);
-    // Короткие вопросы про FBS/FBO и другие показатели продаж должны идти в модуль sales
-    // даже если история диалога была очищена при deploy или пришла без служебных метаданных.
-    if (salesFollowupMetrics.has(conversationFollowup.metric)) {
+    // Не схлопываем явные многомодульные запросы («свяжи отзывы с возвратами»)
+    // в один модуль продаж только из-за слова «возвраты».
+    if (shouldForceSalesModule({
+      metric:conversationFollowup.metric,
+      isFollowup:conversationFollowup.isFollowup,
+      inheritedModules:conversationFollowup.inheritedModules,
+      detectedModules:classification.modules,
+    })) {
       classification.modules = ['sales'];
       classification.reason = conversationFollowup.isFollowup ? 'conversation-followup' : 'direct-sales-metric';
     } else if (!classification.modules?.length && conversationFollowup.inheritedModules?.length) {

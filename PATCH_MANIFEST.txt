@@ -1,10 +1,12 @@
 ELISEI PATCH MANIFEST
-Release: 5.9.3
-Base release: 5.9.2
-Frontend: 5.9.3
-Backend: 2.21.0
-El Core: 5.9.3
-Purpose: connect El to real WB reviews, questions and read-only chat streams; surface low ratings and unanswered communications
-Project files in patch: 17
+Release: 5.10.0
+Base release: 5.9.4
+Frontend: 5.10.0
+Backend: 2.22.0
+El Core: 5.10.0
+Purpose: first El 2.0 decision engine — compare periods, explain drivers, estimate money impact, choose one action
+Project files in patch: 19
 Archive limit: fewer than 100 files
-Checksum entries: 15 (checksum files excluded)
+Checksum entries: 17 (checksum files excluded)
+Backend tests: 25/25 passed
+Frontend build: not executed in container because node_modules/vite are not installed

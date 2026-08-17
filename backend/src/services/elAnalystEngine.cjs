@@ -339,6 +339,171 @@ function formatProducts(data, tone) {
   return lines.filter(Boolean).join('\n');
 }
 
+
+function asksReviewReturnLink(message = '') {
+  const text = String(message || '').toLowerCase();
+  const hasReviews = /отзыв|рейтинг|оценк|жалоб|feedback/.test(text);
+  const hasReturns = /возврат|отказ|невыкуп|брак|дефект/.test(text);
+  const asksRelation = /свяж|сопостав|сравн|совпад|связ|коррел|причин|влиян|пересеч/.test(text);
+  return hasReviews && hasReturns && asksRelation;
+}
+
+function normalizedProductValue(value) {
+  return String(value ?? '').toLowerCase().replace(/[^a-zа-яё0-9]/gi, '');
+}
+
+function productKeys(item = {}) {
+  const keys = [];
+  if (item.nmID != null && String(item.nmID).trim()) keys.push(`n:${String(item.nmID).trim()}`);
+  const vendor = normalizedProductValue(item.vendorCode || item.supplierArticle);
+  if (vendor) keys.push(`v:${vendor}`);
+  const title = normalizedProductValue(item.title || item.name);
+  if (title && !['товар','товарwb'].includes(title)) keys.push(`t:${title}`);
+  return keys;
+}
+
+function buildProductIndex(items = []) {
+  const index = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    for (const key of productKeys(item)) if (!index.has(key)) index.set(key,item);
+  }
+  return index;
+}
+
+function findProduct(index, item = {}) {
+  for (const key of productKeys(item)) {
+    const found = index.get(key);
+    if (found) return found;
+  }
+  return null;
+}
+
+
+function reviewSignalsForLink(reviewsData = {}) {
+  const byKey = new Map();
+  const upsert = (item = {}) => {
+    const keys = productKeys(item);
+    const key = keys[0];
+    if (!key) return null;
+    let current = byKey.get(key);
+    if (!current) {
+      current = {
+        nmID:item.nmID ?? null,
+        vendorCode:item.vendorCode || item.supplierArticle || '',
+        title:item.title || item.name || 'Товар WB',
+        totalReviews:0,
+        lowRatedReviews:0,
+        unansweredReviews:0,
+        unansweredQuestions:0,
+        ratings:[],
+      };
+      byKey.set(key,current);
+      for (const alias of keys.slice(1)) if (!byKey.has(alias)) byKey.set(alias,current);
+    }
+    return current;
+  };
+  for (const row of Array.isArray(reviewsData?.reviews) ? reviewsData.reviews : []) {
+    const current = upsert(row);
+    if (!current) continue;
+    current.totalReviews += 1;
+    if (row.rating != null && Number.isFinite(Number(row.rating))) {
+      current.ratings.push(Number(row.rating));
+      if (Number(row.rating) <= 3) current.lowRatedReviews += 1;
+    }
+    if (!row.isAnswered && !row.archived) current.unansweredReviews += 1;
+  }
+  for (const signal of Array.isArray(reviewsData?.productSignals) ? reviewsData.productSignals : []) {
+    const current = upsert(signal);
+    if (!current) continue;
+    current.lowRatedReviews = Math.max(current.lowRatedReviews,Number(signal.lowRatedReviews || 0));
+    current.unansweredReviews = Math.max(current.unansweredReviews,Number(signal.unansweredReviews || 0));
+    current.unansweredQuestions = Math.max(current.unansweredQuestions,Number(signal.unansweredQuestions || 0));
+    if (!current.ratings.length && signal.averageRating != null) current.averageRating = Number(signal.averageRating);
+  }
+  return [...new Set(byKey.values())].map(item=>({
+    ...item,
+    averageRating:item.averageRating ?? (item.ratings.length ? item.ratings.reduce((sum,value)=>sum+value,0)/item.ratings.length : null),
+    ratings:undefined,
+  }));
+}
+
+function matchingFeedbackTexts(rows = [], item = {}) {
+  const wanted = new Set(productKeys(item));
+  if (!wanted.size) return [];
+  const texts = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!productKeys(row).some(key => wanted.has(key))) continue;
+    const text = String(row.text || row.cons || row.pros || '').replace(/\s+/g,' ').trim();
+    if (text && !texts.includes(text)) texts.push(text);
+  }
+  return texts.slice(0,2);
+}
+
+function formatReviewReturnLink({ returnsData, reviewsData, productsData, context = {} } = {}) {
+  const period = returnsData?.period || reviewsData?.period || context?.period || {};
+  const returnRows = Array.isArray(returnsData?.highestReturnRate) && returnsData.highestReturnRate.length
+    ? returnsData.highestReturnRate
+    : (Array.isArray(reviewsData?.relatedReturns) ? reviewsData.relatedReturns : []);
+  const signals = reviewSignalsForLink(reviewsData);
+  const lowReviews = Array.isArray(reviewsData?.lowRatedReviews) ? reviewsData.lowRatedReviews : [];
+  const productRows = Array.isArray(productsData?.products) ? productsData.products : [];
+  const returnIndex = buildProductIndex(returnRows);
+  const productIndex = buildProductIndex(productRows);
+  const matched = [];
+
+  for (const signal of signals) {
+    const returned = findProduct(returnIndex,signal);
+    if (!returned || Number(returned.returns || 0) <= 0) continue;
+    const card = findProduct(productIndex,signal) || findProduct(productIndex,returned) || null;
+    const combined = { ...returned, ...signal, ...(card || {}) };
+    matched.push({
+      ...combined,
+      returns:Number(returned.returns || 0),
+      returnRate:returned.returnRate == null ? null : Number(returned.returnRate),
+      totalReviews:Number(signal.totalReviews || 0),
+      lowRatedReviews:Number(signal.lowRatedReviews || 0),
+      unansweredReviews:Number(signal.unansweredReviews || 0),
+      unansweredQuestions:Number(signal.unansweredQuestions || 0),
+      averageRating:signal.averageRating == null ? null : Number(signal.averageRating),
+      complaints:matchingFeedbackTexts(lowReviews,signal),
+      riskScore:Number(returned.returns || 0) * 2 + Number(returned.returnRate || 0) + Number(signal.lowRatedReviews || 0) * 5 + Number(signal.unansweredReviews || 0),
+    });
+  }
+  matched.sort((a,b)=>b.riskScore-a.riskScore);
+
+  const lines = [`Связал отзывы с возвратами за ${formatRuPeriod(period)}. Сопоставление выполнено по nmID, затем по артикулу продавца; при отсутствии идентификаторов — по названию товара.`];
+  if (!reviewsData?.available) {
+    lines.push('Отзывы за выбранный период не подтверждены, поэтому реальную связь с возвратами сейчас построить нельзя. Нулём это не считаю.');
+    return lines.join('\n');
+  }
+  if (!returnRows.length) {
+    lines.push('Товарная детализация возвратов за выбранный период пока недоступна. Отзывы вижу, но привязать их к возвратам без списка товаров нельзя.');
+    return lines.join('\n');
+  }
+  if (!signals.length) {
+    lines.push('В отзывах нет товарных негативных сигналов или неотвеченных обращений, которые можно было бы сопоставить с возвратами.');
+    return lines.join('\n');
+  }
+  if (!matched.length) {
+    lines.push('Прямых совпадений по nmID или артикулу в доступной выборке не найдено. Это не означает, что связи нет: часть отзывов или возвратов могла прийти без общего товарного идентификатора.');
+    return lines.join('\n');
+  }
+
+  const productWord = matched.length === 1 ? 'товара' : 'товаров';
+  lines.push(`Совпадение найдено у ${number(matched.length)} ${productWord}. В первую очередь проверь:`);
+  for (const item of matched.slice(0,6)) {
+    const reviewBits = [];
+    if (item.totalReviews) reviewBits.push(`отзывов в выборке — ${number(item.totalReviews)}`);
+    if (item.lowRatedReviews) reviewBits.push(`низких отзывов — ${number(item.lowRatedReviews)}`);
+    if (item.averageRating != null) reviewBits.push(`средняя оценка — ${number(item.averageRating)} ★`);
+    if (item.unansweredReviews || item.unansweredQuestions) reviewBits.push(`без ответа — ${number(item.unansweredReviews + item.unansweredQuestions)}`);
+    const complaint = item.complaints.length ? ` Причины из отзывов: «${item.complaints.join('»; «').slice(0,260)}».` : '';
+    lines.push(`• ${titleOf(item)}: возвратов — ${number(item.returns)}, доля — ${percent(item.returnRate)}; ${reviewBits.join(', ') || 'есть сигнал из отзывов'}.${complaint}`);
+  }
+  lines.push('Это совпадение сигналов, а не доказанная причина возврата. Приоритет — открыть карточки этих товаров, проверить повторяющиеся жалобы, размерную сетку, описание и качество партии.');
+  return lines.join('\n');
+}
+
 function formatReturns(data, tone) {
   const s = data?.summary || {};
   const top = Array.isArray(data?.highestReturnRate) ? data.highestReturnRate : [];
@@ -407,6 +572,76 @@ function formatProcurement(data, tone) {
   return lines.filter(Boolean).join('\n');
 }
 
+function signedMoney(value) {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return 'нет данных';
+  return `${numberValue > 0 ? '+' : ''}${money(numberValue)}`;
+}
+
+function signedNumber(value, suffix = '') {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return 'нет данных';
+  const formatted = new Intl.NumberFormat('ru-RU', { maximumFractionDigits:1 }).format(numberValue);
+  return `${numberValue > 0 ? '+' : ''}${formatted}${suffix}`;
+}
+
+function diagnosticImpact(item = {}) {
+  if (item.impact == null || !Number.isFinite(Number(item.impact))) return '';
+  if (item.impactKind === 'direct_expense') return `Прямой эффект: около ${money(item.impact)} дополнительных расходов.`;
+  if (item.impactKind === 'profit_delta') return `Вклад: около ${money(item.impact)} снижения прибыли по товару.`;
+  if (item.impactKind === 'estimated_revenue_risk') return `Оценочный риск выручки: около ${money(item.impact)}.`;
+  if (item.impactKind === 'revenue_at_risk') return `Снижение выручки: около ${money(item.impact)}.`;
+  return `Денежный масштаб: около ${money(item.impact)}.`;
+}
+
+function formatDiagnostics(data, tone) {
+  if (!data?.available) return data?.warning || 'Для анализа изменений нужен выбранный и предыдущий сопоставимый период.';
+  const currentLabel = formatRuPeriod(data.period || {});
+  const compareLabel = formatRuPeriod(data.comparePeriod || {});
+  const mainMetric = data.headlineMetric === 'operatingProfit' ? 'операционная прибыль' : 'выручка';
+  const main = data.headlineChange || {};
+  const stateText = data.state === 'down' ? 'стало хуже' : data.state === 'up' ? 'стало лучше' : 'существенного денежного сдвига не вижу';
+  const lines = [
+    `Сравнил ${currentLabel} с ${compareLabel}: ${stateText}.`,
+    `${mainMetric[0].toUpperCase()}${mainMetric.slice(1)}: ${signedMoney(main.value)}${main.pct == null ? '' : ` (${signedNumber(main.pct, '%')})`} к предыдущему периоду.`,
+  ];
+
+  const metrics = data.metrics || {};
+  const compact = [];
+  if (metrics.revenue?.available) compact.push(`выручка ${signedMoney(metrics.revenue.value)}`);
+  if (metrics.orders?.available) compact.push(`заказы ${signedNumber(metrics.orders.value)}`);
+  if (metrics.sales?.available) compact.push(`продажи ${signedNumber(metrics.sales.value)}`);
+  if (metrics.returnRate?.available && Math.abs(Number(metrics.returnRate.value || 0)) >= 0.1) compact.push(`доля возвратов ${signedNumber(metrics.returnRate.value,' п.п.')}`);
+  if (data.headlineMetric !== 'operatingProfit' && metrics.operatingProfit?.available) compact.push(`прибыль ${signedMoney(metrics.operatingProfit.value)}`);
+  if (compact.length) lines.push(`Что изменилось: ${compact.slice(0,5).join('; ')}.`);
+
+  const causes = Array.isArray(data.causes) ? data.causes : [];
+  if (causes.length) {
+    lines.push('Почему это произошло:');
+    causes.slice(0,3).forEach((item,index) => {
+      const impact = diagnosticImpact(item);
+      lines.push(`${index + 1}. ${item.title}. ${item.evidence}${impact ? ` ${impact}` : ''}`);
+    });
+  } else {
+    lines.push('Я не вижу одного подтверждённого негативного фактора, который заметно объясняет изменение. Не буду придумывать причину из шума.');
+  }
+
+  if (data.action?.text) {
+    lines.push(`Одно главное действие сейчас: ${data.action.text}`);
+    if (data.action.reason) lines.push(`Почему именно оно: ${data.action.reason}.`);
+  }
+
+  const confidence = data.confidence === 'high' ? 'высокая' : data.confidence === 'medium' ? 'средняя' : 'низкая';
+  lines.push(`Уверенность вывода: ${confidence}.`);
+  if (Array.isArray(data.warnings) && data.warnings.length) lines.push(`Ограничения: ${data.warnings.slice(0,2).join(' ')}`);
+  if (data.state === 'up') lines.push(mildHumor(tone, 'default'));
+  return lines.filter(Boolean).join('\n');
+}
+
+function isDecisionRequest(message = '') {
+  return /(что\s+(?:изменилось|поменялось)|почему\s+(?:упал|упала|упали|просел|просела|просели|снизил|снизилась|снизились|стало\s+хуже)|важнее\s+всего|главн(?:ое|ый)\s+действи|одно\s+главн(?:ое|ый)\s+действи|разбери\s+причин|найди\s+причин|что\s+делать\s+по\s+кабинету)/i.test(String(message || ''));
+}
+
 function formatSync(data) {
   const states = Array.isArray(data?.syncStates) ? data.syncStates : [];
   const failed = states.filter((item) => !['success', 'idle'].includes(item.status));
@@ -417,6 +652,7 @@ function formatSync(data) {
 }
 
 const FORMATTERS = {
+  diagnostics: formatDiagnostics,
   overview: formatOverview,
   sales: formatSales,
   advertising: formatAdvertising,
@@ -497,11 +733,27 @@ async function runElAnalyst(options = {}) {
     };
   }
 
-  const modules = options.classification?.modules?.length ? options.classification.modules.slice(0, 3) : inferModules(message, options.history, 3);
+  let modules = options.classification?.modules?.length ? options.classification.modules.slice(0, 3) : inferModules(message, options.history, 3);
+  // Эл 2.0: диагностический запрос сам агрегирует сравнение периодов и причины,
+  // поэтому не дублируем его обычными сводками finance/sales/overview.
+  if (modules.includes('diagnostics') && isDecisionRequest(message)) modules = ['diagnostics'];
   const results = await options.dataBridge.getMany(modules, message);
   const sections = [];
   const warnings = [];
+  const relationRequest = asksReviewReturnLink(message) && modules.includes('reviews') && modules.includes('returns');
+  const relationHandled = new Set();
+  if (relationRequest) {
+    const returnsData = moduleData(results.returns);
+    const reviewsData = moduleData(results.reviews);
+    const productsData = moduleData(results.products);
+    sections.push(formatReviewReturnLink({ returnsData,reviewsData,productsData,context:options.context }));
+    relationHandled.add('returns');
+    relationHandled.add('reviews');
+    if (modules.includes('products')) relationHandled.add('products');
+    warnings.push(...coverageWarnings(returnsData),...coverageWarnings(reviewsData));
+  }
   for (const moduleName of modules) {
+    if (relationHandled.has(moduleName)) continue;
     const result = results[moduleName];
     let data = moduleData(result);
     if (!result?.ok || !data?.available) {
@@ -560,4 +812,4 @@ async function runElAnalyst(options = {}) {
   };
 }
 
-module.exports = { runElAnalyst, inferModules, FORMATTERS, campaignMetrics };
+module.exports = { runElAnalyst, inferModules, FORMATTERS, campaignMetrics, asksReviewReturnLink, formatReviewReturnLink, formatDiagnostics, isDecisionRequest };

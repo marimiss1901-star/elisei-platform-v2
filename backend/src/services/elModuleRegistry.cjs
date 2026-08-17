@@ -1,6 +1,12 @@
 'use strict';
 
 const MODULES = Object.freeze({
+  diagnostics: {
+    title: 'Изменения, причины и главное действие',
+    internal: true,
+    keywords: ['что изменилось', 'что поменялось', 'почему упал', 'почему упала', 'почему просел', 'почему просела', 'почему снизил', 'почему снизилась', 'почему стало хуже', 'важнее всего', 'главное действие', 'одно главное действие', 'что делать по кабинету', 'разбери причины', 'найди причину'],
+    paths: [],
+  },
   overview: {
     title: 'Общий обзор бизнеса',
     keywords: ['что важно', 'что происходит', 'общий обзор', 'сводка', 'сегодня', 'бизнес', 'кабинет'],
@@ -88,7 +94,7 @@ function detectModules(question, limit = 4) {
 }
 
 function publicCapabilities() {
-  return Object.entries(MODULES).map(([id, config]) => ({ id, title: config.title }));
+  return Object.entries(MODULES).filter(([, config]) => !config.internal).map(([id, config]) => ({ id, title: config.title }));
 }
 
 module.exports = { MODULES, moduleNames, normalizeModule, detectModules, publicCapabilities };

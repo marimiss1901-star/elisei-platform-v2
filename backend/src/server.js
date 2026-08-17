@@ -46,6 +46,9 @@ import {
 } from './wb/live-sync.js'
 import { buildDataQualityReport } from './wb/data-quality.js'
 import { buildElEngagementData } from './services/elEngagement.js'
+import elDecisionEngine from './services/elDecisionEngine.cjs'
+
+const { buildDecisionAnalysis, previousEqualPeriod } = elDecisionEngine
 
 const { Pool } = pg
 const app = express()
@@ -625,7 +628,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.21.0 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.22.0 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -5025,7 +5028,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.21.0',
+    version: '2.22.0',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -6274,6 +6277,18 @@ async function elLoadExtendedStream(connectionId, canonicalData, stream, range, 
   }
 }
 
+function elRangeCovered(periodCoverage = {}, range = null) {
+  if (!range) return true
+  const stages = ['sales','orders']
+  return stages.some(stage => {
+    const item = periodCoverage?.[stage] || {}
+    const from = dateKey(item.from)
+    const to = dateKey(item.to)
+    if (!from || !to) return false
+    return range.from >= from && range.to <= to
+  })
+}
+
 function elDataCoverage(connection, core, range) {
   return {
     requestedPeriod: range ? { from: range.from, to: range.to, days: range.days } : null,
@@ -6326,6 +6341,30 @@ async function buildElModuleData({ req, identity, period, module, focus }) {
     lastSync: connection.last_sync_at || null,
   }
 
+  if (module === 'diagnostics') {
+    if (!filtered.range) {
+      return { ...base, available:false, warning:'Для сравнения выбери конкретный период: день, неделю, месяц или диапазон.' }
+    }
+    const comparePeriod = previousEqualPeriod(filtered.range)
+    const compareData = analyticsFilterConnectionData(canonical.data || {}, comparePeriod)
+    const previousCore = buildCoreAnalytics(compareData, settings)
+    const comparisonCoverage = elRangeCovered(previousCore.periodCoverage, comparePeriod)
+    const analysis = buildDecisionAnalysis({
+      current:core,
+      previous:previousCore,
+      period:{ from:filtered.range.from,to:filtered.range.to,days:filtered.range.days },
+      comparePeriod,
+      comparisonCoverage,
+    })
+    return {
+      ...base,
+      ...analysis,
+      comparisonCoverage,
+      compareAvailability:previousCore.availability,
+      compareCoverage:previousCore.periodCoverage || null,
+      compareSummary:previousCore.summary || null,
+    }
+  }
   if (module === 'overview') {
     return {
       ...base,
