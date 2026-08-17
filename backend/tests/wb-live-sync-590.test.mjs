@@ -48,7 +48,7 @@ for(const marker of [
   'replacedDuplicateReportId:reportId',
   'WB_CATALOG_SERVICE_ENABLED',
   "kickBackgroundWorkers('webhook-report-ready')",
-  "version: '2.23.3'",
+  "version: '2.23.4'",
 ]) assert.ok(server.includes(marker),`server.js must contain ${marker}`)
 
 const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')

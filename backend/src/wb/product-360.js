@@ -305,12 +305,19 @@ export function buildProduct360({
   const reviews = reviewRows.filter(row=>product360Matches(row,product).matched).map(normalizeReview)
   const questions = questionRows.filter(row=>product360Matches(row,product).matched).map(normalizeQuestion)
   const searches = searchRows
-    .filter(row=>product360Matches(row,product).matched)
+    // SKU 360 may use only product-level query rows. Overview/group rows can contain
+    // search phrases from several products and must never leak into a single SKU.
+    .filter(row=>String(row?.rowType || '').toLowerCase() === 'query' && product360Matches(row,product).matched)
     .map(normalizeSearch)
-    .filter(row=>row.rowType === 'query' || row.phrase)
+    .filter(row=>row.phrase)
     .sort((a,b)=>finite(b.orders)-finite(a.orders) || finite(b.revenue)-finite(a.revenue) || finite(b.frequency)-finite(a.frequency))
   const stockHistory = groupStockHistory(stockHistoryRows.filter(row=>product360Matches(row,product).matched).map(normalizeStockHistory))
-  const ads = advertisingRows.filter(row=>product360Matches(row,product).matched)
+  const ads = advertisingRows.filter(row=>{
+    const match = product360Matches(row,product)
+    // Advertising in ELISEI is attributed to SKU only by exact WB nmID.
+    // Do not use vendor/barcode fallbacks for campaign money.
+    return match.matched && match.method === 'nmID'
+  })
   const adSummary = summarizeAdvertising(ads,readiness.advertising)
   const reviewRatings = reviews.map(row=>row.rating).filter(value=>value != null)
   const reviewReady = usable(readiness.reviews)
@@ -402,7 +409,7 @@ export function buildProduct360({
       returnRate:salesMetric(product?.returnRate),
       stock:stockMetric(product?.stock),
       stockCoverDays:usable(readiness.sales) && usable(readiness.stocks) ? safeMetric(product?.stockCoverDays,readiness.stocks,{zeroUnsafe:true}) : null,
-      advertising:adMetric(product?.advertising ?? product?.adSpend),
+      advertising:adMetric(adSummary.spend),
       averagePrice:salesMetric(product?.averagePrice),
     },
     economics:{
@@ -434,7 +441,7 @@ export function buildProduct360({
       penalties:financeMetric(product?.penalties),
       deductions:financeMetric(product?.deductions),
       additionalPayment:financeMetric(product?.additionalPayment),
-      advertising:adMetric(product?.advertising),
+      advertising:adMetric(adSummary.spend),
       tax:salesMetric(product?.tax),
       fixedExpenses:salesMetric(product?.fixedExpenses),
       expenses:economicsMetric(product?.expenses),
@@ -455,7 +462,7 @@ export function buildProduct360({
     },
     demand:{
       daily,
-      advertising:{ rows:usable(readiness.advertising) ? ads.slice(0,80) : [],summary:adSummary,state:readiness.advertising },
+      advertising:{ rows:usable(readiness.advertising) ? ads.slice(0,80) : [],summary:adSummary,state:readiness.advertising,matching:'nmID_exact' },
       search:{ rows:usable(readiness.search) ? searches.slice(0,80) : [],summary:searchSummary,state:readiness.search },
     },
     quality:{

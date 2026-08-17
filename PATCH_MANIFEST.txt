@@ -1,12 +1,27 @@
-ELISEI PATCH 5.11.3
-Base: ELISEI 5.11.2
-Frontend: 5.11.3
-Backend: 2.23.3
-El Core: 5.11.3
-Purpose: SKU 360 Fast Open — remove infinite skeleton, render core first, enrich heavy streams in background.
-Install: copy the contents over the existing ELISEI 5.11.2 repository with replacement, then redeploy backend and frontend.
-Important: do not clear WB tokens, Smart Scheduler state, rrdId, taskId, cursors or PostgreSQL data.
-Loading policy: core SKU 360 must render without waiting for extended JSON/finance queries; full enrichment is best-effort and must never hide an already rendered core card.
-Refresh policy: scheduler status/nextAllowedAt changes do not restart SKU 360; only actual persisted-data revisions trigger background refresh.
-Identity policy preserved: nmID -> barcode -> vendorCode -> chrtID; product title is never a join key.
-Payload files: 17 (+ manifest/checksum helper files)
+ELISEI 5.11.4 PATCH MANIFEST
+Base: ELISEI 5.11.3
+Frontend: 5.11.4
+Backend: 2.23.4
+El Core: 5.11.4
+
+Purpose: SKU 360 strict data isolation for search and advertising.
+Search overview/group rows are excluded from SKU 360.
+Advertising money is accepted only by exact nmID match.
+WB product/search-texts batch size: max 20 nmIds.
+
+Files:
+README.md
+README_5_11_4.md
+RELEASE_NOTES_V5_11_4.txt
+backend/package.json
+backend/src/routes/elCore.cjs
+backend/src/server.js
+backend/src/wb/product-360.js
+backend/tests/el-hotfix-5101.test.mjs
+backend/tests/wb-finance-legacy-cooldown-5103.test.mjs
+backend/tests/wb-finance-throttle-5102.test.mjs
+backend/tests/wb-live-sync-590.test.mjs
+backend/tests/wb-product-360-isolation-5114.test.mjs
+backend/tests/wb-smart-scheduler-5105.test.mjs
+package.json
+src/components/Product360Drawer.jsx

@@ -760,7 +760,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.23.3 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.23.4 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -4249,7 +4249,8 @@ async function advanceSearchQueriesTask(connectionId, token, state, data, { dead
     return {pending:false,value,validation:{period,detailPeriod,totalRows:value.totalRows,productsScanned:nmIds.length,pages:pageNumber,memorySafe:true},endpoint:'https://seller-analytics-api.wildberries.ru/api/v2/search-report/report + /product/search-texts'}
   }
 
-  const batch = nmIds.slice(productOffset,productOffset+50)
+  // WB product search-texts accepts at most 20 nmIds per request.
+  const batch = nmIds.slice(productOffset,productOffset+20)
   const endpoint = 'https://seller-analytics-api.wildberries.ru/api/v2/search-report/product/search-texts'
   const payload = await wbFetch(endpoint,token,{
     method:'POST',headers:{'Content-Type':'application/json'},
@@ -5154,7 +5155,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.23.3',
+    version: '2.23.4',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -5987,6 +5988,7 @@ function product360ExtendedIdentityClause(product, params = []) {
 function compactProduct360ExtendedRows(canonicalData, stream, product, range, limit = 120) {
   const payload = canonicalData?.[stream] && typeof canonicalData[stream] === 'object' ? canonicalData[stream] : {}
   const sample = elFilterExtendedRows(elExtendedPayloadRows(canonicalData,stream),stream,range)
+    .filter(row=>stream !== 'searchQueries' || String(row?.rowType || '').toLowerCase() === 'query')
     .filter(row=>product360Matches(row,product).matched)
     .slice(0,Math.max(1,Math.min(200,Number(limit)||120)))
   const totalRows = Math.max(Number(payload?.totalRows || 0), Number(payload?.rows?.length || 0))
@@ -6017,6 +6019,7 @@ async function loadProduct360ExtendedRows(connectionId, canonicalData, stream, p
   const identityClause = product360ExtendedIdentityClause(product,params)
   if (!identityClause) return compactProduct360ExtendedRows(canonicalData,stream,product,range,limit)
   where.push(identityClause)
+  if (stream === 'searchQueries') where.push(`COALESCE(payload->>'rowType','')='query'`)
   const dateExpression = extendedDateExpression(stream)
   if (dateExpression && range?.from && range?.to) {
     params.push(String(range.from).slice(0,10)); const fromRef = `$${params.length}`

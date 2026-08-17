@@ -1,6 +1,6 @@
 README.md
-README_5_11_3.md
-RELEASE_NOTES_V5_11_3.txt
+README_5_11_4.md
+RELEASE_NOTES_V5_11_4.txt
 backend/package.json
 backend/src/routes/elCore.cjs
 backend/src/server.js
@@ -9,9 +9,7 @@ backend/tests/el-hotfix-5101.test.mjs
 backend/tests/wb-finance-legacy-cooldown-5103.test.mjs
 backend/tests/wb-finance-throttle-5102.test.mjs
 backend/tests/wb-live-sync-590.test.mjs
-backend/tests/wb-product-360-fast-open-5113.test.mjs
+backend/tests/wb-product-360-isolation-5114.test.mjs
 backend/tests/wb-smart-scheduler-5105.test.mjs
 package.json
 src/components/Product360Drawer.jsx
-src/lib/api.js
-src/pages/DashboardPage.jsx
