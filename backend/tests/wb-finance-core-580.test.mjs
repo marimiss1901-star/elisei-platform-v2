@@ -13,9 +13,9 @@ assert.deepEqual(financeContinuation({incomingRows:[{rrdId:'2'},{rrdId:huge}],pr
 assert.equal(financeContinuation({incomingRows:[],previousRrdId:huge}).complete,true)
 assert.equal(financeContinuation({incomingRows:[{rrdId:huge}],previousRrdId:huge}).reason,'cursor_missing_or_repeated')
 assert.equal(financePageCooldownMs({typeId:1}),FINANCE_METHOD_LIMITS.baseDetailIntervalMs)
-assert.equal(financePageCooldownMs({typeId:4}),FINANCE_METHOD_LIMITS.privilegedIntervalMs)
-assert.equal(documentsPageCooldownMs({typeId:1}),11_000)
-assert.equal(documentsPageCooldownMs({typeId:4}),11_000)
+assert.equal(financePageCooldownMs({typeId:4}),FINANCE_METHOD_LIMITS.fastDetailIntervalMs)
+assert.equal(documentsPageCooldownMs({typeId:1}),FINANCE_METHOD_LIMITS.baseDocumentsIntervalMs)
+assert.equal(documentsPageCooldownMs({typeId:4}),FINANCE_METHOD_LIMITS.documentsFastIntervalMs)
 
 const categories=normalizeDocumentCategories({data:[{name:'acts',title:'Акты'}]})
 assert.deepEqual(categories,[{name:'acts',title:'Акты'}])
@@ -51,7 +51,7 @@ for (const marker of [
   '/api/common/v1/subscriptions',
   "stage === 'jamSubscription'",
   "derived://finance-ledger/acquiring",
-  'documentsPageCooldownMs(tokenInfo)',
+  'documentsPageCooldownMs(financeRuntimeTokenInfo(tokenInfo))',
 ]) assert.ok(server.includes(marker),`server.js must contain ${marker}`)
 assert.ok(fs.readFileSync(new URL('../src/wb/finance-core.js',import.meta.url),'utf8').includes('continue_until_204'))
 assert.ok(!server.includes('/api/v5/supplier/reportDetailByPeriod'),'legacy finance endpoint must not return')

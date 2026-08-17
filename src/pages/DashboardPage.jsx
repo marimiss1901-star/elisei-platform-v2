@@ -2009,6 +2009,9 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         if (generatedTask) return due
           ? { tone:'pending', title:'Проверяем готовность отчёта', text:'taskId сохранён. Срок паузы закончился, фоновая очередь продолжает тот же отчёт.' }
           : { tone:'warning', title:'Отчёт создан · ждём WB', text:state.nextAllowedAt ? `taskId сохранён. Следующая проверка после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}` : (state.lastError || 'ELISEI продолжит тот же отчёт автоматически.') }
+        if (stage === 'finance' && state.metadata?.tokenMode === 'base') return due
+          ? { tone:'pending', title:'Финансы · разрешённый повтор запускается', text:'12-часовой интервал Базового токена закончился. ELISEI продолжает загрузку с сохранённого rrdId.' }
+          : { tone:'warning', title:'Финансы · лимит Базового токена WB', text:state.nextAllowedAt ? `Данные и rrdId сохранены. WB разрешит следующий запрос после ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}. Для Базового токена без сервисного секрета это официальный интервал 12 часов; второй пользовательский токен не требуется.` : (state.lastError || 'WB временно ограничил финансовый метод для Базового токена.') }
         return due
           ? { tone:'pending', title:'Автоповтор запускается', text:'Срок паузы закончился. Интерфейс разбудил фоновую очередь; статус обновится автоматически.' }
           : { tone:'warning', title:'Лимит метода WB', text:state.nextAllowedAt ? `Только этот поток ждёт до ${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}. Остальные этапы продолжаются независимо.` : (state.lastError || 'Только этот поток временно ожидает разрешённого интервала WB.') }

@@ -5,32 +5,42 @@ const number = value => {
 }
 
 export const FINANCE_METHOD_LIMITS = Object.freeze({
-  baseDetailIntervalMs: 21 * 1000,
+  // POST /api/finance/v1/sales-reports/detailed:
+  // Base без service secret — 2 запроса / 24 ч, интервал 12 ч.
+  // Personal / Service / Base + secret — 1 запрос / мин.
+  baseDetailIntervalMs: 12 * 60 * 60 * 1000,
   baseBalanceIntervalMs: 24 * 60 * 60 * 1000,
-  baseDocumentsIntervalMs: 11 * 1000,
-  privilegedIntervalMs: 21 * 1000,
-  documentsPrivilegedIntervalMs: 11 * 1000,
+  // GET /api/v1/documents/list: Base без secret — 1 запрос / 24 ч;
+  // Personal / Service / Base + secret — 1 запрос / 10 сек.
+  baseDocumentsIntervalMs: 24 * 60 * 60 * 1000,
+  fastDetailIntervalMs: 61 * 1000,
+  documentsFastIntervalMs: 11 * 1000,
 })
 
 export function isPrivilegedFinanceToken(tokenInfo = {}) {
   return [3,4].includes(Number(tokenInfo?.typeId || 0))
 }
 
+export function hasFastFinanceRate(tokenInfo = {}) {
+  const typeId = Number(tokenInfo?.typeId || 0)
+  return [3,4].includes(typeId) || (typeId === 1 && Boolean(tokenInfo?.hasServiceSecret))
+}
+
 export function financePageCooldownMs(tokenInfo = {}) {
-  return isPrivilegedFinanceToken(tokenInfo)
-    ? FINANCE_METHOD_LIMITS.privilegedIntervalMs
+  return hasFastFinanceRate(tokenInfo)
+    ? FINANCE_METHOD_LIMITS.fastDetailIntervalMs
     : FINANCE_METHOD_LIMITS.baseDetailIntervalMs
 }
 
 export function financeBalanceCooldownMs(tokenInfo = {}) {
-  return isPrivilegedFinanceToken(tokenInfo)
-    ? FINANCE_METHOD_LIMITS.privilegedIntervalMs
+  return hasFastFinanceRate(tokenInfo)
+    ? FINANCE_METHOD_LIMITS.fastDetailIntervalMs
     : FINANCE_METHOD_LIMITS.baseBalanceIntervalMs
 }
 
 export function documentsPageCooldownMs(tokenInfo = {}) {
-  return isPrivilegedFinanceToken(tokenInfo)
-    ? FINANCE_METHOD_LIMITS.documentsPrivilegedIntervalMs
+  return hasFastFinanceRate(tokenInfo)
+    ? FINANCE_METHOD_LIMITS.documentsFastIntervalMs
     : FINANCE_METHOD_LIMITS.baseDocumentsIntervalMs
 }
 
@@ -48,16 +58,17 @@ export function financeContinuation({ incomingRows = [], previousRrdId = '0' } =
   return { complete:false, nextRrdId, reason:'continue_until_204' }
 }
 
-export function financeProgressCopy({ tokenInfo = {}, rows = 0, page = 0, nextAllowedAt = null } = {}) {
-  const base = !isPrivilegedFinanceToken(tokenInfo)
+export function financeProgressCopy({ tokenInfo = {}, rows = 0, page = 0, nextAllowedAt = null, pageLimit = 100000 } = {}) {
+  const fast = hasFastFinanceRate(tokenInfo)
   return {
-    tokenMode:base ? 'base' : 'privileged',
+    tokenMode:fast ? 'fast' : 'base',
     rows:Number(rows || 0),
     page:Number(page || 0),
     nextAllowedAt:nextAllowedAt || null,
-    limitNote:base
-      ? 'Финансовая детализация WB: официальный лимит — 1 запрос на аккаунт примерно раз в 20 секунд. ELISEI продолжает пагинацию автоматически.'
-      : 'Финансовая детализация WB: официальный лимит — 1 запрос на аккаунт примерно раз в 20 секунд. ELISEI продолжает пагинацию автоматически.',
+    pageLimit:Number(pageLimit || 100000),
+    limitNote:fast
+      ? 'Финансовая детализация WB работает в быстром режиме сервиса: до 100 000 строк за запрос, следующий запрос — не раньше чем через минуту.'
+      : 'Финансовая детализация WB работает через Базовый токен без сервисного секрета: WB разрешает 2 запроса в 24 часа с интервалом 12 часов. ELISEI забирает до 100 000 строк за один разрешённый запрос.',
   }
 }
 

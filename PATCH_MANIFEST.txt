@@ -1,13 +1,15 @@
-ELISEI 5.10.3 HOTFIX PATCH
-Base: ELISEI 5.10.2
-Frontend: 5.10.3
-Backend: 2.22.3
-El Core: 5.10.3
+ELISEI 5.10.4 CORRECTIVE PATCH
+Base: ELISEI 5.10.3
+Frontend: 5.10.4
+Backend: 2.22.4
+El Core: 5.10.4
 
 Purpose:
-- recover stale pre-5.10.2 finance continuation timestamps that remained queued for hours;
-- preserve rrdId/syncId/last_count and already persisted finance rows;
-- never overwrite genuine WB 429 rate_limited Retry-After;
-- run recovery immediately during backend startup.
+- correct WB finance rate limits by token mode;
+- preserve real Base-token 12h finance rate limits instead of force-resetting them;
+- request up to 100,000 finance rows per allowed call;
+- correct Base document cooldown;
+- explain Base-token finance limits in sync UI;
+- keep one user-facing WB connection; service secret remains backend-only.
 
-Apply: replace files preserving paths, then redeploy backend/frontend.
+Backend test result: 28/28 passed.

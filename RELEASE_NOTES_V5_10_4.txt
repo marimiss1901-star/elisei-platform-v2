@@ -1,0 +1,12 @@
+ELISEI 5.10.4 / Backend 2.22.4 / El Core 5.10.4
+
+CORRECTIVE RELEASE: WB FINANCE RATE LIMITS
+
+1. Исправлена ошибка 5.10.2/5.10.3: обычный Base token без X-Client-Secret НЕ имеет минутного лимита для financial details. Для POST /api/finance/v1/sales-reports/detailed официальный лимит Base — 2 запроса за 24 часа, интервал 12 часов.
+2. Service / Personal / Base + valid service secret используют быстрый режим около 1 запроса в минуту.
+3. Принудительный recovery длинного finance next_allowed_at отключён: настоящий лимит WB больше не сбрасывается.
+4. FINANCE_PAGE_LIMIT увеличен с 10 000 до 100 000 строк (официальный максимум метода), чтобы Base token получал максимум данных за каждый разрешённый запрос.
+5. Documents: Base без service secret использует официальный длинный лимит; fast mode — короткий лимит сервиса.
+6. UI синхронизаций объясняет разницу между лимитом Base token и зависанием программы. Второй пользовательский токен не требуется.
+7. Сервисный секрет остаётся серверной настройкой ELISEI (WB_CLIENT_SECRET) и не вводится клиентом.
+8. 28/28 backend tests passed.

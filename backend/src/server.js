@@ -205,41 +205,11 @@ async function recoverRetryableErrorStates() {
 
 
 async function recoverLegacyFinanceCooldowns({ connectionId = null } = {}) {
-  if (!pool) return []
-  const params=[]
-  let connectionFilter=''
-  if (connectionId) {
-    params.push(connectionId)
-    connectionFilter=' AND connection_id=$1'
-  }
-  // До 5.10.2 ELISEI ошибочно держал обычное продолжение финансовой
-  // пагинации на часы. В старых состояниях признак limitNote мог лежать внутри
-  // progress или вообще отсутствовать, поэтому фильтр по тексту не срабатывал.
-  // Нормальное продолжение finance после успешной страницы всегда имеет status
-  // queued и короткий cooldown. Настоящий ответ WB 429 хранится как
-  // rate_limited, поэтому его Retry-After здесь не трогаем.
-  const result=await pool.query(`
-    UPDATE wb_sync_states
-    SET status='queued',
-        next_allowed_at=NOW(),
-        last_error=NULL,
-        metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object(
-          'legacyFinanceCooldownRecovered',true,
-          'legacyFinanceCooldownRecoveredAt',NOW(),
-          'legacyFinanceCooldownPreviousNextAllowedAt',next_allowed_at,
-          'limitNote','Финансовая детализация WB продолжает пагинацию короткими страницами автоматически.'
-        ),
-        updated_at=NOW()
-    WHERE stage='finance'
-      AND status='queued'
-      AND COALESCE(last_count,0) > 0
-      AND next_allowed_at > NOW() + INTERVAL '2 minutes'
-      AND COALESCE(metadata->>'complete','false') <> 'true'
-      ${connectionFilter}
-    RETURNING connection_id,stage,last_count
-  `,params)
-  if (result.rows.length) console.warn(`Recovered ${result.rows.length} stale queued WB finance cooldown(s).`)
-  return result.rows
+  // 5.10.4: длинная пауза finance больше не считается ошибкой сама по себе.
+  // Для Базового токена без X-Client-Secret официальный интервал WB между
+  // запросами детализации — 12 часов. Настоящие queued/rate_limited состояния
+  // сохраняем и никогда не сбрасываем искусственно.
+  return []
 }
 
 
@@ -548,7 +518,7 @@ const HEAVY_SYNC_STAGES = Object.freeze(['finance','paidStorage','acceptance','a
 const RETRYABLE_HTTP_STATUSES = new Set([408,425,500,502,503,504])
 const MAX_AUTOMATIC_RETRY_ATTEMPTS = Math.max(3,Math.min(12,Number(process.env.WB_MAX_AUTOMATIC_RETRY_ATTEMPTS || 8)))
 const HEAVY_PAGE_LIMIT = Math.max(500, Math.min(5000, Number(process.env.WB_HEAVY_PAGE_LIMIT || 2500)))
-const FINANCE_PAGE_LIMIT = Math.max(2500, Math.min(20000, Number(process.env.WB_FINANCE_PAGE_LIMIT || 10000)))
+const FINANCE_PAGE_LIMIT = Math.max(2500, Math.min(100000, Number(process.env.WB_FINANCE_PAGE_LIMIT || 100000)))
 const HEAVY_DB_BATCH_SIZE = Math.max(100, Math.min(500, Number(process.env.WB_HEAVY_DB_BATCH_SIZE || 250)))
 const HEAVY_STAGE_COOLDOWN_MS = Math.max(5000, Number(process.env.WB_HEAVY_STAGE_COOLDOWN_MS || 65000))
 const FBS_ARCHIVE_MONTHS = Math.max(1, Math.min(60, Number(process.env.WB_FBS_ARCHIVE_MONTHS || 24)))
@@ -675,12 +645,16 @@ function isRetryableWbError(error) {
   return RETRYABLE_HTTP_STATUSES.has(Number(error?.status || 0))
 }
 
+function financeRuntimeTokenInfo(tokenInfo = {}) {
+  return { ...(tokenInfo || {}), hasServiceSecret:Boolean(publicServiceSecretStatus().valid) }
+}
+
 function authHeaders(token) {
   const info = inspectWbToken(token)
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.22.3 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.22.4 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -3353,7 +3327,7 @@ async function financeCompactSnapshot(connectionId, stage, syncId, period, {
   const value = {
     rows:compactRows,totalRows:Number(persistedCount || 0),totals,period,balance:stage === 'finance' ? balance : null,complete:Boolean(complete),
     lastRrdId:String(cursor || '0'),rawRowCount:Number(persistedCount || 0),storage:'wb_stream_items',
-    progress:financeProgressCopy({ tokenInfo,rows:persistedCount,page:pageNumber,nextAllowedAt:null }),
+    progress:financeProgressCopy({ tokenInfo:financeRuntimeTokenInfo(tokenInfo),rows:persistedCount,page:pageNumber,nextAllowedAt:null,pageLimit:FINANCE_PAGE_LIMIT }),
   }
   await saveStreamData(pool,{ connectionId,stream:stage,payload:value,metadata:{period,syncId,cursor:String(cursor || '0'),complete:Boolean(complete)},source:complete?'sync':'partial-sync' })
   return value
@@ -3434,7 +3408,7 @@ async function advancePagedFinanceTask(stage, connectionId, token, state, { dead
   const continuation=financeContinuation({incomingRows:incoming,previousRrdId:rrdId})
   const persistedCount = await countStreamItems(pool,{connectionId,stream:stage,syncId})
   if (!continuation.complete) {
-    const nextAllowedAt=new Date(Date.now()+financePageCooldownMs(tokenInfo)).toISOString()
+    const nextAllowedAt=new Date(Date.now()+financePageCooldownMs(financeRuntimeTokenInfo(tokenInfo))).toISOString()
     const partialValue=await financeCompactSnapshot(connectionId,stage,syncId,period,{
       complete:false,cursor:continuation.nextRrdId,persistedCount,tokenInfo,pageNumber:pageNumber+1,
     })
@@ -3447,7 +3421,7 @@ async function advancePagedFinanceTask(stage, connectionId, token, state, { dead
       metadata:{
         period,syncId,rrdId:continuation.nextRrdId,pageNumber:pageNumber+1,persistedCount,lastPageRows:incoming.length,
         accessConfirmed:true,cursorReason:continuation.reason,
-        ...financeProgressCopy({tokenInfo,rows:persistedCount,page:pageNumber+1,nextAllowedAt}),
+        ...financeProgressCopy({tokenInfo:financeRuntimeTokenInfo(tokenInfo),rows:persistedCount,page:pageNumber+1,nextAllowedAt,pageLimit:FINANCE_PAGE_LIMIT}),
       },
     }
   }
@@ -3897,7 +3871,7 @@ async function advanceOffsetReportTask(stage, connectionId, token, state, { dead
   const declaredTotal = Number(payload?.data?.total ?? payload?.total ?? 0)
   const hasMore = declaredTotal > 0 ? offset + rows.length < declaredTotal : rows.length >= definition.pageSize
   if (hasMore && rows.length) {
-    const waitMs = stage === 'documents' ? documentsPageCooldownMs(tokenInfo) : HEAVY_STAGE_COOLDOWN_MS
+    const waitMs = stage === 'documents' ? documentsPageCooldownMs(financeRuntimeTokenInfo(tokenInfo)) : HEAVY_STAGE_COOLDOWN_MS
     const nextAllowedAt = new Date(Date.now()+waitMs).toISOString()
     const partialValue = stage === 'documents'
       ? await documentStreamSnapshot(connectionId,syncId,period,categories,{complete:false,pages:pageNumber+1,nextAllowedAt})
@@ -5058,7 +5032,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.22.3',
+    version: '2.22.4',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
