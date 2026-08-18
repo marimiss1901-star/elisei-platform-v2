@@ -53,6 +53,8 @@ async function downloadFile(path) {
 export const authApi = {
   register: (data) => request('/api/auth/register', { method: 'POST', body: JSON.stringify(data) }),
   login: (data) => request('/api/auth/login', { method: 'POST', body: JSON.stringify(data) }),
+  requestPasswordReset: (data) => request('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify(data) }),
+  confirmPasswordReset: (data) => request('/api/auth/password-reset/confirm', { method: 'POST', body: JSON.stringify(data) }),
   me: () => request('/api/auth/me'),
   logout: () => authStore.clear(),
 }

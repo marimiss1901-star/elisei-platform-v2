@@ -5253,6 +5253,72 @@ app.post('/api/auth/register', async (req, res) => {
   } catch (error) { res.status(error.code === '23505' ? 409 : (error.status || 500)).json({ error: error.code === '23505' ? 'Аккаунт с такой почтой уже существует' : error.message }) }
 })
 
+app.post('/api/auth/password-reset/request', async (req, res) => {
+  try {
+    requireBackendConfig()
+    const email = String(req.body?.email || '').trim().toLowerCase()
+    const genericResponse = {
+      ok: true,
+      expiresInMinutes: 15,
+      message: 'Если аккаунт с такой почтой существует, ссылка для восстановления создана. Пока почтовая отправка не подключена, одноразовую ссылку можно взять в логах backend Render.'
+    }
+    if (!email || !email.includes('@')) return res.status(400).json({ error:'Введите корректную электронную почту.' })
+    const result = await pool.query('SELECT id,email,password_hash FROM users WHERE email=$1', [email])
+    const user = result.rows[0]
+    if (!user) return res.json(genericResponse)
+
+    const passwordFingerprint = crypto.createHash('sha256').update(String(user.password_hash || '')).digest('hex').slice(0,24)
+    const resetToken = jwt.sign({
+      sub:user.id,
+      email:user.email,
+      purpose:'password_reset',
+      pwd:passwordFingerprint,
+    }, jwtSecret, { expiresIn:'15m' })
+    const frontendBase = String(req.headers.origin || allowedOrigins[0] || '').trim().replace(/\/$/,'')
+    if (!frontendBase) throw Object.assign(new Error('FRONTEND_ORIGIN не настроен для восстановления пароля'), { status:503 })
+    const resetUrl = `${frontendBase}/login?reset=${encodeURIComponent(resetToken)}&email=${encodeURIComponent(user.email)}`
+    console.warn(`[ELISEI PASSWORD RESET] Одноразовая ссылка (15 мин): ${resetUrl}`)
+    return res.json(genericResponse)
+  } catch (error) {
+    return res.status(error.status || 500).json({ error:error.message })
+  }
+})
+
+app.post('/api/auth/password-reset/confirm', async (req, res) => {
+  try {
+    requireBackendConfig()
+    const token = String(req.body?.token || '').trim()
+    const password = String(req.body?.password || '')
+    if (!token) return res.status(400).json({ error:'Ссылка восстановления отсутствует.' })
+    if (password.length < 8) return res.status(400).json({ error:'Новый пароль должен содержать минимум 8 символов.' })
+
+    let payload
+    try {
+      payload = jwt.verify(token, jwtSecret)
+    } catch {
+      return res.status(400).json({ error:'Ссылка восстановления недействительна или уже истекла. Запросите новую.' })
+    }
+    if (payload?.purpose !== 'password_reset' || !payload?.sub || !payload?.email || !payload?.pwd) {
+      return res.status(400).json({ error:'Некорректная ссылка восстановления.' })
+    }
+    const result = await pool.query(
+      'SELECT id,email,password_hash FROM users WHERE id=$1 AND email=$2',
+      [payload.sub, String(payload.email).toLowerCase()]
+    )
+    const user = result.rows[0]
+    if (!user) return res.status(400).json({ error:'Ссылка восстановления недействительна.' })
+    const currentFingerprint = crypto.createHash('sha256').update(String(user.password_hash || '')).digest('hex').slice(0,24)
+    if (currentFingerprint !== payload.pwd) {
+      return res.status(400).json({ error:'Эта ссылка восстановления уже была использована. Запросите новую.' })
+    }
+    const passwordHash = await bcrypt.hash(password, 12)
+    await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2', [passwordHash, user.id])
+    return res.json({ ok:true, message:'Пароль изменён. Теперь войдите с новым паролем.' })
+  } catch (error) {
+    return res.status(error.status || 500).json({ error:error.message })
+  }
+})
+
 app.post('/api/auth/login', async (req, res) => {
   try {
     requireBackendConfig()
