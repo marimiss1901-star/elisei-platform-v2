@@ -1,13 +1,4 @@
-ELISEI 5.13.2 PATCH MANIFEST
-Base: ELISEI 5.13.1
-Frontend: 5.13.2
-Backend: 2.25.2
-El Core: 5.13.2
-Purpose: Closed-Day Backfill for Daily Ready
-
-Critical fix:
-- Daily Ready verifies actual persisted coverage of yesterday.
-- Missing orders/sales coverage triggers a background backfill from one day before target date.
-- Login does not trigger WB API.
-- Successful recovery confirms target date even when WB legitimately returns zero rows.
-- Existing queued/rate-limited stages and next_allowed_at are respected.
+ELISEI 5.13.3 PATCH
+Base: 5.13.2
+Purpose: serialize Daily Ready closed-day recovery through Smart Scheduler
+Files: 8

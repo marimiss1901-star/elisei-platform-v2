@@ -1,6 +1,6 @@
 const DAY_MS = 86400000
 
-export const DAILY_READY_VERSION = 3
+export const DAILY_READY_VERSION = 4
 export const DEFAULT_DAILY_READY_TIMEZONE = 'Europe/Moscow'
 
 export const AUTOMATIC_REFRESH_INTERVALS_SECONDS = Object.freeze({

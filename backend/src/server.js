@@ -275,7 +275,7 @@ async function prepareSmartSchedulerCycle() {
     return smartSchedulerWinners
   }
   const result = await pool.query(`
-    SELECT s.connection_id,s.stage,s.status,s.task_id,s.next_allowed_at,s.updated_at
+    SELECT s.connection_id,s.stage,s.status,s.task_id,s.next_allowed_at,s.updated_at,s.metadata
     FROM wb_sync_states s
     JOIN marketplace_connections c ON c.id=s.connection_id
     WHERE s.status IN ('pending','queued','rate_limited','retry_scheduled')
@@ -284,7 +284,42 @@ async function prepareSmartSchedulerCycle() {
     ORDER BY s.updated_at
     LIMIT 250
   `)
-  smartSchedulerWinners = chooseCycleWinners(result.rows)
+  const dueRows = result.rows
+  smartSchedulerWinners = chooseCycleWinners(dueRows)
+
+  // 5.13.3: закрытие вчерашнего дня получает отдельную последовательную lane.
+  // Раньше orders/sales/advertising могли одновременно стать due и визуально
+  // застревать среди остальных фоновых потоков. Для каждого кабинета выбираем
+  // ровно один due recovery-stage; созданный WB taskId всегда имеет приоритет.
+  const recoveryOrder = new Map([['orders',0],['sales',1],['advertising',2]])
+  const byConnection = new Map()
+  for (const row of dueRows) {
+    const key = String(row.connection_id || '')
+    if (!byConnection.has(key)) byConnection.set(key,[])
+    byConnection.get(key).push(row)
+  }
+  for (const [connectionId, rows] of byConnection) {
+    if (rows.some(row => row.task_id)) continue
+    const recoveryRows = rows
+      .filter(row => row?.metadata?.trigger === 'daily_ready_recovery' && recoveryOrder.has(String(row.stage)))
+      .sort((a,b) => recoveryOrder.get(String(a.stage)) - recoveryOrder.get(String(b.stage)))
+    if (!recoveryRows.length) continue
+    const winner = recoveryRows[0]
+    smartSchedulerWinners.set(connectionId,String(winner.stage))
+    const deferredStages = recoveryRows.slice(1).map(row=>String(row.stage))
+    if (deferredStages.length) {
+      await pool.query(`
+        UPDATE wb_sync_states
+        SET next_allowed_at=GREATEST(COALESCE(next_allowed_at,NOW()), NOW() + INTERVAL '70 seconds'),
+            updated_at=NOW()
+        WHERE connection_id=$1
+          AND stage=ANY($2::text[])
+          AND status IN ('queued','rate_limited','retry_scheduled')
+          AND (next_allowed_at IS NULL OR next_allowed_at <= NOW())
+      `,[connectionId,deferredStages])
+    }
+  }
+
   smartSchedulerPreparedAt = new Date().toISOString()
   return smartSchedulerWinners
 }
@@ -850,7 +885,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.25.2 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.25.3 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -5269,7 +5304,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.25.2',
+    version: '2.25.3',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
