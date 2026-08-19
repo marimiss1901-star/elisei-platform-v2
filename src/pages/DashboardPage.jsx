@@ -2147,7 +2147,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         if (stage === 'finance' && state.metadata?.tokenMode === 'base') return due
           ? { tone:'pending', title:'Финансы · разрешённый повтор запускается', text:'12-часовой интервал Базового токена закончился. ELISEI продолжает загрузку с сохранённого rrdId.' }
           : { tone:'idle', title:'Ожидает окно WB · финансы', text:state.nextAllowedAt ? `Данные и rrdId сохранены. Автоповтор ${formatSchedulerWait(state.nextAllowedAt)} (${new Date(state.nextAllowedAt).toLocaleString('ru-RU')}). Для Базового токена без сервисного секрета это официальный интервал WB; второй пользовательский токен не требуется.` : (state.lastError || 'WB временно ограничил финансовый метод для Базового токена.') }
-        if (due && state.metadata?.trigger === 'daily_ready_recovery') return {
+        if (due && (state.metadata?.trigger === 'daily_ready_recovery' || state.metadata?.dailyReadyDate)) return {
           tone:'pending',
           title:'Готов к автоповтору',
           text:'Закрытие вчерашнего дня ждёт своей очереди Smart Scheduler. Запрос к WB ещё не выполняется; нажимать ничего не нужно.',

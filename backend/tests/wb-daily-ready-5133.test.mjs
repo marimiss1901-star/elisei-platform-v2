@@ -9,8 +9,6 @@ for (const marker of [
   "const recoveryOrder = new Map([['orders',0],['sales',1],['advertising',2]])",
   "NOW() + INTERVAL '70 seconds'",
   "smartSchedulerWinners.set(connectionId,String(winner.stage))",
-  "version: '2.25.3'",
-  'ELISEI/2.25.3',
 ]) assert.ok(server.includes(marker),`server must contain ${marker}`)
 
 assert.ok(dashboard.includes('Готов к автоповтору'))

@@ -1,6 +1,6 @@
 const DAY_MS = 86400000
 
-export const DAILY_READY_VERSION = 4
+export const DAILY_READY_VERSION = 5
 export const DEFAULT_DAILY_READY_TIMEZONE = 'Europe/Moscow'
 
 export const AUTOMATIC_REFRESH_INTERVALS_SECONDS = Object.freeze({
@@ -122,6 +122,22 @@ function stateConfirmsBusinessDate(state = {}, date = '') {
   return (!confirmedFrom || confirmedFrom <= date) && date <= confirmedThrough
 }
 
+export function dailyOperationalStageCovered({ stage = '', coverage = {}, state = {}, date = '' } = {}) {
+  if (!date) return false
+  const normalizedStage = String(stage || '')
+  // Для orders/sales диапазон min..max не доказывает, что внутри него нет дырки.
+  // Daily Ready работает с одним закрытым днём, поэтому здесь нужен либо хотя бы
+  // один реально выбранный ряд за эту дату, либо явное подтверждение успешного
+  // recovery-запроса (в том числе подтверждённый ноль).
+  if (normalizedStage === 'orders' || normalizedStage === 'sales') {
+    return Number(coverage?.selectedRows || 0) > 0 || stateConfirmsBusinessDate(state,date)
+  }
+  // Рекламный snapshot хранит подтверждённый период целиком; нулевой расход за
+  // отдельный день допустим и не обязан иметь daily-row.
+  if (normalizedStage === 'advertising') return coverageIncludes(coverage,date)
+  return coverageIncludes(coverage,date) || stateConfirmsBusinessDate(state,date)
+}
+
 export function dailyOperationalRecoveryPlan({ coverage = {}, states = [], date = '', now = Date.now(), minimumRetryMs = 5*60*1000 } = {}) {
   if (!date) return []
   const map = new Map((Array.isArray(states) ? states : []).map(item=>[String(item?.stage || ''),item]))
@@ -129,7 +145,7 @@ export function dailyOperationalRecoveryPlan({ coverage = {}, states = [], date 
   const plan = []
   for (const stage of DAILY_READY_OPERATIONAL_RECOVERY_STAGES) {
     const state = map.get(stage) || {}
-    if (coverageIncludes(coverage?.[stage] || {},date) || stateConfirmsBusinessDate(state,date)) continue
+    if (dailyOperationalStageCovered({stage,coverage:coverage?.[stage] || {},state,date})) continue
     const status = String(state?.status || '')
     if (blocked.has(status)) continue
     const nextAllowed = millis(state?.next_allowed_at || state?.nextAllowedAt)
@@ -144,10 +160,10 @@ export function dailyOperationalRecoveryPlan({ coverage = {}, states = [], date 
   return plan
 }
 
-function streamState(state = {}, { hasRows = false, coverage = null, date = '', allowConfirmedEmpty = true, confirmedByState = false } = {}) {
+function streamState(state = {}, { hasRows = false, coverage = null, date = '', allowConfirmedEmpty = true, confirmedByState = false, requireSelectedRows = false } = {}) {
   const status = String(state?.status || '')
   const failed = ['error','forbidden','missing_token','token_invalid','subscription_required'].includes(status)
-  const covered = coverageIncludes(coverage,date)
+  const covered = coverageIncludes(coverage,date) && (!requireSelectedRows || Number(coverage?.selectedRows || 0) > 0)
 
   // 5.13.1: состояние текущей очереди не имеет права обнулять уже сохранённый
   // подтверждённый день. canonicalConnectionData читает последний сохранённый
@@ -174,11 +190,11 @@ export function buildDailyMetricStates({ core = {}, states = [], date = '', fina
   const saleState = stateMap.get('sales') || {}
   const orders = streamState(orderState,{
     hasRows:Number(coverage?.orders?.selectedRows || 0)>0,coverage:coverage?.orders,date,
-    confirmedByState:stateConfirmsBusinessDate(orderState,date),
+    confirmedByState:stateConfirmsBusinessDate(orderState,date),requireSelectedRows:true,
   })
   const sales = streamState(saleState,{
     hasRows:Number(coverage?.sales?.selectedRows || 0)>0,coverage:coverage?.sales,date,
-    confirmedByState:stateConfirmsBusinessDate(saleState,date),
+    confirmedByState:stateConfirmsBusinessDate(saleState,date),requireSelectedRows:true,
   })
   const advertising = streamState(stateMap.get('advertising') || {},{
     hasRows:Number(coverage?.advertising?.selectedRows || 0)>0,coverage:coverage?.advertising,date,

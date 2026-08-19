@@ -51,7 +51,7 @@ import {
 } from './wb/smart-scheduler.js'
 import {
   AUTOMATIC_REFRESH_INTERVALS_SECONDS, DEFAULT_DAILY_READY_TIMEZONE,
-  yesterdayDateKey, shiftIsoDate, dailyReadySlot, dailyHeavyStagePlan, dailyOperationalRecoveryPlan,
+  yesterdayDateKey, shiftIsoDate, dailyReadySlot, dailyHeavyStagePlan, dailyOperationalStageCovered,
   buildDailyMetricStates, dailyReadinessSummary, compactDailyCore, dailySnapshotSourceRevision, snapshotNeedsRefresh,
   mergeDailyReadySnapshots,
 } from './wb/daily-ready.js'
@@ -885,7 +885,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.25.3 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.25.4 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -5304,7 +5304,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.25.3',
+    version: '2.25.4',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -7768,18 +7768,35 @@ async function scheduleDailyReadyStages() {
       ])
       const filtered=analyticsFilterConnectionData(canonical.data,targetRange)
       const coverage=filtered?.__periodCoverage || {}
-      const operationalPlan=dailyOperationalRecoveryPlan({coverage,states,date:targetDate,now})
-      for(const stage of operationalPlan){
+
+      // 5.13.4: если вчерашний день не закрыт, Daily Ready должен не только
+      // поставить новый idle/success stage в очередь, но и "усыновить" уже
+      // существующий queued/rate_limited/retry_scheduled поток. Раньше такой
+      // поток мог быть создан обычным live_poll, поэтому после окончания паузы
+      // он повторял обычный incremental sync и никогда не возвращался за дыркой
+      // во вчерашнем дне. При усыновлении мы НЕ меняем next_allowed_at и не
+      // нарушаем окно WB — только добавляем recovery metadata/dateFrom.
+      const recoverableQueuedStatuses = new Set(['queued','rate_limited','retry_scheduled'])
+      const hardBlockedStatuses = new Set(['running','pending','missing_token','token_invalid','forbidden','subscription_required','optional_unavailable','error'])
+      for(const stage of ['orders','sales','advertising']){
         const current=states.find(item=>item.stage===stage) || null
+        if(dailyOperationalStageCovered({stage,coverage:coverage?.[stage] || {},state:current || {},date:targetDate})) continue
+        const status=String(current?.status || '')
         const metadata={
           ...(current?.metadata || {}),trigger:'daily_ready_recovery',dailyReadySlot:slot,dailyReadyDate:targetDate,
-          missingCoverage:true,queuedForClosedDay:true,
+          missingCoverage:true,queuedForClosedDay:true,recoveryAdoptedAt:new Date().toISOString(),
         }
         if(['orders','sales'].includes(stage)) metadata.dateFrom=targetDate
-        if(stage==='advertising') {
-          metadata.period=boundedSyncPeriod(analyticsPeriodRange({from:shiftIsoDate(targetDate,-29),to:targetDate}),31)
+        if(stage==='advertising') metadata.period=boundedSyncPeriod(analyticsPeriodRange({from:shiftIsoDate(targetDate,-29),to:targetDate}),31)
+
+        if(recoverableQueuedStatuses.has(status)){
+          await updateSyncState(row.id,stage,{metadata})
+          continue
         }
-        await updateSyncState(row.id,stage,{status:'queued',nextAllowedAt:new Date().toISOString(),lastError:null,metadata})
+        if(hardBlockedStatuses.has(status)) continue
+        const existingNext=current?.next_allowed_at || current?.nextAllowedAt || null
+        const nextAllowedAt=existingNext && new Date(existingNext).getTime()>now ? existingNext : new Date().toISOString()
+        await updateSyncState(row.id,stage,{status:'queued',nextAllowedAt,lastError:null,metadata})
       }
 
       const heavyPlan=dailyHeavyStagePlan({states,now,timeZone:dailyReadyTimezone})

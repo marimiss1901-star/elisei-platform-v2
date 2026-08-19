@@ -1,4 +1,4 @@
-ELISEI 5.13.3 PATCH
-Base: 5.13.2
-Purpose: serialize Daily Ready closed-day recovery through Smart Scheduler
-Files: 8
+ELISEI 5.13.4 PATCH
+Base: 5.13.3
+Purpose: adopt existing live-poll retries into closed-day recovery without violating WB cooldowns; require exact-day evidence for orders/sales
+Files: 17

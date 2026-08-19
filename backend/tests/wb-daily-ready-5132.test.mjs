@@ -54,7 +54,6 @@ assert.equal(zeroConfirmed.sales.state,'ready')
 
 const server=fs.readFileSync(new URL('../src/server.js',import.meta.url),'utf8')
 for (const marker of [
-  'dailyOperationalRecoveryPlan',
   "trigger:'daily_ready_recovery'",
   'dateFromOverride',
   'dailyReadyConfirmedThrough',
