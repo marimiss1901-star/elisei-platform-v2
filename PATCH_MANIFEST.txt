@@ -1,24 +1,17 @@
-ELISEI 5.13.0 PATCH MANIFEST
-Base: ELISEI 5.12.0 + Password Reset hotfix
-Frontend: 5.13.0
-Backend: 2.25.0
-El Core: 5.13.0
+ELISEI 5.13.1 PATCH MANIFEST
 
-Purpose: Daily Ready — yesterday is prepared before login.
+Base release: 5.13.0
+Frontend: 5.13.1
+Backend: 2.25.1
+El Core: 5.13.1
+Patch: Persistent Daily Snapshot
 
-Core rules:
-- User entry must not launch WB synchronization.
-- Yesterday is a persisted database snapshot, not a live loading screen.
-- Operational polling uses moderate cadence; no 2–5 minute API storm.
-- Heavy financial stages use a separate scheduler lane and respect WB next_allowed_at.
-- Missing/partial data never becomes a false zero.
-- Manual sync remains available only as diagnostics.
-- Free Render is woken at three morning checkpoints by GitHub Actions; wake itself does not force every WB stage.
+Purpose:
+- confirmed figures for yesterday remain visible during subsequent background refreshes;
+- persisted coverage for the closed day wins over current queued/running scheduler state;
+- existing Daily Ready snapshot is served immediately and refreshed from local DB in background;
+- finance remains partial until truly complete; no false zeroes/readiness;
+- UI clearly distinguishes snapshot supplementing / available / confirmed.
 
-Regression: 39/39 backend/frontend source tests passed.
-JS/CJS syntax: passed.
-JSX TypeScript parser: passed.
-YAML parse: passed.
-
-Payload files: 20 (including release notes; excluding checksum/manifest helpers).
-Archive limit: < 100 files.
+Regression: 39/39 backend test commands passed.
+Overlay target: ELISEI 5.13.0.

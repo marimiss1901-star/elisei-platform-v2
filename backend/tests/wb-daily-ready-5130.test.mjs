@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import {
   businessDateKey,yesterdayDateKey,dailyReadySlot,dailyHeavyStagePlan,buildDailyMetricStates,dailyReadinessSummary,
-  compactDailyCore,dailySnapshotSourceRevision,snapshotNeedsRefresh,
+  compactDailyCore,dailySnapshotSourceRevision,snapshotNeedsRefresh,mergeDailyReadySnapshots,
 } from '../src/wb/daily-ready.js'
 
 const moscow='Europe/Moscow'
@@ -49,6 +49,47 @@ assert.equal(readiness.status,'partial')
 assert.equal(readiness.ready,3)
 assert.equal(readiness.partial,1)
 assert.equal(readiness.operationalReady,true)
+
+// 5.13.1: persisted coverage is the source of truth for a closed day.
+// A newly queued refresh must not make yesterday's confirmed figures disappear.
+const queuedButPersisted=buildDailyMetricStates({
+  core,date:'2026-08-18',
+  states:[
+    {stage:'orders',status:'queued'},{stage:'sales',status:'running'},{stage:'advertising',status:'rate_limited'},
+    {stage:'finance',status:'queued'},
+  ],
+  financeLedger:{summary:{movements:3,dateFrom:'2026-08-18',dateTo:'2026-08-18'}},
+})
+assert.equal(queuedButPersisted.orders.state,'ready')
+assert.equal(queuedButPersisted.sales.state,'ready')
+assert.equal(queuedButPersisted.advertising.state,'ready')
+assert.equal(queuedButPersisted.finance.state,'partial')
+
+const lastGood={
+  date:'2026-08-18',generatedAt:'2026-08-19T04:30:00Z',
+  metricStates:{orders:{state:'ready'},sales:{state:'ready'},advertising:{state:'ready'},finance:{state:'ready'},stocks:{state:'ready'}},
+  core:{
+    summary:{orders:12,revenue:1200,sales:10,returns:1,returnRate:10,advertising:100,commission:200,logistics:50,sellerPayable:850,stockUnits:40},
+    topProducts:[{id:'good'}],dailyTrend:[{date:'2026-08-18',revenue:1200}],
+    advertising:{totals:{spend:100}},finance:{summary:{movements:5,sellerPayable:850}},stockMeta:{trusted:true},
+  },
+}
+const transient={
+  date:'2026-08-18',generatedAt:'2026-08-19T05:00:00Z',
+  metricStates:{orders:{state:'waiting'},sales:{state:'waiting'},advertising:{state:'partial'},finance:{state:'waiting'},stocks:{state:'waiting'}},
+  core:{
+    summary:{orders:null,revenue:null,sales:null,returns:null,advertising:0,commission:0,logistics:0,sellerPayable:null,stockUnits:null},
+    topProducts:[],dailyTrend:[],advertising:{totals:{}},finance:{summary:{}},stockMeta:null,
+  },
+}
+const stable=mergeDailyReadySnapshots(lastGood,transient)
+assert.equal(stable.metricStates.sales.state,'ready')
+assert.equal(stable.metricStates.finance.state,'ready')
+assert.equal(stable.core.summary.revenue,1200)
+assert.equal(stable.core.summary.sellerPayable,850)
+assert.deepEqual(stable.core.topProducts,[{id:'good'}])
+assert.equal(stable.status,'ready')
+assert.ok(stable.stability.lastKnownGood)
 
 const compact=compactDailyCore(core,{summary:{movements:3,sellerPayable:700}})
 assert.equal(compact.topProducts.length,2)

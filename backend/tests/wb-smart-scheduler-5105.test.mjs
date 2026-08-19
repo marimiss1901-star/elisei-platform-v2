@@ -44,8 +44,8 @@ for(const marker of [
   "response.headers.get('x-ratelimit-reset')",
   "code:'WB_SCHEDULER_WAIT'",
   "mode:'smart_wb_scheduler_v1'",
-  "version: '2.25.0'",
-  'ELISEI/2.25.0',
+  "version: '2.25.1'",
+  'ELISEI/2.25.1',
 ]) assert.ok(server.includes(marker),`server.js must contain ${marker}`)
 
 const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')

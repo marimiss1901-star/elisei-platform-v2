@@ -549,6 +549,16 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     if (!connectionId) return null
     const result = await wbApi.dailyReady(connectionId)
     setDailyReady(result || null)
+    // 5.13.1: stale означает не «покажи пустоту», а «покажи last-known-good,
+    // а локальный snapshot уже пересчитывается в фоне». Один тихий re-read
+    // подхватывает новый снимок без запуска WB API и без действий пользователя.
+    if (result?.meta?.stale) {
+      window.setTimeout(() => {
+        wbApi.dailyReady(connectionId).then(fresh => {
+          if (fresh?.snapshot) setDailyReady(fresh)
+        }).catch(() => {})
+      }, 1500)
+    }
     return result
   }
 
@@ -1464,10 +1474,10 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       ? readyGeneratedAt.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})
       : '—'
     const readyHeadline = readyStatus === 'ready'
-      ? 'Вчерашний день подготовлен'
+      ? 'Вчерашний день подтверждён'
       : readyStatus === 'partial'
-        ? 'Вчерашний день готов · часть расходов уточняется'
-        : 'Вчерашний день собирается в фоне'
+        ? 'Снимок за вчера доступен · часть данных уточняется'
+        : 'Снимок за вчера дополняется'
 
     return <>
       <section className="brand-hero glass-panel">
@@ -1483,13 +1493,13 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
             <button className="primary-btn brand-primary" onClick={() => setActive('Спросить ЭЛа')}><MessageCircle size={18}/> Обсудить с ЭЛом</button>
             <button className="brand-secondary" onClick={() => setActive(connection.connected ? 'Аналитика' : 'Подключения')}>{connection.connected ? 'Открыть аналитику' : 'Подключить WB'} <ChevronRight size={17}/></button>
           </div>
-          <div className="brand-sync"><span className="status-dot"/>{connection.connected ? (snapshotMode ? `Готовый снимок за вчера · собран ${readyGeneratedLabel}` : `Данные обновлены ${connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : '—'}`) : 'Кабинет пока не подключён'}</div>
+          <div className="brand-sync"><span className="status-dot"/>{connection.connected ? (snapshotMode ? `${readyStatus === 'ready' ? 'Снимок за вчера подтверждён' : readyStatus === 'partial' ? 'Снимок за вчера доступен' : 'Снимок за вчера дополняется'} · ${readyGeneratedLabel}` : `Данные обновлены ${connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : '—'}`) : 'Кабинет пока не подключён'}</div>
         </div>
         <div className="brand-mascot-stage"><span className="brand-orbit one"/><span className="brand-orbit two"/><ElMascot mood={homeElState.mood}/><div className="el-speech"><strong>ЭЛ · {elCharacterMeta[elSettings.character]?.title}</strong><span>{homeElState.line}</span></div></div>
       </section>
 
       {connection.connected && snapshotMode && <div className={`daily-ready-banner ${readyStatus || 'waiting'}`}>
-        <div><ShieldCheck size={19}/><span><strong>{readyHeadline}</strong><small>{formatDate(analyticsPeriod.from)} · снимок {readyGeneratedLabel} · вход в кабинет не запускает синхронизацию</small></span></div>
+        <div><ShieldCheck size={19}/><span><strong>{readyHeadline}</strong><small>{formatDate(analyticsPeriod.from)} · обновлён {readyGeneratedLabel} · уже подтверждённые цифры не исчезают во время фонового обновления</small></span></div>
         <div className="daily-ready-counts"><b>{readyCounts?.ready || 0} готово</b>{Number(readyCounts?.partial || 0)>0 && <b>{readyCounts.partial} уточняется</b>}{Number(readyCounts?.waiting || 0)>0 && <b>{readyCounts.waiting} ожидает WB</b>}</div>
       </div>}
 

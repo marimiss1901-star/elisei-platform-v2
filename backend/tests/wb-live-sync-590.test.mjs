@@ -50,13 +50,13 @@ for(const marker of [
   'replacedDuplicateReportId:reportId',
   'WB_CATALOG_SERVICE_ENABLED',
   "kickBackgroundWorkers('webhook-report-ready')",
-  "version: '2.25.0'",
+  "version: '2.25.1'",
   'scheduleDailyReadyStages()',
   'refreshDailyReadySnapshots()',
   '/api/wb/daily-ready/:id',
 ]) assert.ok(server.includes(marker),`server.js must contain ${marker}`)
 
 const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')
-for(const marker of ['Автоматическое обновление','ELISEI готовит кабинет до вашего входа','setupLiveWebhooks','updateLiveSync','Вчерашний день подготовлен']) assert.ok(dashboard.includes(marker),`Dashboard must contain ${marker}`)
+for(const marker of ['Автоматическое обновление','ELISEI готовит кабинет до вашего входа','setupLiveWebhooks','updateLiveSync','Вчерашний день подтверждён']) assert.ok(dashboard.includes(marker),`Dashboard must contain ${marker}`)
 
 console.log('WB automatic live sync, daily-ready and stock-history recovery tests passed')

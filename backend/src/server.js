@@ -53,6 +53,7 @@ import {
   AUTOMATIC_REFRESH_INTERVALS_SECONDS, DEFAULT_DAILY_READY_TIMEZONE,
   yesterdayDateKey, shiftIsoDate, dailyReadySlot, dailyHeavyStagePlan,
   buildDailyMetricStates, dailyReadinessSummary, compactDailyCore, dailySnapshotSourceRevision, snapshotNeedsRefresh,
+  mergeDailyReadySnapshots,
 } from './wb/daily-ready.js'
 import { buildElEngagementData } from './services/elEngagement.js'
 import elDecisionEngine from './services/elDecisionEngine.cjs'
@@ -849,7 +850,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.25.0 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.25.1 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -5253,7 +5254,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.25.0',
+    version: '2.25.1',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -6138,20 +6139,27 @@ app.get('/api/wb/daily-ready/:id', authRequired, async (req,res) => {
     const revision=dailySnapshotSourceRevision(states,date)
     let row=await loadDailySnapshotRow(connection.id,date)
     let stale=false
-    if(snapshotNeedsRefresh(row,revision,{maxAgeMs:6*60*60*1000,now:Date.now()})){
-      try { row=await buildAndSaveDailyReadySnapshot(connection,date,states) }
-      catch(error){
-        if(!row) throw error
-        stale=true
-        console.warn(`Daily Ready request served stale snapshot for ${connection.id}:`,error.message)
-      }
+
+    // 5.13.1: вход пользователя читает уже сохранённый снимок и никогда не
+    // заставляет его исчезнуть на время фонового пересчёта. Если снимок есть,
+    // обновляем его асинхронно из локальной БД. Только самый первый bootstrap,
+    // когда строки ещё нет вообще, может построить снимок синхронно — без WB API.
+    if(!row){
+      row=await buildAndSaveDailyReadySnapshot(connection,date,states)
+    } else if(snapshotNeedsRefresh(row,revision,{maxAgeMs:6*60*60*1000,now:Date.now()})){
+      stale=true
+      setTimeout(() => {
+        buildAndSaveDailyReadySnapshot(connection,date)
+          .catch(error=>console.warn(`Daily Ready background refresh failed for ${connection.id}:`,error.message))
+      },10).unref?.()
     }
+
     res.json({
       snapshot:row?.snapshot || null,
       meta:{
         date,timezone:dailyReadyTimezone,status:row?.status || row?.snapshot?.status || 'waiting',
         generatedAt:row?.generated_at || row?.snapshot?.generatedAt || null,stale,
-        automatic:true,entryDoesNotTriggerWbSync:true,
+        automatic:true,entryDoesNotTriggerWbSync:true,servesLastKnownGood:true,
       },
     })
   } catch(error){
@@ -7642,6 +7650,7 @@ async function buildAndSaveDailyReadySnapshot(connection, date, states = null) {
   const targetDate=String(date || yesterdayDateKey(new Date(),dailyReadyTimezone)).slice(0,10)
   const stateRows=Array.isArray(states) ? states : await getSyncStates(connection.id)
   const revision=dailySnapshotSourceRevision(stateRows,targetDate)
+  const previousSavedRow=await loadDailySnapshotRow(connection.id,targetDate)
   const [{data},settings,finance,previousFinance]=await Promise.all([
     canonicalConnectionData(connection,{repair:true,persistManifest:false,queueMissing:false}),
     getBusinessSettings(connection.user_id),
@@ -7660,8 +7669,8 @@ async function buildAndSaveDailyReadySnapshot(connection, date, states = null) {
   compact.summary=dailySnapshotMetricSummary(core,finance)
   const previousCompact=compactDailyCore(previousCore,{summary:previousFinance})
   previousCompact.summary=dailySnapshotMetricSummary(previousCore,previousFinance)
-  const snapshot={
-    version:1,date:targetDate,timezone:dailyReadyTimezone,generatedAt:new Date().toISOString(),sourceRevision:revision,
+  const nextSnapshot={
+    version:2,date:targetDate,timezone:dailyReadyTimezone,generatedAt:new Date().toISOString(),sourceRevision:revision,
     status:readiness.status,readiness,metricStates,
     core:compact,
     previous:{date:previousDate,metricStates:previousMetricStates,core:previousCompact},
@@ -7671,6 +7680,9 @@ async function buildAndSaveDailyReadySnapshot(connection, date, states = null) {
       note:'ELISEI готовит вчерашний день в фоне. Вход пользователя не запускает запросы к WB.',
     },
   }
+  const snapshot=mergeDailyReadySnapshots(previousSavedRow?.snapshot || null,nextSnapshot)
+  snapshot.sourceRevision=revision
+  snapshot.generatedAt=nextSnapshot.generatedAt
   const saved=await pool.query(`
     INSERT INTO wb_daily_snapshots(connection_id,snapshot_date,timezone,source_revision,status,snapshot,generated_at,updated_at)
     VALUES($1,$2::date,$3,$4,$5,$6::jsonb,NOW(),NOW())

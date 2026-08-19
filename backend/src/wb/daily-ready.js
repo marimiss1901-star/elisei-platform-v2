@@ -1,6 +1,6 @@
 const DAY_MS = 86400000
 
-export const DAILY_READY_VERSION = 1
+export const DAILY_READY_VERSION = 2
 export const DEFAULT_DAILY_READY_TIMEZONE = 'Europe/Moscow'
 
 export const AUTOMATIC_REFRESH_INTERVALS_SECONDS = Object.freeze({
@@ -114,13 +114,17 @@ function coverageIncludes(coverage = {}, date = '') {
 
 function streamState(state = {}, { hasRows = false, coverage = null, date = '', allowConfirmedEmpty = true } = {}) {
   const status = String(state?.status || '')
-  const running = ['running','pending','queued','rate_limited','retry_scheduled'].includes(status)
   const failed = ['error','forbidden','missing_token','token_invalid','subscription_required'].includes(status)
   const covered = coverageIncludes(coverage,date)
-  if (covered && (!running || hasRows || allowConfirmedEmpty)) return { state:running ? 'partial' : 'ready', covered:true }
-  if (hasRows) return { state:running ? 'partial' : 'partial', covered:false }
-  if (failed) return { state:'missing', covered:false }
-  return { state:'waiting', covered:false }
+
+  // 5.13.1: состояние текущей очереди не имеет права обнулять уже сохранённый
+  // подтверждённый день. canonicalConnectionData читает последний сохранённый
+  // успешный поток; если его покрытие включает дату, эти данные уже доступны
+  // для Daily Ready независимо от того, что следующий refresh сейчас queued/running.
+  if (covered) return { state:'ready', covered:true, evidence:'persisted_coverage' }
+  if (hasRows) return { state:'partial', covered:false, evidence:'persisted_rows' }
+  if (failed) return { state:'missing', covered:false, evidence:'stream_error' }
+  return { state:'waiting', covered:false, evidence:allowConfirmedEmpty ? 'no_persisted_coverage' : 'no_finance_evidence' }
 }
 
 export function buildDailyMetricStates({ core = {}, states = [], date = '', financeLedger = null } = {}) {
@@ -146,7 +150,13 @@ export function buildDailyMetricStates({ core = {}, states = [], date = '', fina
     hasRows:financeRows>0,coverage:financeCoverage,date,allowConfirmedEmpty:false,
   })
   if (financeRows > 0 && finance.state === 'waiting') finance.state = 'partial'
-  if (financeRows > 0 && coverageIncludes(financeCoverage,date) && core?.finance?.complete === true && !['running','pending','queued','rate_limited','retry_scheduled'].includes(String(stateMap.get('finance')?.status || ''))) finance.state='ready'
+  // Финансовые движения за дату можно показывать сразу, но итог считается
+  // полностью подтверждённым только когда сам финансовый набор помечен complete.
+  if (financeRows > 0 && coverageIncludes(financeCoverage,date)) {
+    finance.state = core?.finance?.complete === true ? 'ready' : 'partial'
+    finance.covered = true
+    finance.evidence = core?.finance?.complete === true ? 'persisted_finance_complete' : 'persisted_finance_partial'
+  }
 
   const stockState = (() => {
     const fbo = stateMap.get('stocks') || {}
@@ -199,6 +209,62 @@ export function compactDailyCore(core = {}, financeLedger = null) {
     dailyTrend:Array.isArray(core?.dailyTrend) ? core.dailyTrend.slice(-7) : [],
     stockMeta:core?.stockMeta || null,
   }
+}
+
+
+const SNAPSHOT_DOMAIN_FIELDS = Object.freeze({
+  orders:['orders'],
+  sales:['revenue','sales','returns','returnRate'],
+  advertising:['advertising','advertisingSource'],
+  finance:[
+    'sellerPayable','commission','commissionSource','logistics','logisticsSource','storage','storageSource',
+    'acceptance','acceptanceSource','acquiring','acquiringSource','penalties','deductions','additionalPayment',
+    'sellerBalance','fixed','tax','cogs','operatingProfit','margin',
+  ],
+  stocks:['stockUnits','zeroStock','lowStock','slowStock','stockCoverDays'],
+})
+
+function copyFields(target = {}, source = {}, fields = []) {
+  for (const field of fields) {
+    if (Object.prototype.hasOwnProperty.call(source || {},field)) target[field]=source[field]
+  }
+}
+
+export function mergeDailyReadySnapshots(previous = null, current = null) {
+  if (!previous || !current || String(previous?.date || '') !== String(current?.date || '')) return current
+  const merged = {
+    ...current,
+    core:{ ...(current.core || {}),summary:{ ...(current?.core?.summary || {}) } },
+    metricStates:{ ...(current.metricStates || {}) },
+    stability:{ carriedDomains:[],previousGeneratedAt:previous.generatedAt || null },
+  }
+  const previousStates=previous?.metricStates || {}
+  const currentStates=current?.metricStates || {}
+
+  for (const domain of Object.keys(SNAPSHOT_DOMAIN_FIELDS)) {
+    const oldState=String(previousStates?.[domain]?.state || '')
+    const nextState=String(currentStates?.[domain]?.state || '')
+    // Last-known-good: уже подтверждённая цифра за закрытый день не исчезает
+    // из-за нового фонового цикла, временной очереди или частичного refresh.
+    if (oldState !== 'ready' || nextState === 'ready') continue
+    merged.metricStates[domain]={ ...previousStates[domain],carriedForward:true }
+    copyFields(merged.core.summary,previous?.core?.summary || {},SNAPSHOT_DOMAIN_FIELDS[domain])
+    merged.stability.carriedDomains.push(domain)
+
+    if (domain === 'sales') {
+      merged.core.topProducts=previous?.core?.topProducts || merged.core.topProducts
+      merged.core.dailyTrend=previous?.core?.dailyTrend || merged.core.dailyTrend
+    }
+    if (domain === 'advertising') merged.core.advertising=previous?.core?.advertising || merged.core.advertising
+    if (domain === 'finance') merged.core.finance=previous?.core?.finance || merged.core.finance
+    if (domain === 'stocks') merged.core.stockMeta=previous?.core?.stockMeta || merged.core.stockMeta
+  }
+
+  const readiness=dailyReadinessSummary(merged.metricStates)
+  merged.readiness=readiness
+  merged.status=readiness.status
+  merged.stability.lastKnownGood=merged.stability.carriedDomains.length>0
+  return merged
 }
 
 export function dailySnapshotSourceRevision(states = [], date = '') {
