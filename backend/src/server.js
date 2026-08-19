@@ -5264,8 +5264,26 @@ app.post('/api/auth/password-reset/request', async (req, res) => {
     }
     if (!email || !email.includes('@')) return res.status(400).json({ error:'Введите корректную электронную почту.' })
     const result = await pool.query('SELECT id,email,password_hash FROM users WHERE email=$1', [email])
-    const user = result.rows[0]
-    if (!user) return res.json(genericResponse)
+    let user = result.rows[0]
+    let ownerRecoveryFallback = false
+    if (!user) {
+      const accounts = await pool.query('SELECT id,email,password_hash FROM users ORDER BY created_at ASC LIMIT 6')
+      const maskEmail = (value) => {
+        const [local, domain] = String(value || '').split('@')
+        if (!domain) return '***'
+        const visible = local.slice(0, Math.min(2, local.length))
+        return `${visible}${'*'.repeat(Math.max(3, local.length - visible.length))}@${domain}`
+      }
+      if (accounts.rowCount === 1) {
+        user = accounts.rows[0]
+        ownerRecoveryFallback = true
+        console.warn(`[ELISEI PASSWORD RESET] Запрошенная почта не найдена. В базе один аккаунт (${maskEmail(user.email)}), создаю owner-recovery ссылку только в закрытых логах Render.`)
+      } else {
+        const hints = accounts.rows.map(row => maskEmail(row.email)).join(', ')
+        console.warn(`[ELISEI PASSWORD RESET] Запрошенная почта не найдена. Подсказки зарегистрированных аккаунтов (${accounts.rowCount}${accounts.rowCount >= 6 ? '+' : ''}): ${hints || 'нет пользователей'}`)
+        return res.json(genericResponse)
+      }
+    }
 
     const passwordFingerprint = crypto.createHash('sha256').update(String(user.password_hash || '')).digest('hex').slice(0,24)
     const resetToken = jwt.sign({
@@ -5277,7 +5295,7 @@ app.post('/api/auth/password-reset/request', async (req, res) => {
     const frontendBase = String(req.headers.origin || allowedOrigins[0] || '').trim().replace(/\/$/,'')
     if (!frontendBase) throw Object.assign(new Error('FRONTEND_ORIGIN не настроен для восстановления пароля'), { status:503 })
     const resetUrl = `${frontendBase}/login?reset=${encodeURIComponent(resetToken)}&email=${encodeURIComponent(user.email)}`
-    console.warn(`[ELISEI PASSWORD RESET] Одноразовая ссылка (15 мин): ${resetUrl}`)
+    console.warn(`[ELISEI PASSWORD RESET] Одноразовая ссылка (15 мин)${ownerRecoveryFallback ? ' [OWNER RECOVERY]' : ''}: ${resetUrl}`)
     return res.json(genericResponse)
   } catch (error) {
     return res.status(error.status || 500).json({ error:error.message })
