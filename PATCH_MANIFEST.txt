@@ -1,4 +1,19 @@
-ELISEI 5.13.4 PATCH
-Base: 5.13.3
-Purpose: adopt existing live-poll retries into closed-day recovery without violating WB cooldowns; require exact-day evidence for orders/sales
-Files: 17
+{
+  "version": "5.13.7",
+  "base": "5.13.6",
+  "frontend": "5.13.7",
+  "backend": "2.25.7",
+  "elCore": "5.13.7",
+  "payloadFiles": 9,
+  "files": [
+    "package.json",
+    "backend/package.json",
+    "src/App.jsx",
+    "src/pages/RegisterPage.jsx",
+    "src/pages/DashboardPage.jsx",
+    "src/lib/api.js",
+    "backend/src/server.js",
+    "backend/tests/auth-phone-verification-5137.test.mjs",
+    "backend/src/routes/elCore.cjs"
+  ]
+}

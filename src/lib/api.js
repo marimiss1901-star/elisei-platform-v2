@@ -29,7 +29,10 @@ async function request(path, options = {}) {
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) {
     if (response.status === 401) authStore.clear()
-    throw new Error(payload.error || payload.message || `Ошибка ${response.status}`)
+    const error = new Error(payload.error || payload.message || `Ошибка ${response.status}`)
+    error.status = response.status
+    error.code = payload.code || ''
+    throw error
   }
   return payload
 }
@@ -52,10 +55,14 @@ async function downloadFile(path) {
 
 export const authApi = {
   register: (data) => request('/api/auth/register', { method: 'POST', body: JSON.stringify(data) }),
+  requestRegisterPhoneCode: (data) => request('/api/auth/register/phone/request', { method: 'POST', body: JSON.stringify(data) }),
+  confirmRegisterPhoneCode: (data) => request('/api/auth/register/phone/confirm', { method: 'POST', body: JSON.stringify(data) }),
   login: (data) => request('/api/auth/login', { method: 'POST', body: JSON.stringify(data) }),
-  requestPasswordReset: (data) => request('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify(data) }),
-  confirmPasswordReset: (data) => request('/api/auth/password-reset/confirm', { method: 'POST', body: JSON.stringify(data) }),
+  requestPasswordResetSms: (data) => request('/api/auth/password-reset/sms/request', { method: 'POST', body: JSON.stringify(data) }),
+  confirmPasswordResetSms: (data) => request('/api/auth/password-reset/sms/confirm', { method: 'POST', body: JSON.stringify(data) }),
   me: () => request('/api/auth/me'),
+  requestPhoneChange: (data) => request('/api/auth/phone/request', { method: 'POST', body: JSON.stringify(data) }),
+  confirmPhoneChange: (data) => request('/api/auth/phone/confirm', { method: 'POST', body: JSON.stringify(data) }),
   logout: () => authStore.clear(),
 }
 

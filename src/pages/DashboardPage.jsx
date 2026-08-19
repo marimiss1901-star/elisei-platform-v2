@@ -3,7 +3,7 @@ import {
   AlertTriangle, BarChart3, Bell, Boxes, Calculator, CalendarDays, CheckCircle2, ChevronDown, Clock3,
   ChevronRight, ChevronUp, CircleDollarSign, CreditCard, Download, Eye, EyeOff, FileText, Home, LogOut,
   Info, Megaphone, MessageCircle, PackageSearch, Percent, PlugZap, RefreshCw, Save, Search, Send,
-  Settings, ShieldCheck, SlidersHorizontal, Sparkles, Star, Tag, TrendingUp, UsersRound,
+  Settings, ShieldCheck, SlidersHorizontal, Sparkles, Star, Tag, TrendingUp, UsersRound, Phone, KeyRound,
   Upload, WalletCards, Warehouse, X
 } from 'lucide-react'
 import ElMascot from '../components/ElMascot'
@@ -11,7 +11,7 @@ import MetricCard from '../components/MetricCard'
 import TrendChart from '../components/TrendChart'
 import WbExtendedWorkspace from '../components/WbExtendedWorkspace'
 import Product360Drawer from '../components/Product360Drawer'
-import { businessApi, elApi, wbApi } from '../lib/api'
+import { authApi, businessApi, elApi, wbApi } from '../lib/api'
 
 const formatMoney = value => value == null ? 'Не загружено' : `${new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))} ₽`
 const formatNumber = value => value == null ? 'Не загружено' : new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))
@@ -372,7 +372,7 @@ function recommendationTone(type) {
   return 'violet'
 }
 
-export default function DashboardPage({ onNavigate, onLogout, user }) {
+export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate }) {
   const rawName = String(user?.name || '').trim()
   const displayName = rawName ? rawName.split(/\s+/)[0] : ''
   const profileInitial = displayName ? displayName.slice(0,1).toUpperCase() : 'Э'
@@ -445,6 +445,11 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [liveProducts, setLiveProducts] = useState([])
   const [syncHistory, setSyncHistory] = useState([])
   const [settingsDraft, setSettingsDraft] = useState(defaultSettings)
+  const [accountPhoneDraft, setAccountPhoneDraft] = useState(user?.phone || '')
+  const [accountPhoneCode, setAccountPhoneCode] = useState('')
+  const [accountPhoneStage, setAccountPhoneStage] = useState('idle')
+  const [accountPhoneBusy, setAccountPhoneBusy] = useState(false)
+  const [accountPhoneNotice, setAccountPhoneNotice] = useState('')
   const [productFilter, setProductFilter] = useState('Все')
   const [productSort, setProductSort] = useState({ key:'revenue', direction:'desc' })
   const [selectedProduct, setSelectedProduct] = useState(null)
@@ -463,6 +468,34 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     setToast(text)
     window.clearTimeout(window.__eliseiToast)
     window.__eliseiToast = window.setTimeout(() => setToast(''), duration)
+  }
+
+  useEffect(() => {
+    setAccountPhoneDraft(user?.phone || '')
+    setAccountPhoneStage('idle')
+    setAccountPhoneCode('')
+  }, [user?.phone])
+
+  const requestAccountPhoneCode = async () => {
+    setAccountPhoneBusy(true); setAccountPhoneNotice('')
+    try {
+      const result=await authApi.requestPhoneChange({ phone:accountPhoneDraft })
+      setAccountPhoneStage('code')
+      setAccountPhoneNotice(result.message || 'Код отправлен по SMS.')
+    } catch (error) { setAccountPhoneNotice(error.message) }
+    finally { setAccountPhoneBusy(false) }
+  }
+
+  const confirmAccountPhone = async () => {
+    setAccountPhoneBusy(true); setAccountPhoneNotice('')
+    try {
+      const result=await authApi.confirmPhoneChange({ phone:accountPhoneDraft, code:accountPhoneCode })
+      if (result.user) onUserUpdate?.(result.user)
+      setAccountPhoneStage('verified')
+      setAccountPhoneCode('')
+      setAccountPhoneNotice(result.message || 'Телефон подтверждён и сохранён.')
+    } catch (error) { setAccountPhoneNotice(error.message) }
+    finally { setAccountPhoneBusy(false) }
   }
 
   const financeRequestForTab = tab => {
@@ -2264,6 +2297,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
 
   const renderSettings = () => <section className="app-page glass-panel">
     <div className="page-title"><span>Настройки</span><h1>Параметры бизнеса и Эла</h1><p>Финансовые допущения и характер AI-помощника сохраняются отдельно для вашего аккаунта и кабинета.</p></div>
+    <div className="settings-card standalone"><h3><Phone size={20}/> Безопасность аккаунта</h3><p className="settings-hint">Подтверждённый телефон используется для восстановления пароля по SMS. У каждого пользователя свой номер.</p><div className="settings-grid"><label>Электронная почта<input value={user?.email || ''} disabled/></label><label>Телефон<input type="tel" value={accountPhoneDraft} onChange={e=>{setAccountPhoneDraft(e.target.value);setAccountPhoneStage('idle');setAccountPhoneCode('');setAccountPhoneNotice('')}} placeholder="+7 999 123-45-67" autoComplete="tel"/></label></div><div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}}><button type="button" className="secondary-btn" onClick={requestAccountPhoneCode} disabled={accountPhoneBusy || !accountPhoneDraft || accountPhoneDraft===user?.phone}><Phone size={17}/>{accountPhoneBusy ? 'Отправляем…' : (user?.phone ? 'Сменить телефон' : 'Добавить телефон')}</button>{accountPhoneStage==='code' && <><input style={{maxWidth:150}} inputMode="numeric" value={accountPhoneCode} onChange={e=>setAccountPhoneCode(e.target.value.replace(/\D/g,'').slice(0,6))} placeholder="Код из SMS" maxLength={6}/><button type="button" className="primary-btn" onClick={confirmAccountPhone} disabled={accountPhoneBusy || accountPhoneCode.length!==6}><KeyRound size={17}/> Подтвердить</button></>}</div>{accountPhoneNotice && <p className="settings-hint" style={{marginTop:10}}>{accountPhoneNotice}</p>}{user?.phone && <div className="security-note" style={{marginTop:12}}><ShieldCheck size={20}/><div><strong>Телефон подтверждён</strong><p>{user.phone}. Код восстановления будет отправляться только на этот номер.</p></div></div>}</div>
     <div className="settings-card standalone"><h3><Settings size={20}/> Основные параметры</h3><div className="settings-grid"><label>Комиссия WB, %<input type="number" value={settingsDraft.commissionPercent ?? 0} onChange={e => updateSetting('commissionPercent',e.target.value)}/></label><label>Логистика за продажу, ₽<input type="number" value={settingsDraft.logisticsPerSale ?? 0} onChange={e => updateSetting('logisticsPerSale',e.target.value)}/></label><label>Налог, %<input type="number" value={settingsDraft.taxPercent ?? 0} onChange={e => updateSetting('taxPercent',e.target.value)}/></label><label>Целевая маржа, %<input type="number" value={settingsDraft.targetMarginPercent ?? 20} onChange={e => updateSetting('targetMarginPercent',e.target.value)}/></label></div><button className="primary-btn" onClick={saveSettings} disabled={savingSettings}><Save size={17}/> Сохранить</button></div>
     {renderElPersonalityControls()}
     <div className="security-note"><ShieldCheck size={22}/><div><strong>MAXADORRE и ELISEI не связаны данными</strong><p>В ELISEI перенесена проверенная бизнес-логика, но репозитории, базы, API-ключи и клиентские данные полностью раздельны.</p></div></div>

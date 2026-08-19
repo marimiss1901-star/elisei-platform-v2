@@ -82,6 +82,10 @@ const wbOauthConnectUrl = String(process.env.WB_OAUTH_CONNECT_URL || '').trim()
 const wbServiceCatalogUrl = String(process.env.WB_SERVICE_CATALOG_URL || 'https://seller.wildberries.ru/auth-services/application').trim()
 const wbCatalogServiceEnabled = /^(?:1|true|yes)$/i.test(String(process.env.WB_CATALOG_SERVICE_ENABLED || '').trim())
 const liveSyncBatchLimit = Math.max(1,Math.min(6,Number(process.env.WB_LIVE_SYNC_BATCH_LIMIT || 3)))
+const smsRuApiId = String(process.env.SMS_RU_API_ID || '').trim()
+const smsRuFrom = String(process.env.SMS_RU_FROM || '').trim()
+const ownerRecoveryPhoneRaw = String(process.env.OWNER_RECOVERY_PHONE || '').trim()
+const ownerRecoveryEmail = String(process.env.OWNER_RECOVERY_EMAIL || '').trim().toLowerCase()
 const dailyReadyTimezone = String(process.env.ELISEI_BUSINESS_TIMEZONE || DEFAULT_DAILY_READY_TIMEZONE).trim() || DEFAULT_DAILY_READY_TIMEZONE
 
 const databaseState = {
@@ -268,6 +272,7 @@ async function recoverLegacySearchQueryBindings({ connectionId = null } = {}) {
 
 let smartSchedulerWinners = new Map()
 let smartSchedulerPreparedAt = null
+const SMART_SCHEDULER_SCAN_LIMIT = 250
 
 async function prepareSmartSchedulerCycle() {
   if (!pool) {
@@ -282,7 +287,7 @@ async function prepareSmartSchedulerCycle() {
       AND (s.next_allowed_at IS NULL OR s.next_allowed_at <= NOW())
       AND c.status='connected'
     ORDER BY s.updated_at
-    LIMIT 250
+    LIMIT ${SMART_SCHEDULER_SCAN_LIMIT}
   `)
   const dueRows = result.rows
   smartSchedulerWinners = chooseCycleWinners(dueRows)
@@ -451,6 +456,34 @@ async function initDatabase() {
       password_hash TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS users_phone_unique_idx ON users(phone) WHERE phone IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS password_reset_otps (
+      id UUID PRIMARY KEY,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      phone TEXT NOT NULL,
+      code_hash TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS password_reset_otps_phone_idx ON password_reset_otps(phone, requested_at DESC);
+    CREATE INDEX IF NOT EXISTS password_reset_otps_user_idx ON password_reset_otps(user_id, requested_at DESC);
+    CREATE TABLE IF NOT EXISTS phone_verification_otps (
+      id UUID PRIMARY KEY,
+      user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+      purpose TEXT NOT NULL,
+      subject_key TEXT NOT NULL,
+      phone TEXT NOT NULL,
+      code_hash TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS phone_verification_otps_lookup_idx ON phone_verification_otps(purpose, subject_key, phone, requested_at DESC);
+    CREATE INDEX IF NOT EXISTS phone_verification_otps_phone_idx ON phone_verification_otps(phone, requested_at DESC);
     CREATE TABLE IF NOT EXISTS marketplace_connections (
       id UUID PRIMARY KEY,
       user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -607,12 +640,168 @@ function requireBackendConfig() {
   if (!encryptionKey) throw Object.assign(new Error('ENCRYPTION_KEY не настроен'), { status: 503 })
 }
 
+function normalizePhone(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  let digits = raw.replace(/\D/g, '')
+  if (digits.length === 11 && digits.startsWith('8')) digits = `7${digits.slice(1)}`
+  if (digits.length < 8 || digits.length > 15) return ''
+  return `+${digits}`
+}
+
+function maskPhone(value) {
+  const phone = normalizePhone(value)
+  if (!phone) return ''
+  const digits = phone.slice(1)
+  if (digits.length <= 4) return phone
+  return `+${digits.slice(0, Math.max(1, digits.length - 7))}***${digits.slice(-4)}`
+}
+
+function otpHash({ userId, phone, code }) {
+  return crypto.createHmac('sha256', jwtSecret).update(`${userId}:${phone}:${code}`).digest('hex')
+}
+
+function phoneVerificationHash({ purpose, subjectKey, phone, code }) {
+  return crypto.createHmac('sha256', jwtSecret).update(`${purpose}:${subjectKey}:${phone}:${code}`).digest('hex')
+}
+
+function safeEqualHex(a, b) {
+  try {
+    const left = Buffer.from(String(a || ''), 'hex')
+    const right = Buffer.from(String(b || ''), 'hex')
+    return left.length > 0 && left.length === right.length && crypto.timingSafeEqual(left, right)
+  } catch { return false }
+}
+
+async function sendPasswordResetSms(phone, code) {
+  if (!smsRuApiId) throw Object.assign(new Error('SMS-восстановление пока не настроено. Добавьте SMS_RU_API_ID в Render.'), { status:503 })
+  const params = new URLSearchParams({
+    api_id:smsRuApiId,
+    to:phone.replace(/^\+/, ''),
+    msg:`ELISEI: код для сброса пароля ${code}. Действует 5 минут. Никому не сообщайте код.`,
+    json:'1',
+  })
+  if (smsRuFrom) params.set('from', smsRuFrom)
+  const response = await fetch('https://sms.ru/sms/send', {
+    method:'POST',
+    headers:{ 'Content-Type':'application/x-www-form-urlencoded' },
+    body:params,
+    signal:AbortSignal.timeout(12000),
+  })
+  const payload = await response.json().catch(() => ({}))
+  const recipient = phone.replace(/^\+/, '')
+  const item = payload?.sms?.[recipient]
+  const ok = response.ok && payload?.status === 'OK' && Number(item?.status_code) === 100
+  if (!ok) {
+    const detail = item?.status_text || payload?.status_text || `HTTP ${response.status}`
+    console.warn('[ELISEI SMS RESET] SMS.RU send failed:', { status:payload?.status, code:item?.status_code ?? payload?.status_code, detail })
+    throw Object.assign(new Error('Не удалось отправить SMS-код. Проверьте настройки SMS-сервиса или повторите позже.'), { status:503 })
+  }
+  return { smsId:item?.sms_id || null }
+}
+
+async function sendPhoneVerificationSms(phone, code, purpose = 'verify') {
+  if (!smsRuApiId) throw Object.assign(new Error('SMS-подтверждение пока не настроено. Добавьте SMS_RU_API_ID в Render.'), { status:503 })
+  const action = purpose === 'register' ? 'подтверждения регистрации' : 'подтверждения телефона'
+  const params = new URLSearchParams({
+    api_id:smsRuApiId,
+    to:phone.replace(/^\+/, ''),
+    msg:`ELISEI: код ${action} ${code}. Действует 5 минут. Никому не сообщайте код.`,
+    json:'1',
+  })
+  if (smsRuFrom) params.set('from', smsRuFrom)
+  const response = await fetch('https://sms.ru/sms/send', {
+    method:'POST',
+    headers:{ 'Content-Type':'application/x-www-form-urlencoded' },
+    body:params,
+    signal:AbortSignal.timeout(12000),
+  })
+  const payload = await response.json().catch(() => ({}))
+  const recipient = phone.replace(/^\+/, '')
+  const item = payload?.sms?.[recipient]
+  const ok = response.ok && payload?.status === 'OK' && Number(item?.status_code) === 100
+  if (!ok) {
+    const detail = item?.status_text || payload?.status_text || `HTTP ${response.status}`
+    console.warn('[ELISEI PHONE VERIFY] SMS.RU send failed:', { status:payload?.status, code:item?.status_code ?? payload?.status_code, detail })
+    throw Object.assign(new Error('Не удалось отправить SMS-код. Проверьте настройки SMS-сервиса или повторите позже.'), { status:503 })
+  }
+  return { smsId:item?.sms_id || null }
+}
+
+async function issuePhoneVerificationOtp({ purpose, subjectKey, phone, userId = null }) {
+  const recent = await pool.query(
+    `SELECT requested_at FROM phone_verification_otps WHERE phone=$1 AND requested_at > NOW() - INTERVAL '1 hour' ORDER BY requested_at DESC LIMIT 1`,
+    [phone]
+  )
+  if (recent.rows[0] && Date.now() - new Date(recent.rows[0].requested_at).getTime() < 60000) {
+    throw Object.assign(new Error('Код уже отправлен. Повторная отправка будет доступна через минуту.'), { status:429 })
+  }
+  const hourly = await pool.query(
+    `SELECT COUNT(*)::int AS count FROM phone_verification_otps WHERE phone=$1 AND requested_at > NOW() - INTERVAL '1 hour'`,
+    [phone]
+  )
+  if (Number(hourly.rows[0]?.count || 0) >= 5) throw Object.assign(new Error('Слишком много SMS за последний час. Попробуйте позже.'), { status:429 })
+  const code = String(crypto.randomInt(0,1000000)).padStart(6,'0')
+  const id = crypto.randomUUID()
+  const hash = phoneVerificationHash({ purpose, subjectKey, phone, code })
+  await pool.query(`UPDATE phone_verification_otps SET used_at=NOW() WHERE purpose=$1 AND subject_key=$2 AND used_at IS NULL`, [purpose,subjectKey])
+  await pool.query(
+    `INSERT INTO phone_verification_otps (id,user_id,purpose,subject_key,phone,code_hash,expires_at) VALUES ($1,$2,$3,$4,$5,$6,NOW()+INTERVAL '5 minutes')`,
+    [id,userId,purpose,subjectKey,phone,hash]
+  )
+  try { await sendPhoneVerificationSms(phone, code, purpose) } catch (error) {
+    await pool.query('UPDATE phone_verification_otps SET used_at=NOW() WHERE id=$1',[id]).catch(()=>{})
+    throw error
+  }
+  return { id, expiresInMinutes:5 }
+}
+
+async function consumePhoneVerificationOtp({ purpose, subjectKey, phone, code, userId = null }) {
+  const params=[purpose,subjectKey,phone]
+  let userFilter=''
+  if (userId) { params.push(userId); userFilter=` AND user_id=$${params.length}` }
+  const found = await pool.query(
+    `SELECT id,user_id,code_hash,attempts,expires_at FROM phone_verification_otps WHERE purpose=$1 AND subject_key=$2 AND phone=$3 AND used_at IS NULL${userFilter} ORDER BY requested_at DESC LIMIT 1`,
+    params
+  )
+  const otp=found.rows[0]
+  if (!otp || new Date(otp.expires_at).getTime() < Date.now()) {
+    if (otp) await pool.query('UPDATE phone_verification_otps SET used_at=NOW() WHERE id=$1',[otp.id])
+    throw Object.assign(new Error('Код истёк. Запросите новый SMS-код.'), { status:400 })
+  }
+  if (Number(otp.attempts || 0) >= 5) {
+    await pool.query('UPDATE phone_verification_otps SET used_at=NOW() WHERE id=$1',[otp.id])
+    throw Object.assign(new Error('Слишком много попыток. Запросите новый код.'), { status:429 })
+  }
+  const expected=phoneVerificationHash({ purpose,subjectKey,phone,code })
+  if (!safeEqualHex(expected,otp.code_hash)) {
+    const next=Number(otp.attempts || 0)+1
+    await pool.query('UPDATE phone_verification_otps SET attempts=$2,used_at=CASE WHEN $2>=5 THEN NOW() ELSE used_at END WHERE id=$1',[otp.id,next])
+    throw Object.assign(new Error('Неверный код. Проверьте SMS и попробуйте ещё раз.'), { status:400 })
+  }
+  await pool.query('UPDATE phone_verification_otps SET used_at=NOW() WHERE id=$1',[otp.id])
+  return true
+}
+
+async function resolvePasswordResetUser(phone) {
+  const direct = await pool.query('SELECT id,email,phone,password_hash FROM users WHERE phone=$1 LIMIT 1', [phone])
+  if (direct.rows[0]) return { user:direct.rows[0], bootstrap:false }
+  const ownerPhone = normalizePhone(ownerRecoveryPhoneRaw)
+  if (!ownerPhone || ownerPhone !== phone) return { user:null, bootstrap:false }
+  if (ownerRecoveryEmail) {
+    const byEmail = await pool.query('SELECT id,email,phone,password_hash FROM users WHERE email=$1 LIMIT 1', [ownerRecoveryEmail])
+    return { user:byEmail.rows[0] || null, bootstrap:Boolean(byEmail.rows[0]) }
+  }
+  const only = await pool.query('SELECT id,email,phone,password_hash FROM users ORDER BY created_at ASC LIMIT 2')
+  return { user:only.rowCount === 1 ? only.rows[0] : null, bootstrap:only.rowCount === 1 }
+}
+
 function signToken(user) {
   return jwt.sign({ sub: user.id, email: user.email }, jwtSecret, { expiresIn: '7d' })
 }
 
 function publicUser(user) {
-  return { id: user.id, name: user.name, company: user.company, email: user.email, createdAt: user.created_at }
+  return { id: user.id, name: user.name, company: user.company, email: user.email, phone: user.phone || null, createdAt: user.created_at }
 }
 
 function authRequired(req, res, next) {
@@ -885,7 +1074,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.25.4 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.25.5 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -5304,7 +5493,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.25.4',
+    version: '2.25.7',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -5320,6 +5509,16 @@ app.get('/health', async (_req, res) => {
       oauthConfigured:Boolean(oauthReadiness().configurationPrepared),
       oauthActive:false,
       webhookSetupReady:Boolean(wbCatalogServiceEnabled && publicBackendUrl && publicServiceSecretStatus().valid),
+    },
+    authRecovery: {
+      mode:'sms_otp',
+      provider:'sms.ru',
+      smsReady:Boolean(smsRuApiId),
+      ownerRecoveryPhoneReady:Boolean(normalizePhone(ownerRecoveryPhoneRaw)),
+      ownerRecoveryEmailReady:Boolean(ownerRecoveryEmail),
+      otpExpiresMinutes:5,
+      registrationPhoneVerification:true,
+      profilePhoneVerification:true,
     },
     wbApiPolicy: {
       fbsArchive: 'GET /api/marketplace/v3/fbs/orders/archive',
@@ -5337,82 +5536,157 @@ app.get('/health', async (_req, res) => {
   })
 })
 
+app.post('/api/auth/register/phone/request', async (req, res) => {
+  try {
+    requireBackendConfig()
+    const email=String(req.body?.email || '').trim().toLowerCase()
+    const phone=normalizePhone(req.body?.phone)
+    if (!email.includes('@') || !phone) return res.status(400).json({ error:'Сначала укажите корректную почту и телефон.' })
+    if (!smsRuApiId) return res.status(503).json({ error:'SMS-подтверждение ещё не настроено администратором ELISEI.' })
+    const existing=await pool.query('SELECT id FROM users WHERE email=$1 OR phone=$2 LIMIT 1',[email,phone])
+    if (existing.rowCount) return res.status(409).json({ error:'Аккаунт с такой почтой или телефоном уже существует.' })
+    const issued=await issuePhoneVerificationOtp({ purpose:'register',subjectKey:email,phone })
+    return res.json({ ok:true,expiresInMinutes:issued.expiresInMinutes,phoneMasked:maskPhone(phone),message:'Код подтверждения отправлен по SMS.' })
+  } catch (error) { return res.status(error.status || 500).json({ error:error.message }) }
+})
+
+app.post('/api/auth/register/phone/confirm', async (req, res) => {
+  try {
+    requireBackendConfig()
+    const email=String(req.body?.email || '').trim().toLowerCase()
+    const phone=normalizePhone(req.body?.phone)
+    const code=String(req.body?.code || '').replace(/\D/g,'')
+    if (!email.includes('@') || !phone || code.length !== 6) return res.status(400).json({ error:'Введите почту, телефон и шестизначный код из SMS.' })
+    await consumePhoneVerificationOtp({ purpose:'register',subjectKey:email,phone,code })
+    const verificationToken=jwt.sign({ purpose:'register_phone',email,phone },jwtSecret,{ expiresIn:'10m' })
+    return res.json({ ok:true,verificationToken,phoneMasked:maskPhone(phone),message:'Телефон подтверждён.' })
+  } catch (error) { return res.status(error.status || 500).json({ error:error.message }) }
+})
+
 app.post('/api/auth/register', async (req, res) => {
   try {
     requireBackendConfig()
-    const name = String(req.body?.name || '').trim(); const company = String(req.body?.company || '').trim(); const email = String(req.body?.email || '').trim().toLowerCase(); const password = String(req.body?.password || '')
-    if (!name || !company || !email.includes('@') || password.length < 8) return res.status(400).json({ error: 'Заполните все поля. Пароль должен содержать минимум 8 символов.' })
-    const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email])
-    if (existing.rowCount) return res.status(409).json({ error: 'Аккаунт с такой почтой уже существует' })
-    const user = { id: crypto.randomUUID(), name, company, email }
+    const name = String(req.body?.name || '').trim()
+    const company = String(req.body?.company || '').trim()
+    const email = String(req.body?.email || '').trim().toLowerCase()
+    const phone = normalizePhone(req.body?.phone)
+    const password = String(req.body?.password || '')
+    const verificationToken=String(req.body?.phoneVerificationToken || '').trim()
+    if (!name || !company || !email.includes('@') || !phone || password.length < 8) {
+      return res.status(400).json({ error:'Заполните все поля. Укажите корректный телефон и пароль минимум 8 символов.' })
+    }
+    let verified
+    try { verified=jwt.verify(verificationToken,jwtSecret) } catch { return res.status(400).json({ error:'Сначала подтвердите телефон кодом из SMS.' }) }
+    if (verified?.purpose !== 'register_phone' || String(verified.email || '').toLowerCase() !== email || normalizePhone(verified.phone) !== phone) {
+      return res.status(400).json({ error:'Подтверждение телефона не совпадает с данными регистрации. Запросите новый код.' })
+    }
+    const existing = await pool.query('SELECT id FROM users WHERE email=$1 OR phone=$2 LIMIT 1', [email, phone])
+    if (existing.rowCount) return res.status(409).json({ error:'Аккаунт с такой почтой или телефоном уже существует' })
+    const user = { id:crypto.randomUUID(), name, company, email, phone }
     const passwordHash = await bcrypt.hash(password, 12)
-    const result = await pool.query('INSERT INTO users (id, name, company, email, password_hash) VALUES ($1,$2,$3,$4,$5) RETURNING *', [user.id, name, company, email, passwordHash])
-    res.status(201).json({ token: signToken(result.rows[0]), user: publicUser(result.rows[0]) })
-  } catch (error) { res.status(error.code === '23505' ? 409 : (error.status || 500)).json({ error: error.code === '23505' ? 'Аккаунт с такой почтой уже существует' : error.message }) }
+    const result = await pool.query(
+      'INSERT INTO users (id,name,company,email,phone,password_hash) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
+      [user.id,name,company,email,phone,passwordHash]
+    )
+    res.status(201).json({ token:signToken(result.rows[0]), user:publicUser(result.rows[0]) })
+  } catch (error) {
+    res.status(error.code === '23505' ? 409 : (error.status || 500)).json({ error:error.code === '23505' ? 'Аккаунт с такой почтой или телефоном уже существует' : error.message })
+  }
 })
 
-app.post('/api/auth/password-reset/request', async (req, res) => {
+app.post('/api/auth/password-reset/request', async (_req, res) => {
+  return res.status(410).json({ error:'Восстановление пароля по email отключено. Используйте код из SMS.' })
+})
+
+app.post('/api/auth/password-reset/confirm', async (_req, res) => {
+  return res.status(410).json({ error:'Ссылки восстановления по email отключены. Используйте код из SMS.' })
+})
+
+app.post('/api/auth/password-reset/sms/request', async (req, res) => {
   try {
     requireBackendConfig()
-    const email = String(req.body?.email || '').trim().toLowerCase()
-    const genericResponse = {
-      ok: true,
-      expiresInMinutes: 15,
-      message: 'Если аккаунт с такой почтой существует, ссылка для восстановления создана. Пока почтовая отправка не подключена, одноразовую ссылку можно взять в логах backend Render.'
+    if (!smsRuApiId) return res.status(503).json({ error:'SMS-восстановление ещё не настроено администратором ELISEI.' })
+    const phone = normalizePhone(req.body?.phone)
+    if (!phone) return res.status(400).json({ error:'Введите корректный номер телефона с кодом страны.' })
+    const generic = { ok:true, expiresInMinutes:5, phoneMasked:maskPhone(phone), message:'Если номер привязан к аккаунту ELISEI, код отправлен по SMS. Он действует 5 минут.' }
+    const resolved = await resolvePasswordResetUser(phone)
+    const user = resolved.user
+    if (!user) {
+      await sleep(250)
+      return res.json(generic)
     }
-    if (!email || !email.includes('@')) return res.status(400).json({ error:'Введите корректную электронную почту.' })
-    const result = await pool.query('SELECT id,email,password_hash FROM users WHERE email=$1', [email])
-    const user = result.rows[0]
-    if (!user) return res.json(genericResponse)
-
-    const passwordFingerprint = crypto.createHash('sha256').update(String(user.password_hash || '')).digest('hex').slice(0,24)
-    const resetToken = jwt.sign({
-      sub:user.id,
-      email:user.email,
-      purpose:'password_reset',
-      pwd:passwordFingerprint,
-    }, jwtSecret, { expiresIn:'15m' })
-    const frontendBase = String(req.headers.origin || allowedOrigins[0] || '').trim().replace(/\/$/,'')
-    if (!frontendBase) throw Object.assign(new Error('FRONTEND_ORIGIN не настроен для восстановления пароля'), { status:503 })
-    const resetUrl = `${frontendBase}/login?reset=${encodeURIComponent(resetToken)}&email=${encodeURIComponent(user.email)}`
-    console.warn(`[ELISEI PASSWORD RESET] Одноразовая ссылка (15 мин): ${resetUrl}`)
-    return res.json(genericResponse)
+    const recent = await pool.query(
+      `SELECT requested_at FROM password_reset_otps WHERE user_id=$1 ORDER BY requested_at DESC LIMIT 1`,
+      [user.id]
+    )
+    if (recent.rows[0] && Date.now() - new Date(recent.rows[0].requested_at).getTime() < 60000) return res.json(generic)
+    const hourly = await pool.query(
+      `SELECT COUNT(*)::int AS count FROM password_reset_otps WHERE user_id=$1 AND requested_at > NOW() - INTERVAL '1 hour'`,
+      [user.id]
+    )
+    if (Number(hourly.rows[0]?.count || 0) >= 5) return res.json(generic)
+    const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0')
+    const id = crypto.randomUUID()
+    const hash = otpHash({ userId:user.id, phone, code })
+    await pool.query('UPDATE password_reset_otps SET used_at=NOW() WHERE user_id=$1 AND used_at IS NULL', [user.id])
+    await pool.query(
+      `INSERT INTO password_reset_otps (id,user_id,phone,code_hash,expires_at) VALUES ($1,$2,$3,$4,NOW()+INTERVAL '5 minutes')`,
+      [id,user.id,phone,hash]
+    )
+    try {
+      await sendPasswordResetSms(phone, code)
+    } catch (error) {
+      await pool.query('UPDATE password_reset_otps SET used_at=NOW() WHERE id=$1', [id]).catch(()=>{})
+      throw error
+    }
+    console.log(`[ELISEI SMS RESET] Code sent to ${maskPhone(phone)}${resolved.bootstrap ? ' (owner bootstrap)' : ''}`)
+    return res.json(generic)
   } catch (error) {
     return res.status(error.status || 500).json({ error:error.message })
   }
 })
 
-app.post('/api/auth/password-reset/confirm', async (req, res) => {
+app.post('/api/auth/password-reset/sms/confirm', async (req, res) => {
   try {
     requireBackendConfig()
-    const token = String(req.body?.token || '').trim()
+    const phone = normalizePhone(req.body?.phone)
+    const code = String(req.body?.code || '').replace(/\D/g, '')
     const password = String(req.body?.password || '')
-    if (!token) return res.status(400).json({ error:'Ссылка восстановления отсутствует.' })
+    if (!phone || code.length !== 6) return res.status(400).json({ error:'Введите номер телефона и шестизначный код из SMS.' })
     if (password.length < 8) return res.status(400).json({ error:'Новый пароль должен содержать минимум 8 символов.' })
-
-    let payload
-    try {
-      payload = jwt.verify(token, jwtSecret)
-    } catch {
-      return res.status(400).json({ error:'Ссылка восстановления недействительна или уже истекла. Запросите новую.' })
-    }
-    if (payload?.purpose !== 'password_reset' || !payload?.sub || !payload?.email || !payload?.pwd) {
-      return res.status(400).json({ error:'Некорректная ссылка восстановления.' })
-    }
-    const result = await pool.query(
-      'SELECT id,email,password_hash FROM users WHERE id=$1 AND email=$2',
-      [payload.sub, String(payload.email).toLowerCase()]
+    const found = await pool.query(
+      `SELECT id,user_id,phone,code_hash,attempts,expires_at FROM password_reset_otps WHERE phone=$1 AND used_at IS NULL ORDER BY requested_at DESC LIMIT 1`,
+      [phone]
     )
-    const user = result.rows[0]
-    if (!user) return res.status(400).json({ error:'Ссылка восстановления недействительна.' })
-    const currentFingerprint = crypto.createHash('sha256').update(String(user.password_hash || '')).digest('hex').slice(0,24)
-    if (currentFingerprint !== payload.pwd) {
-      return res.status(400).json({ error:'Эта ссылка восстановления уже была использована. Запросите новую.' })
+    const otp = found.rows[0]
+    if (!otp || new Date(otp.expires_at).getTime() < Date.now()) {
+      if (otp) await pool.query('UPDATE password_reset_otps SET used_at=NOW() WHERE id=$1', [otp.id])
+      return res.status(400).json({ error:'Код истёк. Запросите новый SMS-код.' })
+    }
+    if (Number(otp.attempts || 0) >= 5) {
+      await pool.query('UPDATE password_reset_otps SET used_at=NOW() WHERE id=$1', [otp.id])
+      return res.status(429).json({ error:'Слишком много попыток. Запросите новый код.' })
+    }
+    const expected = otpHash({ userId:otp.user_id, phone, code })
+    if (!safeEqualHex(expected, otp.code_hash)) {
+      const nextAttempts = Number(otp.attempts || 0) + 1
+      await pool.query('UPDATE password_reset_otps SET attempts=$2,used_at=CASE WHEN $2>=5 THEN NOW() ELSE used_at END WHERE id=$1', [otp.id,nextAttempts])
+      return res.status(400).json({ error:'Неверный код. Проверьте SMS и попробуйте ещё раз.' })
     }
     const passwordHash = await bcrypt.hash(password, 12)
-    await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2', [passwordHash, user.id])
-    return res.json({ ok:true, message:'Пароль изменён. Теперь войдите с новым паролем.' })
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const updatedUser = await client.query('UPDATE users SET password_hash=$1,phone=COALESCE(phone,$2) WHERE id=$3 RETURNING email', [passwordHash,phone,otp.user_id])
+      await client.query('UPDATE password_reset_otps SET used_at=NOW() WHERE user_id=$1 AND used_at IS NULL', [otp.user_id])
+      await client.query('COMMIT')
+      return res.json({ ok:true, message:'Пароль изменён. Теперь войдите с новым паролем.', loginEmail:updatedUser.rows[0]?.email || '' })
+    } catch (error) {
+      await client.query('ROLLBACK').catch(()=>{})
+      throw error
+    } finally { client.release() }
   } catch (error) {
+    if (error?.code === '23505') return res.status(409).json({ error:'Этот номер уже привязан к другому аккаунту.' })
     return res.status(error.status || 500).json({ error:error.message })
   }
 })
@@ -5432,6 +5706,37 @@ app.get('/api/auth/me', authRequired, async (req, res) => {
   const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.auth.sub])
   if (!result.rowCount) return res.status(404).json({ error: 'Пользователь не найден' })
   res.json({ user: publicUser(result.rows[0]) })
+})
+
+app.post('/api/auth/phone/request', authRequired, async (req, res) => {
+  try {
+    const phone=normalizePhone(req.body?.phone)
+    if (!phone) return res.status(400).json({ error:'Введите корректный номер телефона с кодом страны.' })
+    if (!smsRuApiId) return res.status(503).json({ error:'SMS-подтверждение ещё не настроено администратором ELISEI.' })
+    const current=await pool.query('SELECT phone FROM users WHERE id=$1',[req.auth.sub])
+    if (!current.rowCount) return res.status(404).json({ error:'Пользователь не найден.' })
+    if (current.rows[0].phone === phone) return res.status(400).json({ error:'Этот номер уже привязан к вашему аккаунту.' })
+    const occupied=await pool.query('SELECT id FROM users WHERE phone=$1 AND id<>$2 LIMIT 1',[phone,req.auth.sub])
+    if (occupied.rowCount) return res.status(409).json({ error:'Этот номер уже привязан к другому аккаунту.' })
+    const issued=await issuePhoneVerificationOtp({ purpose:'profile',subjectKey:req.auth.sub,phone,userId:req.auth.sub })
+    return res.json({ ok:true,expiresInMinutes:issued.expiresInMinutes,phoneMasked:maskPhone(phone),message:'Код подтверждения отправлен по SMS.' })
+  } catch (error) { return res.status(error.status || 500).json({ error:error.message }) }
+})
+
+app.post('/api/auth/phone/confirm', authRequired, async (req, res) => {
+  try {
+    const phone=normalizePhone(req.body?.phone)
+    const code=String(req.body?.code || '').replace(/\D/g,'')
+    if (!phone || code.length !== 6) return res.status(400).json({ error:'Введите номер и шестизначный код из SMS.' })
+    const occupied=await pool.query('SELECT id FROM users WHERE phone=$1 AND id<>$2 LIMIT 1',[phone,req.auth.sub])
+    if (occupied.rowCount) return res.status(409).json({ error:'Этот номер уже привязан к другому аккаунту.' })
+    await consumePhoneVerificationOtp({ purpose:'profile',subjectKey:req.auth.sub,phone,code,userId:req.auth.sub })
+    const updated=await pool.query('UPDATE users SET phone=$1 WHERE id=$2 RETURNING *',[phone,req.auth.sub])
+    return res.json({ ok:true,user:publicUser(updated.rows[0]),message:'Телефон подтверждён и сохранён.' })
+  } catch (error) {
+    if (error?.code === '23505') return res.status(409).json({ error:'Этот номер уже привязан к другому аккаунту.' })
+    return res.status(error.status || 500).json({ error:error.message })
+  }
 })
 
 async function queueStagesFromWebhook(connectionId, events = []) {
@@ -7881,8 +8186,12 @@ async function processDueDeferredStages() {
       JOIN marketplace_connections c ON c.id=s.connection_id
       WHERE s.stage NOT IN ('stocks','paidStorage','acceptance','fbsArchive') AND s.status IN ('rate_limited','queued','retry_scheduled')
         AND s.next_allowed_at IS NOT NULL AND s.next_allowed_at <= NOW()
-      ORDER BY s.next_allowed_at
-      LIMIT 10
+      -- Должен сканироваться тот же пул кандидатов, из которого Smart Scheduler
+      -- выбрал победителя. Иначе победитель мог оказаться 11-м+ по старому LIMIT 10,
+      -- все первые строки отбрасывались smartSchedulerAllows(), а worker тихо
+      -- завершался без запроса к WB и без ошибки.
+      ORDER BY s.updated_at
+      LIMIT ${SMART_SCHEDULER_SCAN_LIMIT}
     `)
     due = result.rows
   } catch (error) {
