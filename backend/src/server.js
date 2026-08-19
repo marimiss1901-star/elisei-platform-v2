@@ -51,7 +51,7 @@ import {
 } from './wb/smart-scheduler.js'
 import {
   AUTOMATIC_REFRESH_INTERVALS_SECONDS, DEFAULT_DAILY_READY_TIMEZONE,
-  yesterdayDateKey, shiftIsoDate, dailyReadySlot, dailyHeavyStagePlan,
+  yesterdayDateKey, shiftIsoDate, dailyReadySlot, dailyHeavyStagePlan, dailyOperationalRecoveryPlan,
   buildDailyMetricStates, dailyReadinessSummary, compactDailyCore, dailySnapshotSourceRevision, snapshotNeedsRefresh,
   mergeDailyReadySnapshots,
 } from './wb/daily-ready.js'
@@ -850,7 +850,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.25.1 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.25.2 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -3070,10 +3070,18 @@ function incrementalDateFrom(previousRows) {
   return latest ? new Date(Math.max(Date.now() - 95 * 86400000, latest - 60 * 60000)).toISOString() : isoDaysAgo(30)
 }
 
-async function loadStatisticsRows(kind, token, { deadlineAt = 0, previousRows = [] } = {}) {
+async function loadStatisticsRows(kind, token, { deadlineAt = 0, previousRows = [], dateFromOverride = '' } = {}) {
   const endpointName = kind === 'orders' ? 'orders' : 'sales'
   const label = kind === 'orders' ? 'Заказы WB' : 'Продажи WB'
-  const dateFrom = incrementalDateFrom(previousRows)
+  const overrideDate = /^\d{4}-\d{2}-\d{2}$/.test(String(dateFromOverride || '').slice(0,10))
+    ? String(dateFromOverride).slice(0,10)
+    : ''
+  // Daily Ready может обнаружить дырку именно во вчерашнем дне, хотя более новые
+  // строки уже существуют. Обычный incrementalDateFrom тогда начнёт слишком поздно.
+  // Берём сутки запаса до целевой даты и восстанавливаем пропущенный диапазон.
+  const dateFrom = overrideDate
+    ? `${shiftIsoDate(overrideDate,-1)}T00:00:00.000Z`
+    : incrementalDateFrom(previousRows)
   const endpoint = `https://statistics-api.wildberries.ru/api/v1/supplier/${endpointName}?dateFrom=${encodeURIComponent(dateFrom)}&flag=0`
   const rawPayload = await wbFetch(endpoint, token, {
     label, timeoutMs:45000, maxAttempts:1, maxRetryDelayMs:0, deadlineAt,
@@ -3082,7 +3090,7 @@ async function loadStatisticsRows(kind, token, { deadlineAt = 0, previousRows = 
   return {
     value:mergeStatisticsRows(kind, previousRows, incoming),
     rawPayload,
-    validation:{ incomingRows:incoming.length, dateFrom },
+    validation:{ incomingRows:incoming.length, dateFrom, dailyReadyRecoveryDate:overrideDate || null },
     endpoint,
   }
 }
@@ -4970,7 +4978,9 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       meta = loaded.validation || null
       snapshot = loaded
     } else if (stage === 'orders' || stage === 'sales') {
-      const loaded = await loadStatisticsRows(stage, selected.token, { deadlineAt, previousRows:fallback })
+      const loaded = await loadStatisticsRows(stage, selected.token, {
+        deadlineAt,previousRows:fallback,dateFromOverride:state?.metadata?.dailyReadyDate || state?.metadata?.dateFrom || '',
+      })
       value = loaded.value
       snapshot = loaded
     } else if (stage === 'advertising') {
@@ -5140,6 +5150,11 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       ...(meta || {}),
       ...(snapshot?.validation ? { validation:snapshot.validation } : {}),
     }
+    if (['orders','sales'].includes(stage) && /^\d{4}-\d{2}-\d{2}$/.test(String(state?.metadata?.dailyReadyDate || ''))) {
+      stateMetadata.dailyReadyConfirmedFrom=String(state.metadata.dailyReadyDate).slice(0,10)
+      stateMetadata.dailyReadyConfirmedThrough=String(state.metadata.dailyReadyDate).slice(0,10)
+      stateMetadata.dailyReadyRecoveryAt=new Date().toISOString()
+    }
     if (stage === 'advertising' && Number(value?.meta?.nextStatsOffset || 0) > 0) {
       state = await updateSyncState(connection.id,stage,{
         status:'queued',lastAttemptAt:new Date().toISOString(),lastSuccessAt:new Date().toISOString(),
@@ -5254,7 +5269,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.25.1',
+    version: '2.25.2',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -6140,7 +6155,7 @@ app.get('/api/wb/daily-ready/:id', authRequired, async (req,res) => {
     let row=await loadDailySnapshotRow(connection.id,date)
     let stale=false
 
-    // 5.13.1: вход пользователя читает уже сохранённый снимок и никогда не
+    // 5.13.2: вход пользователя читает уже сохранённый снимок и никогда не
     // заставляет его исчезнуть на время фонового пересчёта. Если снимок есть,
     // обновляем его асинхронно из локальной БД. Только самый первый bootstrap,
     // когда строки ещё нет вообще, может построить снимок синхронно — без WB API.
@@ -7698,7 +7713,9 @@ async function scheduleDailyReadyStages() {
   if (!pool) return
   let rows=[]
   try {
-    const result=await pool.query(`SELECT id AS connection_id,user_id FROM marketplace_connections WHERE status='connected' ORDER BY updated_at LIMIT 40`)
+    // Нужен сам connection.data: Daily Ready проверяет фактически сохранённое
+    // покрытие вчерашней даты, а не только текущий статус очереди Scheduler.
+    const result=await pool.query(`SELECT * FROM marketplace_connections WHERE status='connected' ORDER BY updated_at LIMIT 40`)
     rows=result.rows
   } catch(error) {
     console.warn('Daily Ready schedule scan failed:',error.message)
@@ -7707,18 +7724,38 @@ async function scheduleDailyReadyStages() {
   const now=Date.now()
   const slot=dailyReadySlot(new Date(now),dailyReadyTimezone)
   const targetDate=yesterdayDateKey(new Date(now),dailyReadyTimezone)
+  const targetRange={from:targetDate,to:targetDate,days:1}
   for(const row of rows){
     try{
-      const states=await getSyncStates(row.connection_id)
-      const plan=dailyHeavyStagePlan({states,now,timeZone:dailyReadyTimezone})
-      for(const stage of plan){
+      const [states,canonical]=await Promise.all([
+        getSyncStates(row.id),
+        canonicalConnectionData(row,{repair:true,persistManifest:false,queueMissing:false}),
+      ])
+      const filtered=analyticsFilterConnectionData(canonical.data,targetRange)
+      const coverage=filtered?.__periodCoverage || {}
+      const operationalPlan=dailyOperationalRecoveryPlan({coverage,states,date:targetDate,now})
+      for(const stage of operationalPlan){
+        const current=states.find(item=>item.stage===stage) || null
+        const metadata={
+          ...(current?.metadata || {}),trigger:'daily_ready_recovery',dailyReadySlot:slot,dailyReadyDate:targetDate,
+          missingCoverage:true,queuedForClosedDay:true,
+        }
+        if(['orders','sales'].includes(stage)) metadata.dateFrom=targetDate
+        if(stage==='advertising') {
+          metadata.period=boundedSyncPeriod(analyticsPeriodRange({from:shiftIsoDate(targetDate,-29),to:targetDate}),31)
+        }
+        await updateSyncState(row.id,stage,{status:'queued',nextAllowedAt:new Date().toISOString(),lastError:null,metadata})
+      }
+
+      const heavyPlan=dailyHeavyStagePlan({states,now,timeZone:dailyReadyTimezone})
+      for(const stage of heavyPlan){
         const current=states.find(item=>item.stage===stage) || null
         const metadata={...(current?.metadata || {}),trigger:'daily_ready',dailyReadySlot:slot,dailyReadyDate:targetDate}
         if(['finance','acquiring'].includes(stage)) metadata.period=reportPeriod(30)
-        await updateSyncState(row.connection_id,stage,{status:'queued',nextAllowedAt:new Date().toISOString(),lastError:null,metadata})
+        await updateSyncState(row.id,stage,{status:'queued',nextAllowedAt:new Date().toISOString(),lastError:null,metadata})
       }
     }catch(error){
-      console.warn(`Daily Ready scheduler failed for ${row.connection_id}:`,error.message)
+      console.warn(`Daily Ready scheduler failed for ${row.id || row.connection_id}:`,error.message)
     }
   }
 }

@@ -50,7 +50,7 @@ for(const marker of [
   'replacedDuplicateReportId:reportId',
   'WB_CATALOG_SERVICE_ENABLED',
   "kickBackgroundWorkers('webhook-report-ready')",
-  "version: '2.25.1'",
+  "version: '2.25.2'",
   'scheduleDailyReadyStages()',
   'refreshDailyReadySnapshots()',
   '/api/wb/daily-ready/:id',

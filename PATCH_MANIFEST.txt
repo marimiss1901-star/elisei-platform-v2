@@ -1,17 +1,13 @@
-ELISEI 5.13.1 PATCH MANIFEST
+ELISEI 5.13.2 PATCH MANIFEST
+Base: ELISEI 5.13.1
+Frontend: 5.13.2
+Backend: 2.25.2
+El Core: 5.13.2
+Purpose: Closed-Day Backfill for Daily Ready
 
-Base release: 5.13.0
-Frontend: 5.13.1
-Backend: 2.25.1
-El Core: 5.13.1
-Patch: Persistent Daily Snapshot
-
-Purpose:
-- confirmed figures for yesterday remain visible during subsequent background refreshes;
-- persisted coverage for the closed day wins over current queued/running scheduler state;
-- existing Daily Ready snapshot is served immediately and refreshed from local DB in background;
-- finance remains partial until truly complete; no false zeroes/readiness;
-- UI clearly distinguishes snapshot supplementing / available / confirmed.
-
-Regression: 39/39 backend test commands passed.
-Overlay target: ELISEI 5.13.0.
+Critical fix:
+- Daily Ready verifies actual persisted coverage of yesterday.
+- Missing orders/sales coverage triggers a background backfill from one day before target date.
+- Login does not trigger WB API.
+- Successful recovery confirms target date even when WB legitimately returns zero rows.
+- Existing queued/rate-limited stages and next_allowed_at are respected.

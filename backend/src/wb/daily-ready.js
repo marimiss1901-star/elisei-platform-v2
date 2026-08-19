@@ -1,6 +1,6 @@
 const DAY_MS = 86400000
 
-export const DAILY_READY_VERSION = 2
+export const DAILY_READY_VERSION = 3
 export const DEFAULT_DAILY_READY_TIMEZONE = 'Europe/Moscow'
 
 export const AUTOMATIC_REFRESH_INTERVALS_SECONDS = Object.freeze({
@@ -18,6 +18,8 @@ export const AUTOMATIC_REFRESH_INTERVALS_SECONDS = Object.freeze({
 export const DAILY_READY_CORE_STAGES = Object.freeze([
   'orders','sales','advertising','finance','paidStorage','acceptance','acquiring','stocks','sellerStocks',
 ])
+
+export const DAILY_READY_OPERATIONAL_RECOVERY_STAGES = Object.freeze(['orders','sales','advertising'])
 
 export const DAILY_READY_HEAVY_INTERVALS_SECONDS = Object.freeze({
   finance: 12 * 60 * 60,
@@ -112,7 +114,37 @@ function coverageIncludes(coverage = {}, date = '') {
   return from <= date && date <= to
 }
 
-function streamState(state = {}, { hasRows = false, coverage = null, date = '', allowConfirmedEmpty = true } = {}) {
+function stateConfirmsBusinessDate(state = {}, date = '') {
+  const metadata = state?.metadata && typeof state.metadata === 'object' ? state.metadata : {}
+  const confirmedFrom = String(metadata?.dailyReadyConfirmedFrom || metadata?.dailyReadyDate || '').slice(0,10)
+  const confirmedThrough = String(metadata?.dailyReadyConfirmedThrough || '').slice(0,10)
+  if (!date || !confirmedThrough) return false
+  return (!confirmedFrom || confirmedFrom <= date) && date <= confirmedThrough
+}
+
+export function dailyOperationalRecoveryPlan({ coverage = {}, states = [], date = '', now = Date.now(), minimumRetryMs = 5*60*1000 } = {}) {
+  if (!date) return []
+  const map = new Map((Array.isArray(states) ? states : []).map(item=>[String(item?.stage || ''),item]))
+  const blocked = new Set(['running','pending','queued','rate_limited','retry_scheduled','missing_token','token_invalid','forbidden','subscription_required','optional_unavailable','error'])
+  const plan = []
+  for (const stage of DAILY_READY_OPERATIONAL_RECOVERY_STAGES) {
+    const state = map.get(stage) || {}
+    if (coverageIncludes(coverage?.[stage] || {},date) || stateConfirmsBusinessDate(state,date)) continue
+    const status = String(state?.status || '')
+    if (blocked.has(status)) continue
+    const nextAllowed = millis(state?.next_allowed_at || state?.nextAllowedAt)
+    if (nextAllowed > now) continue
+    const lastAttempt = Math.max(
+      millis(state?.last_attempt_at || state?.lastAttemptAt),
+      millis(state?.updated_at || state?.updatedAt),
+    )
+    if (lastAttempt && now-lastAttempt < Math.max(30000,Number(minimumRetryMs || 0))) continue
+    plan.push(stage)
+  }
+  return plan
+}
+
+function streamState(state = {}, { hasRows = false, coverage = null, date = '', allowConfirmedEmpty = true, confirmedByState = false } = {}) {
   const status = String(state?.status || '')
   const failed = ['error','forbidden','missing_token','token_invalid','subscription_required'].includes(status)
   const covered = coverageIncludes(coverage,date)
@@ -122,6 +154,7 @@ function streamState(state = {}, { hasRows = false, coverage = null, date = '', 
   // успешный поток; если его покрытие включает дату, эти данные уже доступны
   // для Daily Ready независимо от того, что следующий refresh сейчас queued/running.
   if (covered) return { state:'ready', covered:true, evidence:'persisted_coverage' }
+  if (confirmedByState) return { state:'ready', covered:true, evidence:'wb_query_confirmed_date' }
   if (hasRows) return { state:'partial', covered:false, evidence:'persisted_rows' }
   if (failed) return { state:'missing', covered:false, evidence:'stream_error' }
   return { state:'waiting', covered:false, evidence:allowConfirmedEmpty ? 'no_persisted_coverage' : 'no_finance_evidence' }
@@ -137,11 +170,15 @@ export function buildDailyMetricStates({ core = {}, states = [], date = '', fina
     to:String(financeSummary?.dateTo || financeSummary?.date_to || '').slice(0,10),
   }
 
-  const orders = streamState(stateMap.get('orders') || {},{
+  const orderState = stateMap.get('orders') || {}
+  const saleState = stateMap.get('sales') || {}
+  const orders = streamState(orderState,{
     hasRows:Number(coverage?.orders?.selectedRows || 0)>0,coverage:coverage?.orders,date,
+    confirmedByState:stateConfirmsBusinessDate(orderState,date),
   })
-  const sales = streamState(stateMap.get('sales') || {},{
+  const sales = streamState(saleState,{
     hasRows:Number(coverage?.sales?.selectedRows || 0)>0,coverage:coverage?.sales,date,
+    confirmedByState:stateConfirmsBusinessDate(saleState,date),
   })
   const advertising = streamState(stateMap.get('advertising') || {},{
     hasRows:Number(coverage?.advertising?.selectedRows || 0)>0,coverage:coverage?.advertising,date,

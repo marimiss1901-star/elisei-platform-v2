@@ -1,5 +1,5 @@
 const STAGE_DEFAULTS = Object.freeze({
-  // 5.13.1: business-ready cadence. ELISEI refreshes before the user opens the cabinet;
+  // 5.13.2: business-ready cadence. ELISEI refreshes before the user opens the cabinet;
   // it no longer polls operational WB streams every 2–5 minutes.
   orders: 1800,
   sales: 1800,
