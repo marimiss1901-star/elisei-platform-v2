@@ -49,6 +49,11 @@ import { buildProduct360, buildProduct360Comparison, findProduct360Product, prod
 import {
   stagePriority, schedulerGroup, chooseCycleWinners, initialStageSchedule, schedulerVisualState,
 } from './wb/smart-scheduler.js'
+import {
+  AUTOMATIC_REFRESH_INTERVALS_SECONDS, DEFAULT_DAILY_READY_TIMEZONE,
+  yesterdayDateKey, shiftIsoDate, dailyReadySlot, dailyHeavyStagePlan,
+  buildDailyMetricStates, dailyReadinessSummary, compactDailyCore, dailySnapshotSourceRevision, snapshotNeedsRefresh,
+} from './wb/daily-ready.js'
 import { buildElEngagementData } from './services/elEngagement.js'
 import elDecisionEngine from './services/elDecisionEngine.cjs'
 
@@ -76,6 +81,7 @@ const wbOauthConnectUrl = String(process.env.WB_OAUTH_CONNECT_URL || '').trim()
 const wbServiceCatalogUrl = String(process.env.WB_SERVICE_CATALOG_URL || 'https://seller.wildberries.ru/auth-services/application').trim()
 const wbCatalogServiceEnabled = /^(?:1|true|yes)$/i.test(String(process.env.WB_CATALOG_SERVICE_ENABLED || '').trim())
 const liveSyncBatchLimit = Math.max(1,Math.min(6,Number(process.env.WB_LIVE_SYNC_BATCH_LIMIT || 3)))
+const dailyReadyTimezone = String(process.env.ELISEI_BUSINESS_TIMEZONE || DEFAULT_DAILY_READY_TIMEZONE).trim() || DEFAULT_DAILY_READY_TIMEZONE
 
 const databaseState = {
   ready: !pool,
@@ -323,11 +329,13 @@ function kickBackgroundWorkers(reason = 'timer') {
     // Это исключает cold-start burst: разные lanes больше не стреляют по WB
     // одновременно от имени одного продавца.
     await scheduleDueLiveSyncStages()
+    await scheduleDailyReadyStages()
     await prepareSmartSchedulerCycle()
     await processDueDeferredStages()
     await processPendingStockReports()
     await processPendingGeneratedReports()
     await processDueArchiveStages()
+    await refreshDailyReadySnapshots()
   })().catch(error => {
     backgroundWorkerState.lastError = error.message
     console.warn('WB background worker kick failed:', error.message)
@@ -358,6 +366,43 @@ app.use('/api', (req, res, next) => {
   }
   next()
 })
+
+async function ensureDailyReadySchema() {
+  if (!pool) return
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS wb_daily_snapshots (
+      connection_id UUID NOT NULL REFERENCES marketplace_connections(id) ON DELETE CASCADE,
+      snapshot_date DATE NOT NULL,
+      timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',
+      source_revision TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'waiting',
+      snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+      generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY(connection_id,snapshot_date)
+    );
+    CREATE INDEX IF NOT EXISTS wb_daily_snapshots_updated_idx ON wb_daily_snapshots(updated_at DESC);
+  `)
+}
+
+async function migrateAutomaticRefreshSettings() {
+  if (!pool) return
+  const defaults = defaultLiveSyncSettings()
+  await pool.query(`
+    INSERT INTO wb_live_sync_settings(connection_id,settings,updated_at)
+    SELECT id,$1::jsonb,NOW() FROM marketplace_connections WHERE status='connected'
+    ON CONFLICT(connection_id) DO NOTHING
+  `,[JSON.stringify(defaults)])
+  await pool.query(`
+    UPDATE wb_live_sync_settings
+    SET settings=COALESCE(settings,'{}'::jsonb) || jsonb_build_object(
+          'enabled',TRUE,
+          'automaticPolicyVersion',1,
+          'intervals',$1::jsonb
+        ),
+        updated_at=NOW()
+  `,[JSON.stringify(AUTOMATIC_REFRESH_INTERVALS_SECONDS)])
+}
 
 async function initDatabase() {
   if (!pool) return
@@ -508,8 +553,10 @@ async function initDatabase() {
   await ensureSnapshotSchema(pool)
   await ensureStreamSchema(pool)
   await ensureFinanceLedgerSchema(pool)
+  await ensureDailyReadySchema()
   await migrateLegacyWbTokens()
   await ensurePrimaryTokens()
+  await migrateAutomaticRefreshSettings()
   await recoverStaleSyncStates({ reason:'startup' })
   await recoverRetryableErrorStates()
   // 5.10.3: миграция старого длинного finance next_allowed_at выполняется
@@ -802,7 +849,7 @@ function authHeaders(token) {
   const headers = {
     Authorization: token,
     Accept: 'application/json',
-    'User-Agent': 'ELISEI/2.24.0 (marketplace analytics)',
+    'User-Agent': 'ELISEI/2.25.0 (marketplace analytics)',
   }
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
@@ -5206,7 +5253,7 @@ app.get('/health', async (_req, res) => {
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
-    version: '2.24.0',
+    version: '2.25.0',
     database: databaseState.status,
     databaseState: {
       attempts: databaseState.attempts,
@@ -5264,26 +5311,8 @@ app.post('/api/auth/password-reset/request', async (req, res) => {
     }
     if (!email || !email.includes('@')) return res.status(400).json({ error:'Введите корректную электронную почту.' })
     const result = await pool.query('SELECT id,email,password_hash FROM users WHERE email=$1', [email])
-    let user = result.rows[0]
-    let ownerRecoveryFallback = false
-    if (!user) {
-      const accounts = await pool.query('SELECT id,email,password_hash FROM users ORDER BY created_at ASC LIMIT 6')
-      const maskEmail = (value) => {
-        const [local, domain] = String(value || '').split('@')
-        if (!domain) return '***'
-        const visible = local.slice(0, Math.min(2, local.length))
-        return `${visible}${'*'.repeat(Math.max(3, local.length - visible.length))}@${domain}`
-      }
-      if (accounts.rowCount === 1) {
-        user = accounts.rows[0]
-        ownerRecoveryFallback = true
-        console.warn(`[ELISEI PASSWORD RESET] Запрошенная почта не найдена. В базе один аккаунт (${maskEmail(user.email)}), создаю owner-recovery ссылку только в закрытых логах Render.`)
-      } else {
-        const hints = accounts.rows.map(row => maskEmail(row.email)).join(', ')
-        console.warn(`[ELISEI PASSWORD RESET] Запрошенная почта не найдена. Подсказки зарегистрированных аккаунтов (${accounts.rowCount}${accounts.rowCount >= 6 ? '+' : ''}): ${hints || 'нет пользователей'}`)
-        return res.json(genericResponse)
-      }
-    }
+    const user = result.rows[0]
+    if (!user) return res.json(genericResponse)
 
     const passwordFingerprint = crypto.createHash('sha256').update(String(user.password_hash || '')).digest('hex').slice(0,24)
     const resetToken = jwt.sign({
@@ -5295,7 +5324,7 @@ app.post('/api/auth/password-reset/request', async (req, res) => {
     const frontendBase = String(req.headers.origin || allowedOrigins[0] || '').trim().replace(/\/$/,'')
     if (!frontendBase) throw Object.assign(new Error('FRONTEND_ORIGIN не настроен для восстановления пароля'), { status:503 })
     const resetUrl = `${frontendBase}/login?reset=${encodeURIComponent(resetToken)}&email=${encodeURIComponent(user.email)}`
-    console.warn(`[ELISEI PASSWORD RESET] Одноразовая ссылка (15 мин)${ownerRecoveryFallback ? ' [OWNER RECOVERY]' : ''}: ${resetUrl}`)
+    console.warn(`[ELISEI PASSWORD RESET] Одноразовая ссылка (15 мин): ${resetUrl}`)
     return res.json(genericResponse)
   } catch (error) {
     return res.status(error.status || 500).json({ error:error.message })
@@ -6096,6 +6125,38 @@ app.get('/api/wb/core/:id', authRequired, async (req, res) => {
     period:range ? { from:range.from, to:range.to, days:range.days } : null,
     dataSources:sources, recovered, recoveryQueued, lastSync: connection.last_sync_at || null,
   })
+})
+
+
+app.get('/api/wb/daily-ready/:id', authRequired, async (req,res) => {
+  try {
+    const connection=await getConnection(req.auth.sub,req.params.id)
+    if(!connection) return res.status(404).json({error:'Подключение не найдено'})
+    const requested=String(req.query.date || '').slice(0,10)
+    const date=/^\d{4}-\d{2}-\d{2}$/.test(requested) ? requested : yesterdayDateKey(new Date(),dailyReadyTimezone)
+    const states=await getSyncStates(connection.id)
+    const revision=dailySnapshotSourceRevision(states,date)
+    let row=await loadDailySnapshotRow(connection.id,date)
+    let stale=false
+    if(snapshotNeedsRefresh(row,revision,{maxAgeMs:6*60*60*1000,now:Date.now()})){
+      try { row=await buildAndSaveDailyReadySnapshot(connection,date,states) }
+      catch(error){
+        if(!row) throw error
+        stale=true
+        console.warn(`Daily Ready request served stale snapshot for ${connection.id}:`,error.message)
+      }
+    }
+    res.json({
+      snapshot:row?.snapshot || null,
+      meta:{
+        date,timezone:dailyReadyTimezone,status:row?.status || row?.snapshot?.status || 'waiting',
+        generatedAt:row?.generated_at || row?.snapshot?.generatedAt || null,stale,
+        automatic:true,entryDoesNotTriggerWbSync:true,
+      },
+    })
+  } catch(error){
+    res.status(error.status || 500).json({error:error.message})
+  }
 })
 
 
@@ -7523,17 +7584,168 @@ async function processPendingGeneratedReports() {
   }
 }
 
+
+async function dailyFinanceSummary(connectionId, date) {
+  const result = await pool.query(`
+    SELECT COUNT(*)::int AS movements,
+      COALESCE(SUM(CASE WHEN metric_role='settlement' THEN amount ELSE 0 END),0)::float8 AS "sellerPayable",
+      COALESCE(SUM(CASE WHEN operation_code='gross_sale' THEN amount ELSE 0 END),0)::float8 AS "grossRevenue",
+      COALESCE(SUM(CASE WHEN included_in_pnl=TRUE AND detail_only=FALSE AND amount<0 THEN ABS(amount) ELSE 0 END),0)::float8 AS expenses,
+      COALESCE(SUM(CASE WHEN metric_role='adjustment' AND detail_only=FALSE AND amount>0 THEN amount ELSE 0 END),0)::float8 AS compensations,
+      COALESCE(SUM(CASE WHEN operation_group='commission' AND detail_only=FALSE THEN ABS(amount) ELSE 0 END),0)::float8 AS commission,
+      COALESCE(SUM(CASE WHEN operation_group='logistics' AND detail_only=FALSE THEN ABS(amount) ELSE 0 END),0)::float8 AS logistics,
+      COALESCE(SUM(CASE WHEN operation_group='storage' AND detail_only=FALSE THEN ABS(amount) ELSE 0 END),0)::float8 AS storage,
+      COALESCE(SUM(CASE WHEN operation_group='acceptance' AND detail_only=FALSE THEN ABS(amount) ELSE 0 END),0)::float8 AS acceptance,
+      COALESCE(SUM(CASE WHEN operation_group='acquiring' AND detail_only=FALSE THEN ABS(amount) ELSE 0 END),0)::float8 AS acquiring,
+      COALESCE(SUM(CASE WHEN operation_group='penalties' AND detail_only=FALSE THEN ABS(amount) ELSE 0 END),0)::float8 AS penalties,
+      COALESCE(SUM(CASE WHEN operation_group='deductions' AND detail_only=FALSE THEN ABS(amount) ELSE 0 END),0)::float8 AS deductions,
+      MIN(operation_date) AS "dateFrom",MAX(operation_date) AS "dateTo"
+    FROM wb_finance_ledger
+    WHERE connection_id=$1 AND operation_date=$2::date
+  `,[connectionId,date])
+  const row=result.rows[0] || {}
+  return {
+    movements:Number(row.movements || 0),sellerPayable:Number(row.sellerPayable || 0),grossRevenue:Number(row.grossRevenue || 0),
+    expenses:Number(row.expenses || 0),compensations:Number(row.compensations || 0),commission:Number(row.commission || 0),
+    logistics:Number(row.logistics || 0),storage:Number(row.storage || 0),acceptance:Number(row.acceptance || 0),
+    acquiring:Number(row.acquiring || 0),penalties:Number(row.penalties || 0),deductions:Number(row.deductions || 0),
+    dateFrom:row.dateFrom || null,dateTo:row.dateTo || null,
+  }
+}
+
+async function loadDailySnapshotRow(connectionId,date) {
+  const result=await pool.query(`
+    SELECT connection_id,snapshot_date::text AS snapshot_date,timezone,source_revision,status,snapshot,generated_at,updated_at
+    FROM wb_daily_snapshots WHERE connection_id=$1 AND snapshot_date=$2::date
+  `,[connectionId,date])
+  return result.rows[0] || null
+}
+
+function dailySnapshotMetricSummary(core = {}, finance = {}) {
+  const summary={...(core?.summary || {})}
+  if (Number(finance?.movements || 0) > 0) {
+    summary.sellerPayable=Number(finance.sellerPayable || 0)
+    summary.commission=Math.round(Number(finance.commission || 0))
+    summary.logistics=Math.round(Number(finance.logistics || 0))
+    summary.storage=Math.round(Number(finance.storage || 0))
+    summary.acceptance=Math.round(Number(finance.acceptance || 0))
+    summary.acquiring=Math.round(Number(finance.acquiring || 0))
+    summary.penalties=Math.round(Number(finance.penalties || 0))
+    summary.deductions=Math.round(Number(finance.deductions || 0))
+  } else {
+    summary.sellerPayable=null
+  }
+  return summary
+}
+
+async function buildAndSaveDailyReadySnapshot(connection, date, states = null) {
+  const targetDate=String(date || yesterdayDateKey(new Date(),dailyReadyTimezone)).slice(0,10)
+  const stateRows=Array.isArray(states) ? states : await getSyncStates(connection.id)
+  const revision=dailySnapshotSourceRevision(stateRows,targetDate)
+  const [{data},settings,finance,previousFinance]=await Promise.all([
+    canonicalConnectionData(connection,{repair:true,persistManifest:false,queueMissing:false}),
+    getBusinessSettings(connection.user_id),
+    dailyFinanceSummary(connection.id,targetDate),
+    dailyFinanceSummary(connection.id,shiftIsoDate(targetDate,-1)),
+  ])
+  const range={from:targetDate,to:targetDate,days:1}
+  const previousDate=shiftIsoDate(targetDate,-1)
+  const previousRange={from:previousDate,to:previousDate,days:1}
+  const core=buildCoreAnalytics(analyticsFilterConnectionData(data,range),settings)
+  const previousCore=buildCoreAnalytics(analyticsFilterConnectionData(data,previousRange),settings)
+  const metricStates=buildDailyMetricStates({core,states:stateRows,date:targetDate,financeLedger:{summary:finance}})
+  const previousMetricStates=buildDailyMetricStates({core:previousCore,states:stateRows,date:previousDate,financeLedger:{summary:previousFinance}})
+  const readiness=dailyReadinessSummary(metricStates)
+  const compact=compactDailyCore(core,{summary:finance})
+  compact.summary=dailySnapshotMetricSummary(core,finance)
+  const previousCompact=compactDailyCore(previousCore,{summary:previousFinance})
+  previousCompact.summary=dailySnapshotMetricSummary(previousCore,previousFinance)
+  const snapshot={
+    version:1,date:targetDate,timezone:dailyReadyTimezone,generatedAt:new Date().toISOString(),sourceRevision:revision,
+    status:readiness.status,readiness,metricStates,
+    core:compact,
+    previous:{date:previousDate,metricStates:previousMetricStates,core:previousCompact},
+    automatic:{
+      enabled:true,mode:'daily_ready',slot:dailyReadySlot(new Date(),dailyReadyTimezone),
+      operationalCadenceMinutes:{orders:30,sales:30,advertising:60,stocks:60},
+      note:'ELISEI готовит вчерашний день в фоне. Вход пользователя не запускает запросы к WB.',
+    },
+  }
+  const saved=await pool.query(`
+    INSERT INTO wb_daily_snapshots(connection_id,snapshot_date,timezone,source_revision,status,snapshot,generated_at,updated_at)
+    VALUES($1,$2::date,$3,$4,$5,$6::jsonb,NOW(),NOW())
+    ON CONFLICT(connection_id,snapshot_date) DO UPDATE SET
+      timezone=EXCLUDED.timezone,source_revision=EXCLUDED.source_revision,status=EXCLUDED.status,snapshot=EXCLUDED.snapshot,
+      generated_at=NOW(),updated_at=NOW()
+    RETURNING snapshot_date::text AS snapshot_date,timezone,source_revision,status,snapshot,generated_at,updated_at
+  `,[connection.id,targetDate,dailyReadyTimezone,revision,readiness.status,JSON.stringify(snapshot)])
+  return saved.rows[0]
+}
+
+async function scheduleDailyReadyStages() {
+  if (!pool) return
+  let rows=[]
+  try {
+    const result=await pool.query(`SELECT id AS connection_id,user_id FROM marketplace_connections WHERE status='connected' ORDER BY updated_at LIMIT 40`)
+    rows=result.rows
+  } catch(error) {
+    console.warn('Daily Ready schedule scan failed:',error.message)
+    return
+  }
+  const now=Date.now()
+  const slot=dailyReadySlot(new Date(now),dailyReadyTimezone)
+  const targetDate=yesterdayDateKey(new Date(now),dailyReadyTimezone)
+  for(const row of rows){
+    try{
+      const states=await getSyncStates(row.connection_id)
+      const plan=dailyHeavyStagePlan({states,now,timeZone:dailyReadyTimezone})
+      for(const stage of plan){
+        const current=states.find(item=>item.stage===stage) || null
+        const metadata={...(current?.metadata || {}),trigger:'daily_ready',dailyReadySlot:slot,dailyReadyDate:targetDate}
+        if(['finance','acquiring'].includes(stage)) metadata.period=reportPeriod(30)
+        await updateSyncState(row.connection_id,stage,{status:'queued',nextAllowedAt:new Date().toISOString(),lastError:null,metadata})
+      }
+    }catch(error){
+      console.warn(`Daily Ready scheduler failed for ${row.connection_id}:`,error.message)
+    }
+  }
+}
+
+async function refreshDailyReadySnapshots() {
+  if (!pool) return
+  let rows=[]
+  try {
+    const result=await pool.query(`SELECT * FROM marketplace_connections WHERE status='connected' ORDER BY updated_at DESC LIMIT 30`)
+    rows=result.rows
+  } catch(error) {
+    console.warn('Daily Ready snapshot scan failed:',error.message)
+    return
+  }
+  const date=yesterdayDateKey(new Date(),dailyReadyTimezone)
+  for(const connection of rows){
+    try{
+      const states=await getSyncStates(connection.id)
+      const revision=dailySnapshotSourceRevision(states,date)
+      const current=await loadDailySnapshotRow(connection.id,date)
+      if (!snapshotNeedsRefresh(current,revision,{maxAgeMs:6*60*60*1000,now:Date.now()})) continue
+      await buildAndSaveDailyReadySnapshot(connection,date,states)
+    }catch(error){
+      console.warn(`Daily Ready snapshot failed for ${connection.id}:`,error.message)
+    }
+  }
+}
+
 async function scheduleDueLiveSyncStages() {
   if (!pool) return
   let rows=[]
   try {
     const result=await pool.query(`
-      SELECT l.connection_id,l.settings,c.user_id
-      FROM wb_live_sync_settings l
-      JOIN marketplace_connections c ON c.id=l.connection_id
-      WHERE COALESCE((l.settings->>'enabled')::boolean,FALSE)=TRUE
-      ORDER BY l.updated_at
-      LIMIT 20
+      SELECT c.id AS connection_id,COALESCE(l.settings,'{}'::jsonb) AS settings,c.user_id
+      FROM marketplace_connections c
+      LEFT JOIN wb_live_sync_settings l ON l.connection_id=c.id
+      WHERE c.status='connected'
+      ORDER BY COALESCE(l.updated_at,c.updated_at)
+      LIMIT 40
     `)
     rows=result.rows
   } catch(error) {
@@ -7543,14 +7755,14 @@ async function scheduleDueLiveSyncStages() {
   for(const row of rows){
     try{
       const states=await getSyncStates(row.connection_id)
-      const due=dueLiveStages({settings:row.settings,states,now:Date.now()}).slice(0,liveSyncBatchLimit)
+      const due=dueLiveStages({settings:{...(row.settings || {}),enabled:true,intervals:{...AUTOMATIC_REFRESH_INTERVALS_SECONDS}},states,now:Date.now()}).slice(0,liveSyncBatchLimit)
       for(const stage of due){
         const current=states.find(item=>item.stage===stage) || null
         const metadata={...(current?.metadata || {}),trigger:'live_poll',liveQueuedAt:new Date().toISOString()}
         if(stage==='advertising') metadata.period=boundedSyncPeriod(analyticsPeriodRange({from:isoDaysAgo(30).slice(0,10),to:new Date().toISOString().slice(0,10)}),31)
         await updateSyncState(row.connection_id,stage,{status:'queued',nextAllowedAt:new Date().toISOString(),lastError:null,metadata})
       }
-      if(due.length) await pool.query('UPDATE wb_live_sync_settings SET last_poll_at=NOW(),updated_at=NOW() WHERE connection_id=$1',[row.connection_id])
+      if(due.length) await pool.query(`INSERT INTO wb_live_sync_settings(connection_id,settings,last_poll_at,updated_at) VALUES($1,$2::jsonb,NOW(),NOW()) ON CONFLICT(connection_id) DO UPDATE SET last_poll_at=NOW(),updated_at=NOW()`,[row.connection_id,JSON.stringify({enabled:true,mode:'polling',intervals:AUTOMATIC_REFRESH_INTERVALS_SECONDS,webhooksEnabled:Boolean(row.settings?.webhooksEnabled),automaticPolicyVersion:1})])
     }catch(error){
       console.warn(`Live sync scheduler failed for ${row.connection_id}:`,error.message)
     }

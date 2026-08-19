@@ -5,19 +5,21 @@ import {
 } from '../src/wb/live-sync.js'
 
 const defaults=defaultLiveSyncSettings()
-assert.equal(defaults.enabled,false)
-assert.equal(defaults.intervals.orders,120)
-assert.equal(defaults.intervals.stocks,300)
+assert.equal(defaults.enabled,true)
+assert.equal(defaults.intervals.orders,1800)
+assert.equal(defaults.intervals.sales,1800)
+assert.equal(defaults.intervals.stocks,3600)
+assert.equal(defaults.intervals.advertising,3600)
 
 const normalized=normalizeLiveSyncSettings({enabled:true,intervals:{orders:1,chats:10}})
 assert.equal(normalized.enabled,true)
-assert.equal(normalized.intervals.orders,60)
+assert.equal(normalized.intervals.orders,900)
 assert.equal(normalized.intervals.chats,1800)
 
 const now=Date.parse('2026-08-04T12:00:00Z')
 const due=dueLiveStages({settings:{enabled:true},states:[
-  {stage:'orders',status:'success',last_success_at:'2026-08-04T11:57:00Z'},
-  {stage:'sales',status:'success',last_success_at:'2026-08-04T11:58:00Z'},
+  {stage:'orders',status:'success',last_success_at:'2026-08-04T11:20:00Z'},
+  {stage:'sales',status:'success',last_success_at:'2026-08-04T11:45:00Z'},
   {stage:'stocks',status:'rate_limited',next_allowed_at:'2026-08-04T13:00:00Z'},
 ],now})
 assert.ok(due.includes('orders'))
@@ -48,10 +50,13 @@ for(const marker of [
   'replacedDuplicateReportId:reportId',
   'WB_CATALOG_SERVICE_ENABLED',
   "kickBackgroundWorkers('webhook-report-ready')",
-  "version: '2.24.0'",
+  "version: '2.25.0'",
+  'scheduleDailyReadyStages()',
+  'refreshDailyReadySnapshots()',
+  '/api/wb/daily-ready/:id',
 ]) assert.ok(server.includes(marker),`server.js must contain ${marker}`)
 
 const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')
-for(const marker of ['Живое обновление','Гибридный режим включён','setupLiveWebhooks','updateLiveSync']) assert.ok(dashboard.includes(marker),`Dashboard must contain ${marker}`)
+for(const marker of ['Автоматическое обновление','ELISEI готовит кабинет до вашего входа','setupLiveWebhooks','updateLiveSync','Вчерашний день подготовлен']) assert.ok(dashboard.includes(marker),`Dashboard must contain ${marker}`)
 
-console.log('WB 5.9.0 live sync and stock-history recovery tests passed')
+console.log('WB automatic live sync, daily-ready and stock-history recovery tests passed')

@@ -1,0 +1,66 @@
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import {
+  businessDateKey,yesterdayDateKey,dailyReadySlot,dailyHeavyStagePlan,buildDailyMetricStates,dailyReadinessSummary,
+  compactDailyCore,dailySnapshotSourceRevision,snapshotNeedsRefresh,
+} from '../src/wb/daily-ready.js'
+
+const moscow='Europe/Moscow'
+assert.equal(businessDateKey(new Date('2026-08-18T22:30:00Z'),moscow),'2026-08-19')
+assert.equal(yesterdayDateKey(new Date('2026-08-19T08:00:00Z'),moscow),'2026-08-18')
+assert.equal(dailyReadySlot(new Date('2026-08-19T02:30:00Z'),moscow),'preopen') // 05:30 MSK
+assert.equal(dailyReadySlot(new Date('2026-08-19T04:45:00Z'),moscow),'morning-ready') // 07:45 MSK
+
+const now=Date.parse('2026-08-19T05:00:00Z')
+const states=[
+  {stage:'finance',status:'success',last_success_at:new Date(now-13*3600000).toISOString()},
+  {stage:'paidStorage',status:'success',last_success_at:new Date(now-25*3600000).toISOString()},
+  {stage:'acceptance',status:'queued',next_allowed_at:new Date(now+3600000).toISOString(),last_success_at:new Date(now-30*3600000).toISOString()},
+  {stage:'acquiring',status:'success',last_success_at:new Date(now-2*3600000).toISOString()},
+]
+assert.deepEqual(dailyHeavyStagePlan({states,now,timeZone:moscow}),['finance','paidStorage'])
+
+const core={
+  periodCoverage:{
+    orders:{from:'2026-08-01',to:'2026-08-18',selectedRows:10},
+    sales:{from:'2026-08-01',to:'2026-08-18',selectedRows:8},
+    advertising:{from:'2026-08-01',to:'2026-08-18',selectedRows:1},
+  },
+  finance:{complete:false},
+  summary:{revenue:1000,orders:10,sales:8,advertising:100,commission:0},
+  availability:{orders:true,sales:true,advertising:true,finance:true},
+  products:[{id:'a',revenue:900},{id:'b',revenue:100}],recommendations:[],dailyTrend:[],
+}
+const metricStates=buildDailyMetricStates({
+  core,date:'2026-08-18',
+  states:[
+    {stage:'orders',status:'success'},{stage:'sales',status:'success'},{stage:'advertising',status:'success'},
+    {stage:'finance',status:'queued'},{stage:'stocks',status:'success'},{stage:'sellerStocks',status:'success'},
+  ],
+  financeLedger:{summary:{movements:3,dateFrom:'2026-08-18',dateTo:'2026-08-18'}},
+})
+assert.equal(metricStates.orders.state,'ready')
+assert.equal(metricStates.sales.state,'ready')
+assert.equal(metricStates.advertising.state,'ready')
+assert.equal(metricStates.finance.state,'partial')
+assert.equal(metricStates.stocks.state,'ready')
+const readiness=dailyReadinessSummary(metricStates)
+assert.equal(readiness.status,'partial')
+assert.equal(readiness.ready,3)
+assert.equal(readiness.partial,1)
+assert.equal(readiness.operationalReady,true)
+
+const compact=compactDailyCore(core,{summary:{movements:3,sellerPayable:700}})
+assert.equal(compact.topProducts.length,2)
+assert.equal(compact.summary.sellerPayable,700)
+const rev=dailySnapshotSourceRevision([{stage:'orders',status:'success',last_success_at:'2026-08-19T01:00:00Z',last_count:10}], '2026-08-18')
+assert.equal(snapshotNeedsRefresh({source_revision:rev,generated_at:new Date(now-1000).toISOString()},rev,{now,maxAgeMs:60000}),false)
+assert.equal(snapshotNeedsRefresh({source_revision:'old',generated_at:new Date(now-1000).toISOString()},rev,{now,maxAgeMs:60000}),true)
+
+
+const workflow=fs.readFileSync(new URL('../../.github/workflows/elisei-daily-ready-wake.yml',import.meta.url),'utf8')
+for (const marker of ["'0 2 * * *'","'30 4 * * *'","'30 8 * * *'",'/health','ELISEI_BACKEND_URL']) {
+  assert.ok(workflow.includes(marker),`Daily Ready wake workflow must contain ${marker}`)
+}
+
+console.log('wb-daily-ready-5130: ok')

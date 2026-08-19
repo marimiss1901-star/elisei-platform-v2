@@ -477,3 +477,9 @@ body{background:radial-gradient(circle at 72% 7%,rgba(124,58,237,.18),transparen
 .sku360-kpis strong.is-status.is-partial,.sku360-money-list strong.is-status.is-partial,.sku360-price-grid strong.is-status.is-partial{color:#e6bd79}
 .sku360-money-list strong.is-status{max-width:52%;font-size:11px;line-height:1.25;text-align:right;color:#9e9aac;font-weight:650}
 .sku360-kpis>div:has(strong.is-status.is-partial),.sku360-price-grid>div:has(strong.is-status.is-partial){border-color:rgba(255,181,72,.13);background:rgba(255,181,72,.025)}
+
+/* ELISEI 5.13.0 — Daily Ready Snapshot */
+.daily-ready-banner{display:flex;align-items:center;justify-content:space-between;gap:18px;margin:14px 0 18px;padding:14px 18px;border:1px solid rgba(128,109,255,.22);border-radius:18px;background:rgba(92,75,190,.09);box-shadow:0 12px 34px rgba(10,12,36,.12)}
+.daily-ready-banner>div:first-child{display:flex;align-items:center;gap:11px;min-width:0}.daily-ready-banner>div:first-child>span{display:flex;flex-direction:column;gap:3px;min-width:0}.daily-ready-banner strong{font-size:14px;color:var(--text-primary,#f7f7ff)}.daily-ready-banner small{font-size:12px;color:var(--text-muted,#a8acc9);line-height:1.4}.daily-ready-banner.ready{border-color:rgba(57,211,159,.28);background:rgba(57,211,159,.07)}.daily-ready-banner.partial{border-color:rgba(247,182,74,.28);background:rgba(247,182,74,.07)}.daily-ready-banner.waiting{border-color:rgba(128,109,255,.22)}
+.daily-ready-counts{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.daily-ready-counts b{font-size:11px;font-weight:700;padding:6px 9px;border-radius:999px;background:rgba(255,255,255,.055);white-space:nowrap}.sync-summary>div>small{display:block;margin-top:4px;color:var(--text-muted,#a8acc9);font-size:11px;line-height:1.4}
+@media(max-width:760px){.daily-ready-banner{align-items:flex-start;flex-direction:column}.daily-ready-counts{justify-content:flex-start}}

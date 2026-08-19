@@ -1,35 +1,24 @@
-ELISEI 5.12.0 PATCH MANIFEST
-Base: ELISEI 5.11.6
-Frontend: 5.12.0
-Backend: 2.24.0
-El Core: 5.12.0
+ELISEI 5.13.0 PATCH MANIFEST
+Base: ELISEI 5.12.0 + Password Reset hotfix
+Frontend: 5.13.0
+Backend: 2.25.0
+El Core: 5.13.0
 
-Purpose: SKU 360 product-level change diagnostics.
-- Compare the selected period with the immediately preceding period of equal length.
-- Show verified deltas for revenue, orders/sales, returns, average selling price, advertising and confirmed economics.
-- Rank up to four diagnostic factors by significance and monetary scale.
-- Surface one first action instead of recommending simultaneous changes.
-- Never invent historical stock from the current snapshot.
-- Suppress comparisons when prior sales/finance/advertising coverage is not confirmed.
-- Comparison uses already persisted ELISEI data and makes no additional WB API calls.
-- Factors are diagnostic correlations, not claims of proven causality.
+Purpose: Daily Ready — yesterday is prepared before login.
 
-Regression: 37/37 backend tests passed.
+Core rules:
+- User entry must not launch WB synchronization.
+- Yesterday is a persisted database snapshot, not a live loading screen.
+- Operational polling uses moderate cadence; no 2–5 minute API storm.
+- Heavy financial stages use a separate scheduler lane and respect WB next_allowed_at.
+- Missing/partial data never becomes a false zero.
+- Manual sync remains available only as diagnostics.
+- Free Render is woken at three morning checkpoints by GitHub Actions; wake itself does not force every WB stage.
 
-Files:
-README.md
-README_5_12_0.md
-RELEASE_NOTES_V5_12_0.txt
-backend/package.json
-backend/src/routes/elCore.cjs
-backend/src/server.js
-backend/src/wb/product-360.js
-backend/tests/el-hotfix-5101.test.mjs
-backend/tests/wb-finance-legacy-cooldown-5103.test.mjs
-backend/tests/wb-finance-throttle-5102.test.mjs
-backend/tests/wb-live-sync-590.test.mjs
-backend/tests/wb-product-360-change-5120.test.mjs
-backend/tests/wb-smart-scheduler-5105.test.mjs
-package.json
-src/components/Product360Drawer.jsx
-src/styles/app.css
+Regression: 39/39 backend/frontend source tests passed.
+JS/CJS syntax: passed.
+JSX TypeScript parser: passed.
+YAML parse: passed.
+
+Payload files: 20 (including release notes; excluding checksum/manifest helpers).
+Archive limit: < 100 files.

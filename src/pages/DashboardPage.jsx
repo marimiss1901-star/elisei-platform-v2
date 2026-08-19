@@ -148,7 +148,7 @@ const qualityActionText = item => item?.nextAllowedAt
   ? `${item.action} Следующее окно: ${formatLocalDateTime(item.nextAllowedAt)}.`
   : item?.action || '—'
 
-const ANALYTICS_PERIOD_KEY = 'elisei.analytics.period.v1'
+const ANALYTICS_PERIOD_KEY = 'elisei.analytics.period.v2'
 const ANALYTICS_COMPARE_KEY = 'elisei.analytics.compare.v1'
 
 const isoLocalDate = date => {
@@ -178,6 +178,10 @@ const periodDaysBetween = period => {
 const periodPresetValue = preset => {
   const today = new Date()
   const to = isoLocalDate(today)
+  if (preset === 'yesterday') {
+    const yesterday = addDays(to,-1)
+    return { preset, from:yesterday, to:yesterday }
+  }
   if (preset === '7') return { preset, from:addDays(to,-6), to }
   if (preset === '90') return { preset, from:addDays(to,-89), to }
   if (preset === 'month') return { preset, from:isoLocalDate(new Date(today.getFullYear(),today.getMonth(),1)), to }
@@ -191,7 +195,7 @@ const periodPresetValue = preset => {
 }
 
 const normalizeAnalyticsPeriod = value => {
-  const fallback = periodPresetValue('30')
+  const fallback = periodPresetValue('yesterday')
   const from = String(value?.from || '').slice(0,10)
   const to = String(value?.to || '').slice(0,10)
   const days = periodDaysBetween({from,to})
@@ -408,6 +412,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   const [syncing, setSyncing] = useState(false)
   const [savingSettings, setSavingSettings] = useState(false)
   const [dashboardData, setDashboardData] = useState(null)
+  const [dailyReady, setDailyReady] = useState(null)
   const [coreData, setCoreData] = useState(null)
   const [analyticsCore, setAnalyticsCore] = useState(null)
   const [analyticsCompareCore, setAnalyticsCompareCore] = useState(null)
@@ -538,6 +543,13 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
     anchor.download = `elisei-finance-${analyticsPeriod.from}-${analyticsPeriod.to}.csv`
     anchor.click()
     URL.revokeObjectURL(url)
+  }
+
+  const loadDailyReady = async (connectionId = connection.connectionId) => {
+    if (!connectionId) return null
+    const result = await wbApi.dailyReady(connectionId)
+    setDailyReady(result || null)
+    return result
   }
 
   const loadConnectionData = async connectionId => {
@@ -684,7 +696,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       syncRevisionRef.current = syncDataRevision(normalized)
       setConnection(normalized)
       setSyncHistory(status.syncHistory || [])
-      await Promise.all([loadConnectionData(status.connectionId),loadLiveSync(status.connectionId)])
+      await Promise.all([loadDailyReady(status.connectionId),loadConnectionData(status.connectionId),loadLiveSync(status.connectionId)])
     }).catch(error => notify(error.message, 8000))
   }, [])
 
@@ -706,7 +718,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         // Данные статуса и расчётное ядро приходят из разных endpoint'ов.
         // После фонового завершения отчёта обязательно перечитываем core,
         // иначе журнал уже показывает новый остаток, а раздел «Остатки» остаётся на старом снимке.
-        if (shouldReload) await loadConnectionData(connectionId)
+        if (shouldReload) await Promise.all([loadDailyReady(connectionId),loadConnectionData(connectionId)])
       } catch { /* фоновая проверка не должна мешать работе интерфейса */ }
     }, 15000)
     return () => window.clearInterval(timer)
@@ -989,7 +1001,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
           <small className="workspace-period-global">Применяется ко всему кабинету</small>
         </div>
         <div className="analytics-presets">
-          {[['7','7 дней'],['30','30 дней'],['90','90 дней'],['month','Этот месяц'],['prevMonth','Прошлый месяц'],['year','Этот год']].map(([key,label]) => <button key={key} className={analyticsPeriod.preset===key?'active':''} onClick={() => setAnalyticsPreset(key)}>{label}</button>)}
+          {[['yesterday','Вчера'],['7','7 дней'],['30','30 дней'],['90','90 дней'],['month','Этот месяц'],['prevMonth','Прошлый месяц'],['year','Этот год']].map(([key,label]) => <button key={key} className={analyticsPeriod.preset===key?'active':''} onClick={() => setAnalyticsPreset(key)}>{label}</button>)}
         </div>
         <div className="analytics-date-range">
           <label><span>С</span><input type="date" value={analyticsPeriod.from} min={addDays(analyticsPeriod.to,-365)} max={analyticsPeriod.to} onChange={event => setAnalyticsPeriod(current => ({ ...current,preset:'custom',from:event.target.value }))}/></label>
@@ -1384,48 +1396,78 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
   }, [connection.connected, coreData?.syncWarnings, summary.operatingProfit, summary.zeroStock, summary.lowStock, recommendations, elSettings.character])
 
   const renderHome = () => {
-    const businessSummary = analyticsCore?.summary || summary || {}
-    const previousSummary = analyticsCompareCore?.summary || {}
-    const compareReady = Boolean(analyticsCompareCore)
-    const ledgerSummary = financeLedger?.summary || {}
+    const snapshotMode = Boolean(dailyReady?.snapshot?.date && dailyReady.snapshot.date === analyticsPeriod.from && analyticsPeriod.from === analyticsPeriod.to)
+    const readySnapshot = snapshotMode ? dailyReady.snapshot : null
+    const readyCore = readySnapshot?.core || null
+    const businessSummary = readyCore?.summary || analyticsCore?.summary || summary || {}
+    const previousSummary = readySnapshot?.previous?.core?.summary || analyticsCompareCore?.summary || {}
+    const compareReady = Boolean(readySnapshot?.previous?.core || analyticsCompareCore)
+    const snapshotFinance = readyCore?.finance?.summary || {}
+    const ledgerSummary = Number(snapshotFinance?.movements || 0) > 0 ? snapshotFinance : (financeLedger?.summary || {})
     const periodLabel = `${formatDate(analyticsPeriod.from)} — ${formatDate(analyticsPeriod.to)}`
     const periodDays = periodDaysBetween(analyticsPeriod)
-    const analyticsAvailability = analyticsCore?.availability || {}
+    const analyticsAvailability = readyCore?.availability || analyticsCore?.availability || {}
+    const snapshotStates = readySnapshot?.metricStates || {}
     const syncStateFor = stage => (connection.syncStates || []).find(item => item.stage === stage) || null
     const financeState = syncStateFor('finance')
     const financePersistedRows = Number(financeState?.metadata?.persistedCount || financeState?.lastCount || 0)
-    const financePartial = Boolean(financeLedger?.coverage?.financePartial || (financePersistedRows > 0 && ['queued','running','rate_limited','retry_scheduled'].includes(String(financeState?.status || ''))))
+    const snapshotFinanceState = String(snapshotStates?.finance?.state || '')
+    const snapshotSalesState = String(snapshotStates?.sales?.state || '')
+    const snapshotOrdersState = String(snapshotStates?.orders?.state || '')
+    const snapshotAdvertisingState = String(snapshotStates?.advertising?.state || '')
+    const financePartial = snapshotMode
+      ? snapshotFinanceState === 'partial'
+      : Boolean(financeLedger?.coverage?.financePartial || (financePersistedRows > 0 && ['queued','running','rate_limited','retry_scheduled'].includes(String(financeState?.status || ''))))
     const financeMovementsInPeriod = Number(ledgerSummary.movements || financeLedger?.pagination?.total || 0)
-    const metric = (label,value,current,previous,{ money=true,lowerIsBetter=false,note='',onClick='Аналитика',available=true,partial=false }={}) => ({
-      label,
-      value:available ? (money ? formatMoney(value) : formatNumber(value)) : (partial ? 'Догружается…' : 'Не загружено'),
-      delta:!available ? (partial ? note || 'данные уже есть, период ещё догружается' : note || 'ожидаем данные WB') : partial ? (note || 'предварительно · поток ещё догружается') : current == null ? note : compareReady ? comparisonLabel(current,previous,true) : note,
-      tone:available && !partial ? comparisonToneDirectional(current,previous,compareReady,lowerIsBetter) : '',onClick,
-    })
-    const financeAvailableForPeriod = Boolean(analyticsAvailability.finance)
-    const financeHasAnyProgress = financePartial || financePersistedRows > 0
-    const storageAvailableForPeriod = Boolean(analyticsAvailability.finance || analyticsAvailability.paidStorage)
-    const acquiringAvailableForPeriod = Boolean(analyticsAvailability.finance || analyticsAvailability.acquiring)
-    const advertisingAvailableForPeriod = Boolean(analyticsAvailability.advertising)
-    const sellerPayableAvailable = Boolean(financeLedger && financeMovementsInPeriod > 0)
+    const stateAvailable = (name, fallback) => snapshotMode ? ['ready','partial'].includes(name) : Boolean(fallback)
+    const statePartial = (name, fallback) => snapshotMode ? name === 'partial' : Boolean(fallback)
+    const metric = (label,value,current,previous,{ money=true,lowerIsBetter=false,note='',onClick='Аналитика',available=true,partial=false }={}) => {
+      const numeric = Number(value)
+      const hideUnconfirmedZero = partial && Number.isFinite(numeric) && numeric === 0
+      return {
+        label,
+        value:available && !hideUnconfirmedZero ? (money ? formatMoney(value) : formatNumber(value)) : (partial ? 'Уточняется…' : 'Ожидается'),
+        delta:!available ? (partial ? note || 'часть данных уже есть, итог ещё уточняется' : note || 'ELISEI ждёт подтверждение WB') : partial ? (note || 'предварительно · поток ещё догружается') : current == null ? note : compareReady ? comparisonLabel(current,previous,true) : note,
+        tone:available && !partial ? comparisonToneDirectional(current,previous,compareReady,lowerIsBetter) : '',onClick,
+      }
+    }
+    const financeAvailableForPeriod = stateAvailable(snapshotFinanceState,analyticsAvailability.finance)
+    const financeHasAnyProgress = statePartial(snapshotFinanceState,financePartial) || financePersistedRows > 0 || financeMovementsInPeriod > 0
+    const storageAvailableForPeriod = financeAvailableForPeriod || (!snapshotMode && Boolean(analyticsAvailability.paidStorage))
+    const acquiringAvailableForPeriod = financeAvailableForPeriod || (!snapshotMode && Boolean(analyticsAvailability.acquiring))
+    const advertisingAvailableForPeriod = stateAvailable(snapshotAdvertisingState,analyticsAvailability.advertising)
+    const salesAvailableForPeriod = stateAvailable(snapshotSalesState,analyticsAvailability.sales)
+    const ordersAvailableForPeriod = stateAvailable(snapshotOrdersState,analyticsAvailability.orders)
+    const sellerPayableAvailable = financeAvailableForPeriod && (financeMovementsInPeriod > 0 || snapshotFinanceState === 'ready')
     const digitizationMetrics = [
-      metric('Выручка',businessSummary.revenue,businessSummary.revenue,previousSummary.revenue,{ note:analyticsAvailability.sales ? `${formatNumber(businessSummary.sales)} продаж` : 'продажи ещё синхронизируются',available:Boolean(analyticsAvailability.sales),partial:!analyticsAvailability.sales && Boolean(syncStateFor('sales')) }),
-      { label:'К перечислению',value:financeLedgerLoading && !financeLedger ? 'Загружается…' : sellerPayableAvailable ? formatMoney(ledgerSummary.sellerPayable) : financeHasAnyProgress ? 'Догружается…' : 'Не загружено',delta:sellerPayableAvailable ? (financePartial ? 'предварительно · финансовый поток ещё догружается' : 'по финансовому реестру WB') : financeHasAnyProgress ? `${formatNumber(financePersistedRows)} строк сохранено · выбранный период ещё покрывается` : 'ожидаем финансовые данные',tone:'',onClick:'Финансы' },
-      { label:'Опер. прибыль',value:businessSummary.cogs == null ? 'Не рассчитано' : (businessSummary.operatingProfit != null && analyticsAvailability.sales && financeAvailableForPeriod ? formatMoney(businessSummary.operatingProfit) : financeHasAnyProgress ? 'Догружается…' : 'Не загружено'),delta:businessSummary.cogs == null ? 'нужна себестоимость' : (businessSummary.operatingProfit != null && analyticsAvailability.sales && financeAvailableForPeriod ? (financePartial ? 'предварительно · финансы догружаются' : `маржа ${formatPercent(businessSummary.margin)}`) : 'ждём продажи и финансовую детализацию'),tone:'',onClick:'Финансы' },
-      metric('Заказы',businessSummary.orders,businessSummary.orders,previousSummary.orders,{ money:false,note:analyticsAvailability.orders ? `${formatNumber(businessSummary.sales)} продаж` : 'заказы ещё синхронизируются',available:Boolean(analyticsAvailability.orders),partial:!analyticsAvailability.orders && Boolean(syncStateFor('orders')) }),
-      metric('Продажи',businessSummary.sales,businessSummary.sales,previousSummary.sales,{ money:false,note:analyticsAvailability.sales ? `выкуп ${businessSummary.orders ? formatPercent(Number(businessSummary.sales || 0)/Number(businessSummary.orders || 1)*100) : '—'}` : 'продажи ещё синхронизируются',available:Boolean(analyticsAvailability.sales),partial:!analyticsAvailability.sales && Boolean(syncStateFor('sales')) }),
-      metric('Возвраты',businessSummary.returns,businessSummary.returns,previousSummary.returns,{ money:false,lowerIsBetter:true,note:analyticsAvailability.sales ? `${formatPercent(businessSummary.returnRate)} от продаж` : 'возвраты считаются из потока продаж',available:Boolean(analyticsAvailability.sales),partial:!analyticsAvailability.sales && Boolean(syncStateFor('sales')) }),
-      metric('Комиссия WB',businessSummary.commission,businessSummary.commission,previousSummary.commission,{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:financeHasAnyProgress,note:financeHasAnyProgress ? `${formatNumber(financePersistedRows)} строк финансов уже сохранено` : '' }),
-      metric('Логистика',businessSummary.logistics,businessSummary.logistics,previousSummary.logistics,{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:financeHasAnyProgress,note:financeHasAnyProgress ? 'предварительно по загруженной части финансов' : '' }),
-      metric('Реклама',businessSummary.advertising,businessSummary.advertising,previousSummary.advertising,{ lowerIsBetter:true,onClick:'Реклама',available:advertisingAvailableForPeriod,partial:!advertisingAvailableForPeriod && Boolean(syncStateFor('advertising')),note:advertisingAvailableForPeriod ? '' : 'кампании или статистика ещё загружаются' }),
-      metric('Хранение',businessSummary.storage,businessSummary.storage,previousSummary.storage,{ lowerIsBetter:true,onClick:'Финансы',available:storageAvailableForPeriod,partial:financeHasAnyProgress || Boolean(syncStateFor('paidStorage')),note:'финансы/отчёт хранения ещё догружаются' }),
-      metric('Эквайринг',businessSummary.acquiring,businessSummary.acquiring,previousSummary.acquiring,{ lowerIsBetter:true,onClick:'Финансы',available:acquiringAvailableForPeriod,partial:financeHasAnyProgress || Boolean(syncStateFor('acquiring')),note:'эквайринг подтверждается финансовой детализацией' }),
-      metric('Штрафы + удержания',Number(businessSummary.penalties || 0)+Number(businessSummary.deductions || 0),Number(businessSummary.penalties || 0)+Number(businessSummary.deductions || 0),Number(previousSummary.penalties || 0)+Number(previousSummary.deductions || 0),{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:financeHasAnyProgress,note:'финансовая детализация ещё догружается' }),
+      metric('Выручка',businessSummary.revenue,businessSummary.revenue,previousSummary.revenue,{ note:salesAvailableForPeriod ? `${formatNumber(businessSummary.sales)} продаж` : 'продажи ещё подтверждаются WB',available:salesAvailableForPeriod,partial:statePartial(snapshotSalesState,!analyticsAvailability.sales && Boolean(syncStateFor('sales'))) }),
+      { label:'К перечислению',value:sellerPayableAvailable && !(financePartial && Number(ledgerSummary.sellerPayable || 0) === 0) ? formatMoney(ledgerSummary.sellerPayable || 0) : financeHasAnyProgress ? 'Уточняется…' : 'Ожидается',delta:sellerPayableAvailable ? (financePartial ? 'предварительно · финансы догружаются' : 'подтверждено финансовым реестром WB') : financeHasAnyProgress ? 'часть финансов уже сохранена' : 'ожидаем финансовые данные',tone:'',onClick:'Финансы' },
+      { label:'Опер. прибыль',value:businessSummary.cogs == null ? 'Не рассчитано' : (businessSummary.operatingProfit != null && salesAvailableForPeriod && financeAvailableForPeriod && !(financePartial && Number(businessSummary.operatingProfit || 0) === 0) ? formatMoney(businessSummary.operatingProfit) : financeHasAnyProgress ? 'Уточняется…' : 'Ожидается'),delta:businessSummary.cogs == null ? 'нужна себестоимость' : (businessSummary.operatingProfit != null && salesAvailableForPeriod && financeAvailableForPeriod ? (financePartial ? 'предварительно · финансы догружаются' : `маржа ${formatPercent(businessSummary.margin)}`) : 'ждём продажи и финансовую детализацию'),tone:'',onClick:'Финансы' },
+      metric('Заказы',businessSummary.orders,businessSummary.orders,previousSummary.orders,{ money:false,note:ordersAvailableForPeriod ? `${formatNumber(businessSummary.sales)} продаж` : 'заказы ещё подтверждаются WB',available:ordersAvailableForPeriod,partial:statePartial(snapshotOrdersState,!analyticsAvailability.orders && Boolean(syncStateFor('orders'))) }),
+      metric('Продажи',businessSummary.sales,businessSummary.sales,previousSummary.sales,{ money:false,note:salesAvailableForPeriod ? `выкуп ${businessSummary.orders ? formatPercent(Number(businessSummary.sales || 0)/Number(businessSummary.orders || 1)*100) : '—'}` : 'продажи ещё подтверждаются WB',available:salesAvailableForPeriod,partial:statePartial(snapshotSalesState,!analyticsAvailability.sales && Boolean(syncStateFor('sales'))) }),
+      metric('Возвраты',businessSummary.returns,businessSummary.returns,previousSummary.returns,{ money:false,lowerIsBetter:true,note:salesAvailableForPeriod ? `${formatPercent(businessSummary.returnRate)} от продаж` : 'возвраты считаются из подтверждённых продаж',available:salesAvailableForPeriod,partial:statePartial(snapshotSalesState,!analyticsAvailability.sales && Boolean(syncStateFor('sales'))) }),
+      metric('Комиссия WB',businessSummary.commission,businessSummary.commission,previousSummary.commission,{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:statePartial(snapshotFinanceState,financeHasAnyProgress),note:'финансовая детализация WB' }),
+      metric('Логистика',businessSummary.logistics,businessSummary.logistics,previousSummary.logistics,{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:statePartial(snapshotFinanceState,financeHasAnyProgress),note:'финансовая детализация WB' }),
+      metric('Реклама',businessSummary.advertising,businessSummary.advertising,previousSummary.advertising,{ lowerIsBetter:true,onClick:'Реклама',available:advertisingAvailableForPeriod,partial:statePartial(snapshotAdvertisingState,!analyticsAvailability.advertising && Boolean(syncStateFor('advertising'))),note:advertisingAvailableForPeriod ? '' : 'статистика рекламы ещё подтверждается' }),
+      metric('Хранение',businessSummary.storage,businessSummary.storage,previousSummary.storage,{ lowerIsBetter:true,onClick:'Финансы',available:storageAvailableForPeriod,partial:statePartial(snapshotFinanceState,financeHasAnyProgress || Boolean(syncStateFor('paidStorage'))),note:'подтверждается финансами/отчётом хранения' }),
+      metric('Эквайринг',businessSummary.acquiring,businessSummary.acquiring,previousSummary.acquiring,{ lowerIsBetter:true,onClick:'Финансы',available:acquiringAvailableForPeriod,partial:statePartial(snapshotFinanceState,financeHasAnyProgress || Boolean(syncStateFor('acquiring'))),note:'подтверждается финансовой детализацией' }),
+      metric('Штрафы + удержания',Number(businessSummary.penalties || 0)+Number(businessSummary.deductions || 0),Number(businessSummary.penalties || 0)+Number(businessSummary.deductions || 0),Number(previousSummary.penalties || 0)+Number(previousSummary.deductions || 0),{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:statePartial(snapshotFinanceState,financeHasAnyProgress),note:'финансовая детализация WB' }),
     ]
-    const topProducts = analyticsAvailability.sales ? [...analyticsBaseProducts]
-      .sort((a,b)=>Number(b.revenue || 0)-Number(a.revenue || 0))
-      .slice(0,10) : []
+    const topProducts = snapshotMode
+      ? (salesAvailableForPeriod ? (readyCore?.topProducts || []) : [])
+      : (analyticsAvailability.sales ? [...analyticsBaseProducts].sort((a,b)=>Number(b.revenue || 0)-Number(a.revenue || 0)).slice(0,10) : [])
     const openProduct = row => openProduct360(row)
+    const readyCounts = readySnapshot?.readiness || null
+    const readyStatus = String(readySnapshot?.status || readyCounts?.status || '')
+    const readyGeneratedAt = readySnapshot?.generatedAt ? new Date(readySnapshot.generatedAt) : null
+    const readyGeneratedLabel = readyGeneratedAt && !Number.isNaN(readyGeneratedAt.getTime())
+      ? readyGeneratedAt.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})
+      : '—'
+    const readyHeadline = readyStatus === 'ready'
+      ? 'Вчерашний день подготовлен'
+      : readyStatus === 'partial'
+        ? 'Вчерашний день готов · часть расходов уточняется'
+        : 'Вчерашний день собирается в фоне'
 
     return <>
       <section className="brand-hero glass-panel">
@@ -1433,34 +1475,41 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
           <span className="brand-kicker"><Sparkles size={14}/> {connection.connected ? 'ЭЛ уже всё проверил' : 'ЭЛ готов к работе'}</span>
           <h1>{greeting},<br/><em>{displayName || 'рады вас видеть'}</em></h1>
           <p>{connection.connected
-            ? `Я проверил ${formatNumber(businessSummary.activeProducts || productRows.length)} товаров. ${coreData?.availability?.sales ? 'Продажи загружены.' : 'Продажи ожидают синхронизации.'} ${coreData?.availability?.stocks ? 'Остатки загружены.' : 'Отчёт остатков формируется отдельно.'}`
+            ? snapshotMode
+              ? `${readyHeadline}. При входе ELISEI показывает сохранённые цифры за ${formatDate(analyticsPeriod.from)} и не запускает новые запросы к WB.`
+              : `Я проверил ${formatNumber(businessSummary.activeProducts || productRows.length)} товаров. Выбранный период пересчитывается из уже сохранённых данных ELISEI.`
             : 'Подключите Wildberries один раз — я сам определю доступные категории и начну собирать кабинет.'}</p>
           <div className="brand-hero-actions">
             <button className="primary-btn brand-primary" onClick={() => setActive('Спросить ЭЛа')}><MessageCircle size={18}/> Обсудить с ЭЛом</button>
             <button className="brand-secondary" onClick={() => setActive(connection.connected ? 'Аналитика' : 'Подключения')}>{connection.connected ? 'Открыть аналитику' : 'Подключить WB'} <ChevronRight size={17}/></button>
           </div>
-          <div className="brand-sync"><span className="status-dot"/>{connection.connected ? `Данные обновлены ${connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : '—'}` : 'Кабинет пока не подключён'}</div>
+          <div className="brand-sync"><span className="status-dot"/>{connection.connected ? (snapshotMode ? `Готовый снимок за вчера · собран ${readyGeneratedLabel}` : `Данные обновлены ${connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : '—'}`) : 'Кабинет пока не подключён'}</div>
         </div>
         <div className="brand-mascot-stage"><span className="brand-orbit one"/><span className="brand-orbit two"/><ElMascot mood={homeElState.mood}/><div className="el-speech"><strong>ЭЛ · {elCharacterMeta[elSettings.character]?.title}</strong><span>{homeElState.line}</span></div></div>
       </section>
+
+      {connection.connected && snapshotMode && <div className={`daily-ready-banner ${readyStatus || 'waiting'}`}>
+        <div><ShieldCheck size={19}/><span><strong>{readyHeadline}</strong><small>{formatDate(analyticsPeriod.from)} · снимок {readyGeneratedLabel} · вход в кабинет не запускает синхронизацию</small></span></div>
+        <div className="daily-ready-counts"><b>{readyCounts?.ready || 0} готово</b>{Number(readyCounts?.partial || 0)>0 && <b>{readyCounts.partial} уточняется</b>}{Number(readyCounts?.waiting || 0)>0 && <b>{readyCounts.waiting} ожидает WB</b>}</div>
+      </div>}
 
       {connection.connected && <section className="digitization-panel glass-panel">
         <div className="digitization-head">
           <div><span>Оцифровка кабинета</span><h2>Весь бизнес на одном экране</h2><p>{periodLabel} · {periodDays} дн. {compareReady ? '· сравнение с предыдущим равным периодом' : '· сравнение загружается'}</p></div>
           <div className="digitization-actions">
-            <div className="digitization-presets">{[['7','7 дней'],['30','30 дней'],['month','Месяц']].map(([key,label])=><button key={key} className={analyticsPeriod.preset===key?'active':''} onClick={()=>setAnalyticsPreset(key)}>{label}</button>)}</div>
+            <div className="digitization-presets">{[['yesterday','Вчера'],['7','7 дней'],['30','30 дней'],['month','Месяц']].map(([key,label])=><button key={key} className={analyticsPeriod.preset===key?'active':''} onClick={()=>setAnalyticsPreset(key)}>{label}</button>)}</div>
             <button className="secondary-btn" onClick={()=>setActive('Аналитика')}>Подробнее <ChevronRight size={16}/></button>
           </div>
         </div>
-        {analyticsLoading && !analyticsCore ? <div className="digitization-loading"><RefreshCw className="spin" size={20}/> Пересчитываю выбранный период…</div> : null}
+        {analyticsLoading && !analyticsCore && !readyCore ? <div className="digitization-loading"><RefreshCw className="spin" size={20}/> Пересчитываю выбранный период…</div> : null}
         <div className="digitization-metrics">{digitizationMetrics.map(item=><button key={item.label} className="digitization-metric" onClick={()=>setActive(item.onClick)}><span>{item.label}</span><strong>{item.value}</strong><small className={item.tone}>{item.delta || '—'}</small></button>)}</div>
         <div className="digitization-table-card">
           <div className="digitization-table-head"><div><span>Товары</span><h3>Что формирует результат</h3></div><small>Топ-10 по выручке за выбранный период</small></div>
           {topProducts.length ? <div className="digitization-table-wrap"><div className="digitization-table">
-            <div className="digitization-row head"><span>Товар</span><span>Выручка</span><span>Продажи</span><span>Возвраты</span><span>Реклама</span><span>Расходы</span><span>Прибыль</span><span>Остаток</span></div>
+            <div className="digitization-row head"><span>Товар</span><span>Выручка</span><span>Продажи</span><span>Возвраты</span><span>Реклама</span><span>Расходы</span><span>Прибыль</span><span>Остаток сейчас</span></div>
             {topProducts.map(row=><button className="digitization-row" key={row.id || row.key} onClick={()=>openProduct(row)}>
               <span className="digitization-product">{row.photo?<img src={row.photo} alt=""/>:<span className="digitization-product-placeholder"><PackageSearch size={18}/></span>}<b>{row.vendorCode || row.nmID || '—'}<small>{row.title || row.brand || 'Товар'}</small></b></span>
-              <span>{formatMoney(row.revenue)}</span><span>{formatNumber(row.salesCount)}</span><span>{formatNumber(row.returnsCount)}<small>{formatPercent(row.returnRate)}</small></span><span>{formatMoney(row.advertising)}</span><span>{formatMoney(row.expenses)}</span><span className={row.profit != null && row.profit < 0 ? 'negative' : row.profit != null ? 'positive' : ''}>{formatMoney(row.profit)}</span><span>{row.stock == null ? '—' : formatNumber(row.stock)}</span>
+              <span>{formatMoney(row.revenue)}</span><span>{formatNumber(row.salesCount)}</span><span>{formatNumber(row.returnsCount)}<small>{formatPercent(row.returnRate)}</small></span><span>{advertisingAvailableForPeriod ? formatMoney(row.advertising) : 'Уточняется'}</span><span>{financeAvailableForPeriod && !financePartial ? formatMoney(row.expenses) : 'Уточняется'}</span><span className={financeAvailableForPeriod && !financePartial && row.profit != null && row.profit < 0 ? 'negative' : financeAvailableForPeriod && !financePartial && row.profit != null ? 'positive' : ''}>{financeAvailableForPeriod && !financePartial ? formatMoney(row.profit) : 'Уточняется'}</span><span>{row.stock == null ? '—' : formatNumber(row.stock)}</span>
             </button>)}
           </div></div> : <div className="digitization-empty"><PackageSearch size={24}/><div><strong>Товарная оцифровка ещё загружается</strong><span>После первой синхронизации здесь появятся продажи, расходы, прибыль и остатки по каждому SKU.</span></div></div>}
         </div>
@@ -1509,7 +1558,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
             <label className="analytics-compare-toggle"><input type="checkbox" checked={analyticsCompare} onChange={event => setAnalyticsCompare(event.target.checked)}/><span>Сравнить</span><small>{analyticsCompare ? comparisonPeriodLabel : 'выключено'}</small></label>
           </div>
           <div className="analytics-presets">
-            {[['7','7 дней'],['30','30 дней'],['90','90 дней'],['month','Этот месяц'],['prevMonth','Прошлый месяц'],['year','Этот год']].map(([key,label]) => <button key={key} className={analyticsPeriod.preset===key?'active':''} onClick={() => setAnalyticsPreset(key)}>{label}</button>)}
+            {[['yesterday','Вчера'],['7','7 дней'],['30','30 дней'],['90','90 дней'],['month','Этот месяц'],['prevMonth','Прошлый месяц'],['year','Этот год']].map(([key,label]) => <button key={key} className={analyticsPeriod.preset===key?'active':''} onClick={() => setAnalyticsPreset(key)}>{label}</button>)}
           </div>
           <div className="analytics-date-range">
             <label><span>С</span><input type="date" value={analyticsPeriod.from} min={addDays(analyticsPeriod.to,-365)} max={analyticsPeriod.to} onChange={event => setAnalyticsPeriod(current => ({ ...current,preset:'custom',from:event.target.value }))}/></label>
@@ -1983,9 +2032,9 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
       <div className="page-title"><span>Интеграции</span><h1>Одно подключение Wildberries</h1><p>Один API-ключ — одна точка входа. Тип ключа и категории доступа определяются автоматически; отдельного сервисного токена для основного финансового контура нет.</p></div>
       <div className={`token-mode-banner ${modeCopy.tone}`}><div className="token-mode-icon">{connection.tokens?.length ? <CheckCircle2 size={24}/> : <ShieldCheck size={24}/>}</div><div><strong>{modeCopy.title}</strong><p>{modeCopy.text}</p>{primary && <small>Основной: {primary.label} · доступно {primary.stageCoverageCount || 0} потоков</small>}</div></div>
 
-      {connection.connected && <div className={`live-sync-card ${liveSync.enabled?'enabled':'disabled'}`}>
-        <div className="live-sync-head"><div className="live-sync-icon"><RefreshCw className={liveSync.enabled?'live-spin':''} size={24}/></div><div><span>Живое обновление</span><h3>{liveSync.enabled ? (liveSync.webhooksEnabled ? 'Гибридный режим включён' : 'Частая синхронизация включена') : 'Автоматическое обновление выключено'}</h3><p>{liveSync.webhooksEnabled ? 'События карточек, отзывов и готовых отчётов приходят через вебхуки; заказы и продажи обновляются инкрементально, остатки — свежим снимком.' : 'Первая загрузка уже запускается автоматически после подключения. Затем оперативные данные можно поддерживать частой синхронизацией.'}</p></div><button className={liveSync.enabled?'secondary-btn':'primary-btn'} disabled={liveSyncBusy} onClick={()=>updateLiveSync({enabled:!liveSync.enabled})}>{liveSyncBusy?<RefreshCw className="spin" size={17}/>:<PlugZap size={17}/>} {liveSync.enabled?'Приостановить':'Включить'}</button></div>
-        <div className="live-sync-grid"><div><small>Заказы</small><strong>≈ 2 мин.</strong><span>инкрементально</span></div><div><small>Продажи и остатки</small><strong>≈ 5 мин.</strong><span>по расписанию</span></div><div><small>Вебхуки WB</small><strong>{liveSync.webhookCount || 0}</strong><span>{liveSync.webhooksEnabled?'активны':'опционально'}</span></div><div><small>Последнее событие</small><strong>{liveSync.lastEventAt?new Date(liveSync.lastEventAt).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}):'—'}</strong><span>{liveSync.lastEventAt?new Date(liveSync.lastEventAt).toLocaleDateString('ru-RU'):'событий пока нет'}</span></div></div>
+      {connection.connected && <div className="live-sync-card enabled">
+        <div className="live-sync-head"><div className="live-sync-icon"><RefreshCw size={24}/></div><div><span>Автоматическое обновление</span><h3>ELISEI готовит кабинет до вашего входа</h3><p>Заказы и продажи обновляются примерно раз в 30 минут, реклама и остатки — раз в час. Тяжёлые финансовые потоки идут по отдельному безопасному расписанию и лимитам WB. Вход пользователя ничего не запускает.</p></div><b className="live-pill">AUTO</b></div>
+        <div className="live-sync-grid"><div><small>Заказы и продажи</small><strong>≈ 30 мин.</strong><span>инкрементально</span></div><div><small>Реклама и остатки</small><strong>≈ 60 мин.</strong><span>по расписанию</span></div><div><small>Вчерашний день</small><strong>до входа</strong><span>готовый снимок</span></div><div><small>Финансы</small><strong>по окну WB</strong><span>без лишних повторов</span></div></div>
         <div className="live-sync-actions"><div><strong>OAuth и вебхуки</strong><p>{liveSync.oauth?.message || 'Это серверное расширение для коммерческой версии ELISEI и не является вторым токеном продавца.'}</p></div>{liveSync.webhookSetupReady?<button className="secondary-btn" disabled={liveSyncBusy} onClick={setupLiveWebhooks}><PlugZap size={17}/> Подключить вебхуки</button>:liveSync.oauth?.connectUrl?<button className="secondary-btn" onClick={()=>window.open(liveSync.oauth.connectUrl,'_blank','noopener,noreferrer')}><PlugZap size={17}/> Подключить через WB</button>:liveSync.oauth?.catalogUrl?<button className="secondary-btn" onClick={()=>window.open(liveSync.oauth.catalogUrl,'_blank','noopener,noreferrer')}><FileText size={17}/> Регистрация сервиса</button>:<span className="live-sync-wait">Текущий ключ продолжает работать без этого шага</span>}</div>
       </div>}
 
@@ -1996,7 +2045,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         return <div className={`wb-coverage-card ${covered?'covered':'missing'}`} key={item.stage}><span className="coverage-icon">{covered?<CheckCircle2 size={20}/>:<AlertTriangle size={20}/>}</span><div><strong>{item.title}</strong><p>{item.text}</p><small>{covered ? `${source?.isPrimary ? 'Основной ключ' : source?.label || 'Подключённый ключ'} · ${stageLabel(state)}` : `Нет доступа: ${stageLabel(state)}`}</small></div></div>
       })}</div>
 
-      {connection.tokens?.length > 0 && <div className="token-manager"><div className="section-title-row"><div><span>Безопасное хранилище</span><h2>API-ключи кабинета</h2><p>Обычно достаточно одного. Резервный ключ можно добавить только если в основном не хватает категории.</p></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Синхронизация':'Обновить всё доступное'}</button></div><div className="token-card-grid">{connection.tokens.map(item => <div className={`saved-token-card ${item.isPrimary?'primary-token-card':''}`} key={item.id}><div className="saved-token-head"><div className="token-shield"><ShieldCheck size={20}/></div><div><div className="token-title-line"><strong>{item.label}</strong>{item.isPrimary && <b className="primary-token-badge">Основной</b>}</div><span>{item.tokenType} · {item.readOnly?'только чтение':'доступ по правам ключа'}</span></div><button className="token-remove" onClick={() => removeToken(item.id)} title="Удалить ключ"><X size={17}/></button></div><div className="token-flow-coverage"><strong>{item.stageCoverageCount || 0}/{connection.stageTotal || item.stageTotal || 25} потоков</strong><span>{item.coversAllCoreFlows ? 'Покрывает рабочее ядро' : 'Используется только по доступным категориям'}</span></div><div className="token-scopes">{item.scopeLabels?.map(scope => <b key={scope}>{scope}</b>)}</div><div className="token-card-foot"><small>До: {item.expiresAt?new Date(item.expiresAt).toLocaleDateString('ru-RU'):'не указано'} · код {item.fingerprint}</small>{!item.isPrimary && <button className="token-primary-btn" onClick={() => setPrimaryToken(item.id)}>Сделать основным</button>}</div></div>)}</div></div>}
+      {connection.tokens?.length > 0 && <div className="token-manager"><div className="section-title-row"><div><span>Безопасное хранилище</span><h2>API-ключи кабинета</h2><p>Обычно достаточно одного. Резервный ключ можно добавить только если в основном не хватает категории.</p></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Диагностика':'Проверить сейчас'}</button></div><div className="token-card-grid">{connection.tokens.map(item => <div className={`saved-token-card ${item.isPrimary?'primary-token-card':''}`} key={item.id}><div className="saved-token-head"><div className="token-shield"><ShieldCheck size={20}/></div><div><div className="token-title-line"><strong>{item.label}</strong>{item.isPrimary && <b className="primary-token-badge">Основной</b>}</div><span>{item.tokenType} · {item.readOnly?'только чтение':'доступ по правам ключа'}</span></div><button className="token-remove" onClick={() => removeToken(item.id)} title="Удалить ключ"><X size={17}/></button></div><div className="token-flow-coverage"><strong>{item.stageCoverageCount || 0}/{connection.stageTotal || item.stageTotal || 25} потоков</strong><span>{item.coversAllCoreFlows ? 'Покрывает рабочее ядро' : 'Используется только по доступным категориям'}</span></div><div className="token-scopes">{item.scopeLabels?.map(scope => <b key={scope}>{scope}</b>)}</div><div className="token-card-foot"><small>До: {item.expiresAt?new Date(item.expiresAt).toLocaleDateString('ru-RU'):'не указано'} · код {item.fingerprint}</small>{!item.isPrimary && <button className="token-primary-btn" onClick={() => setPrimaryToken(item.id)}>Сделать основным</button>}</div></div>)}</div></div>}
 
       <div className="connection-card add-token-card"><div className="connection-logo">WB</div><div className="connection-copy"><div className="connection-title"><h3>{connection.connected ? 'Добавить резервный ключ' : 'Подключить Wildberries'}</h3><span className={connection.connected?'connection-status connected':'connection-status'}>{connection.connected ? 'Кабинет подключён' : 'Не подключён'}</span></div><p>{connection.connected ? 'Резервный ключ нужен только если вы хотите добавить категорию, которой нет в основном.' : 'Вставьте один API-ключ кабинета. ELISEI сам определит его категории и начнёт фоновую загрузку доступных данных.'}</p><form className="token-form multi-token-form" onSubmit={saveConnection}><label>Название — необязательно<input type="text" value={tokenLabel} onChange={e => setTokenLabel(e.target.value)} placeholder={connection.connected ? 'Например: Резервный' : 'Например: Основной WB'} maxLength="80"/></label><label>API-ключ Wildberries</label><div className="token-input"><input type={showToken?'text':'password'} value={tokenDraft} onChange={e => setTokenDraft(e.target.value)} placeholder="Вставьте API-ключ WB" autoComplete="off"/><button type="button" onClick={() => setShowToken(value => !value)}>{showToken?<EyeOff size={18}/>:<Eye size={18}/>}</button></div><small>Для полной экономики включите в ключе категорию «Финансы». Сам ключ обратно в браузер не возвращается.</small><button className="primary-btn" disabled={checking}>{checking?<><RefreshCw className="spin" size={17}/> Проверяем доступ</>:<><PlugZap size={17}/> {connection.connected?'Добавить ключ':'Подключить и загрузить кабинет'}</>}</button></form></div></div>
 
@@ -2154,7 +2203,7 @@ export default function DashboardPage({ onNavigate, onLogout, user }) {
         <div className="quality-finance-note"><ShieldCheck size={20}/><p>{dataQuality?.finance?.status==='confirmed'?'Финансовый период покрыт полностью, а расхождение находится в допустимом диапазоне.':dataQuality?.finance?.movements?'Итог предварительный: дождись полного покрытия или устранения расхождения.':'Финансовый реестр ожидает данные WB; нулевые расходы не считаются подтверждёнными.'}</p></div>
       </div>}
     </div>}{integrationDiagnostics && <div className="data-integrity-strip"><div><strong>Единое ядро товаров</strong><span>{formatNumber(integrationDiagnostics.productMaster?.products)} карточек · {formatNumber(integrationDiagnostics.productMaster?.withBarcodes)} со ШК</span></div><div><strong>Остатки</strong><span>{integrationDiagnostics.stockAllocation?`${formatNumber(integrationDiagnostics.stockAllocation.matchedQuantity)} шт. сопоставлено`:'снимок ожидается'}</span></div><div><strong>Реклама</strong><span>{formatNumber(integrationDiagnostics.advertisingMeta?.campaigns)} кампаний · {formatNumber(integrationDiagnostics.advertisingMeta?.campaignsWithStats)} со статистикой</span></div></div>}{!connection.connected ? <div className="empty-state"><RefreshCw size={38}/><h3>Wildberries не подключён</h3><button className="primary-btn" onClick={() => setActive('Подключения')}>Подключить</button></div> : <>
-      <div className="sync-summary"><div><span>Последнее успешное обновление</span><strong>{connection.lastSync ? new Date(connection.lastSync).toLocaleString('ru-RU') : 'Ещё не выполнялось'}</strong></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Запускаем этапы':'Запустить доступные этапы'}</button></div>
+      <div className="sync-summary"><div><span>Автоматическое обновление</span><strong>{connection.lastSync ? `Последнее успешное: ${new Date(connection.lastSync).toLocaleString('ru-RU')}` : 'ELISEI запустит доступные потоки сам'}</strong><small>Эта кнопка нужна только для диагностики — обычная работа кабинета не требует ручного запуска.</small></div><button className="secondary-btn" disabled={syncing} onClick={() => syncConnection()}><RefreshCw className={syncing?'spin':''} size={17}/>{syncing?'Проверяем':'Диагностический запуск'}</button></div>
       <div className="sync-stage-grid">{stages.map(([stage,label]) => { const state=stateFor(stage); const copy=statusCopy(state,stage); const blocked=syncing || state?.status === 'pending' || (state?.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now()); const buttonText=blocked?(state?.status==='pending'?'Ожидаем WB':'Повтор будет автоматически'):(['rate_limited','retry_scheduled'].includes(state?.status)?'Повторить сейчас':'Обновить отдельно'); return <div id={`sync-stage-${stage}`} className={`sync-stage-card ${copy.tone}`} key={stage}><div className="sync-stage-head"><span>{copy.tone==='success'?<CheckCircle2 size={19}/>:copy.tone==='pending'?<RefreshCw className="spin" size={19}/>:copy.tone==='idle'?<Clock3 size={19}/>:<AlertTriangle size={19}/>}</span><div><small>{label}</small><strong>{copy.title}</strong></div></div><p>{copy.text}</p><button disabled={blocked} onClick={() => syncConnection(connection.connectionId,[stage],{period:['advertising','searchQueries','stockHistory','finance','acquiring','documents'].includes(stage)?analyticsPeriod:null})}>{buttonText}</button></div> })}</div>
       {coreData?.syncWarnings?.length > 0 && <div className="warning-stack">{coreData.syncWarnings.map((warning,index) => <div key={index}><AlertTriangle size={17}/>{warning}</div>)}</div>}
       <div className="sync-log">{syncHistory.length === 0 ? <div className="sync-empty">В журнале пока нет записей.</div> : syncHistory.map(item => { const warnings=Boolean(item.warnings?.length); const counts=item.counts || {}; return <div className={`sync-log-row ${warnings?'warning':item.status}`} key={item.id}><div className="sync-log-icon">{item.status==='success'&&!warnings?<CheckCircle2 size={18}/>:<AlertTriangle size={18}/>}</div><div><strong>{item.automatic?'Автоматический повтор':item.status==='success'?(warnings?'Завершено частично':'Завершено успешно'):'Не все этапы завершены'}</strong><span>{new Date(item.at).toLocaleString('ru-RU')}</span></div><div className="sync-log-details"><span>{counts.products ?? 0} товаров</span><span>{counts.orders ?? 0} заказов</span><span>{counts.sales ?? 0} продаж</span><span>{counts.stocks ?? 0} строк остатков</span><span>{counts.advertising ?? 0} кампаний</span>{warnings&&<span className="sync-warning-text">{item.warnings[0]}</span>}</div></div>})}</div>

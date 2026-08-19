@@ -77,6 +77,10 @@ export const wbApi = {
     signal: AbortSignal.timeout(110000),
   }),
   dashboard: (connectionId) => request(`/api/wb/dashboard/${encodeURIComponent(connectionId)}`),
+  dailyReady: (connectionId, date = '') => {
+    const query = date ? `?date=${encodeURIComponent(String(date).slice(0,10))}` : ''
+    return request(`/api/wb/daily-ready/${encodeURIComponent(connectionId)}${query}`)
+  },
   products: (connectionId) => request(`/api/wb/products/${encodeURIComponent(connectionId)}`),
   core: (connectionId, params = {}) => {
     const query = new URLSearchParams()

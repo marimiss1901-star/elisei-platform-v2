@@ -1,24 +1,26 @@
 const STAGE_DEFAULTS = Object.freeze({
-  orders: 120,
-  sales: 300,
-  stocks: 300,
-  sellerStocks: 300,
-  products: 1800,
-  advertising: 1800,
-  reviews: 1800,
-  questions: 1800,
+  // 5.13.0: business-ready cadence. ELISEI refreshes before the user opens the cabinet;
+  // it no longer polls operational WB streams every 2–5 minutes.
+  orders: 1800,
+  sales: 1800,
+  stocks: 3600,
+  sellerStocks: 3600,
+  products: 21600,
+  advertising: 3600,
+  reviews: 10800,
+  questions: 10800,
   chats: 3600,
 })
 
 const MIN_INTERVALS = Object.freeze({
-  orders: 60,
-  sales: 120,
-  stocks: 120,
-  sellerStocks: 120,
-  products: 600,
-  advertising: 900,
-  reviews: 900,
-  questions: 900,
+  orders: 900,
+  sales: 900,
+  stocks: 1800,
+  sellerStocks: 1800,
+  products: 3600,
+  advertising: 1800,
+  reviews: 3600,
+  questions: 3600,
   chats: 1800,
 })
 
@@ -26,7 +28,7 @@ export const LIVE_SYNC_STAGES = Object.freeze(Object.keys(STAGE_DEFAULTS))
 
 export function defaultLiveSyncSettings() {
   return {
-    enabled: false,
+    enabled: true,
     mode: 'polling',
     intervals: { ...STAGE_DEFAULTS },
     webhooksEnabled: false,
@@ -43,7 +45,7 @@ export function normalizeLiveSyncSettings(value = {}) {
     intervals[stage] = Math.max(minimum, Math.min(86400, Number.isFinite(raw) ? Math.round(raw) : STAGE_DEFAULTS[stage]))
   }
   return {
-    enabled: Boolean(value?.enabled),
+    enabled: value?.enabled === undefined ? defaults.enabled : Boolean(value.enabled),
     mode: ['polling','hybrid'].includes(String(value?.mode || '')) ? String(value.mode) : defaults.mode,
     intervals,
     webhooksEnabled: Boolean(value?.webhooksEnabled),
