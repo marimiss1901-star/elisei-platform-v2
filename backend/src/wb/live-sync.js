@@ -140,8 +140,11 @@ export function dueLiveStages({ settings = {}, states = [], now = Date.now(), ti
     const intervalSeconds = effectiveLiveIntervalSeconds(stage,{settings:normalized,now,timeZone})
     const intervalMs = intervalSeconds*1000
     if (!lastAt || now-lastAt >= intervalMs) {
-      const elapsed = lastAt ? Math.max(0,now-lastAt) : Number.POSITIVE_INFINITY
-      const overdueRatio = Number.isFinite(elapsed) ? elapsed/intervalMs : Number.POSITIVE_INFINITY
+      // Bootstrap owns never-run streams for a new shop. In the recurring live
+      // queue a never-run stream is only one interval overdue, so a genuinely
+      // stale operational/CRM stream cannot be starved by missing background data.
+      const elapsed = lastAt ? Math.max(0,now-lastAt) : intervalMs
+      const overdueRatio = elapsed/intervalMs
       due.push({stage,overdueRatio,priority:Number(LIVE_PRIORITY[stage] || 100)})
     }
   }
