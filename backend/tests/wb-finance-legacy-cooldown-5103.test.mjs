@@ -3,7 +3,7 @@ import fs from 'node:fs'
 
 const server=fs.readFileSync(new URL('../src/server.js',import.meta.url),'utf8')
 const start=server.indexOf('async function recoverLegacyFinanceCooldowns')
-const end=server.indexOf('\n\nasync function recoverLegacyRuntimeRateWindows',start)
+const end=server.indexOf('\n\nasync function recoverExcessiveOperationalBackoffs',start)
 assert.ok(start>=0 && end>start,'finance compatibility helper must still exist')
 const block=server.slice(start,end)
 
