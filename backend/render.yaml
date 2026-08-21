@@ -7,6 +7,15 @@ envVarGroups:
     envVars:
       - key: JWT_SECRET
         generateValue: true
+      # SMS.RU API key. Required for registration phone verification and password recovery.
+      - key: SMS_RU_API_ID
+        sync: false
+      # Temporary bridge for the original ELISEI owner account created before phone verification existed.
+      # Set these in Render to the legacy account email and the phone that should receive recovery SMS.
+      - key: OWNER_RECOVERY_EMAIL
+        sync: false
+      - key: OWNER_RECOVERY_PHONE
+        sync: false
 
 services:
   - type: web
