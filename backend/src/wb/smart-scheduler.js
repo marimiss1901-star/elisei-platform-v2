@@ -42,9 +42,8 @@ const GROUP = Object.freeze({
   reviews:'feedbacks', questions:'feedbacks', chats:'feedbacks',
 })
 
-// This is deliberately a dispatch spacing, not a copy of every WB method limit.
-// Exact method windows come from each stage's next_allowed_at and WB 429 headers.
-// The dispatcher only prevents a cold-start burst across one seller account.
+// Dispatch spacing applies only INSIDE one WB API group. Independent groups
+// are intentionally allowed to progress in the same scheduler cycle.
 const GROUP_GAP_MS = Object.freeze({
   statistics: 2500,
   analytics: 2500,
@@ -69,6 +68,10 @@ export function schedulerGroup(stage) {
 
 export function schedulerGroupGapMs(stage) {
   return Number(GROUP_GAP_MS[schedulerGroup(stage)] || GROUP_GAP_MS.default)
+}
+
+export function schedulerWinnerKey(connectionId, stage) {
+  return `${String(connectionId || '')}:${schedulerGroup(stage)}`
 }
 
 export function isSchedulerWaitingState(state = {}, now = Date.now()) {
@@ -97,14 +100,11 @@ function bootstrapPriority(row = {}) {
 }
 
 export function compareSchedulerRows(a = {}, b = {}) {
-  // 5.14.0: a brand-new shop may temporarily carry an explicit business-first
-  // priority. It is scoped to that connection through metadata, so existing
-  // shops keep the normal scheduler order.
   const explicitA = bootstrapPriority(a)
   const explicitB = bootstrapPriority(b)
 
-  // Once WB has already created a report/task, finishing that task is preferred
-  // over starting another low-value request. This avoids orphaned report polling.
+  // Inside a group, always finish an already-created WB task before opening a
+  // fresh lower-value call. Across groups there is no artificial serialization.
   const taskBoostA = a?.task_id || a?.taskId ? -20 : 0
   const taskBoostB = b?.task_id || b?.taskId ? -20 : 0
   const pendingBoostA = String(a?.status || '') === 'pending' ? -10 : 0
@@ -123,8 +123,11 @@ export function chooseCycleWinners(rows = []) {
   const winners = new Map()
   for (const row of sorted) {
     const connectionId = String(row?.connection_id || row?.connectionId || '')
-    if (!connectionId || winners.has(connectionId)) continue
-    winners.set(connectionId,String(row?.stage || ''))
+    const stage = String(row?.stage || '')
+    if (!connectionId || !stage) continue
+    const key = schedulerWinnerKey(connectionId,stage)
+    if (winners.has(key)) continue
+    winners.set(key,stage)
   }
   return winners
 }
@@ -132,15 +135,12 @@ export function chooseCycleWinners(rows = []) {
 export function initialStageSchedule(stages = [], { now = Date.now(), gapMs = SMART_SCHEDULER_INITIAL_GAP_MS } = {}) {
   const ordered = [...new Set((Array.isArray(stages) ? stages : []).map(String))]
     .sort((a,b) => stagePriority(a) - stagePriority(b))
-  const groupLast = new Map()
-  let cursor = Number(now)
+  const groupNext = new Map()
+  const fallbackGap = Math.max(1000,Number(gapMs || SMART_SCHEDULER_INITIAL_GAP_MS))
   return ordered.map((stage,index) => {
     const group = schedulerGroup(stage)
-    const groupNotBefore = Number(groupLast.get(group) || now)
-    const scheduledAt = Math.max(cursor,groupNotBefore)
-    const nextCursor = scheduledAt + Math.max(1000,Number(gapMs || SMART_SCHEDULER_INITIAL_GAP_MS))
-    groupLast.set(group,scheduledAt + schedulerGroupGapMs(stage))
-    cursor = nextCursor
+    const scheduledAt = Number(groupNext.get(group) ?? now)
+    groupNext.set(group,scheduledAt + Math.max(fallbackGap,schedulerGroupGapMs(stage)))
     return {
       stage,
       priority:stagePriority(stage),
