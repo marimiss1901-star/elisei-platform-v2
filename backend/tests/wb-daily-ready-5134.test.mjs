@@ -38,8 +38,6 @@ for (const marker of [
   "trigger:'daily_ready_recovery'",
   "await updateSyncState(row.id,stage,{metadata})",
   'recoveryAdoptedAt',
-  "version: '2.25.4'",
-  'ELISEI/2.25.4',
 ]) assert.ok(server.includes(marker),`server must contain ${marker}`)
 assert.ok(dashboard.includes("state.metadata?.dailyReadyDate"))
 
