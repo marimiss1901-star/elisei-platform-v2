@@ -1,0 +1,26 @@
+name: ELISEI Daily Ready wake
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+    - cron: '30 4 * * *'
+    - cron: '30 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ELISEI_BACKEND_URL: ${{ secrets.ELISEI_BACKEND_URL || 'https://elisei-platform-v21.onrender.com' }}
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Wake backend health endpoint
+        run: |
+          set -euo pipefail
+          echo "Waking ELISEI backend before Daily Ready processing"
+          curl --fail --silent --show-error --retry 3 --retry-delay 5 --max-time 45 "${ELISEI_BACKEND_URL%/}/health"
+          echo
