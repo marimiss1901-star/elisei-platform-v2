@@ -29,7 +29,8 @@ const MANDATORY_BUSINESS_STAGES = Object.freeze([
   'products','orders','sales','finance','advertising','acquiring','paidStorage','acceptance',
 ])
 const PERIOD_STAGES = new Set(['advertising','finance','acquiring'])
-const BACKFILL_STAGES = new Set(['orders','sales','advertising','finance','acquiring'])
+const GENERATED_REPORT_STAGES = new Set(['paidStorage','acceptance'])
+const BACKFILL_STAGES = new Set(['orders','sales','advertising','finance','acquiring','paidStorage','acceptance'])
 const CORE_GAP_MS = 2200
 const DEFER_MS = 24 * 60 * 60 * 1000
 const BACKFILL_DELAY_MS = 10 * 60 * 1000
@@ -62,6 +63,24 @@ function periodPayload(from,to) {
   return {dateFrom:from,dateTo:to,requestedFrom:from,requestedTo:to,requestedDays:days,limited:false}
 }
 
+function generatedReportChunks(from,to,chunkDays) {
+  const chunks=[]
+  let cursor=new Date(`${from}T12:00:00.000Z`)
+  const end=new Date(`${to}T12:00:00.000Z`)
+  while (cursor<=end) {
+    const chunkEnd=new Date(Math.min(end.getTime(),cursor.getTime()+(Math.max(1,chunkDays)-1)*86400000))
+    chunks.push({dateFrom:cursor.toISOString().slice(0,10),dateTo:chunkEnd.toISOString().slice(0,10)})
+    cursor=new Date(chunkEnd.getTime()+86400000)
+  }
+  return chunks
+}
+
+function reportChunks(stage,from,to) {
+  if (stage==='paidStorage') return generatedReportChunks(from,to,8)
+  if (stage==='acceptance') return generatedReportChunks(from,to,31)
+  return []
+}
+
 async function ensureSchema() {
   if (!pool) return false
   await pool.query(`
@@ -85,18 +104,14 @@ async function ensureSchema() {
 }
 
 async function connectionLooksNew(connectionId) {
-  const result=await pool.query(`
-    SELECT c.created_at,c.last_sync_at,
-           COUNT(s.*) FILTER (WHERE s.last_success_at IS NOT NULL)::int AS successes
-    FROM marketplace_connections c
-    LEFT JOIN wb_sync_states s ON s.connection_id=c.id
-    WHERE c.id=$1
-    GROUP BY c.id,c.created_at,c.last_sync_at
-  `,[connectionId])
+  const result=await pool.query('SELECT created_at FROM marketplace_connections WHERE id=$1',[connectionId])
   const row=result.rows[0]
   if (!row) return false
   const age=Date.now()-new Date(row.created_at).getTime()
-  return age>=0 && age<15*60*1000 && !row.last_sync_at && Number(row.successes || 0)===0
+  // queueInitialCabinetSync starts its worker immediately after connection.
+  // We intentionally do not require zero completed stages here: products may
+  // finish during the small response race and the shop is still a new shop.
+  return age>=0 && age<15*60*1000
 }
 
 async function loadStates(connectionId) {
@@ -115,8 +130,17 @@ function businessPriority(stage) {
 async function applyBusinessFirst(connectionId) {
   if (!pool || !connectionId) return null
   await ensureSchema()
-  const already=await pool.query('SELECT status FROM elisei_bootstrap_sync WHERE connection_id=$1',[connectionId])
-  if (already.rowCount) return already.rows[0]
+  const already=await pool.query('SELECT * FROM elisei_bootstrap_sync WHERE connection_id=$1',[connectionId])
+  if (already.rows[0]) {
+    const row=already.rows[0]
+    return {
+      status:row.status,
+      yesterday:String(row.yesterday).slice(0,10),
+      weekFrom:String(row.week_from).slice(0,10),
+      weekTo:String(row.week_to).slice(0,10),
+      financeAvailable:Boolean(row.finance_available),
+    }
+  }
   if (!(await connectionLooksNew(connectionId))) return null
 
   const states=await loadStates(connectionId)
@@ -143,6 +167,11 @@ async function applyBusinessFirst(connectionId) {
     }
     if (stage==='orders' || stage==='sales') additions.dateFrom=range.weekFrom
     if (PERIOD_STAGES.has(stage)) additions.period=weekPeriod
+    if (GENERATED_REPORT_STAGES.has(stage)) {
+      additions.chunks=reportChunks(stage,range.weekFrom,range.weekTo)
+      additions.chunkIndex=0
+      additions.pollAttempts=0
+    }
     await pool.query(`
       UPDATE wb_sync_states
       SET next_allowed_at=CASE WHEN status='queued' THEN $3::timestamptz ELSE next_allowed_at END,
@@ -190,15 +219,33 @@ function stageIsReady(row) {
   return normalizedStatus(row?.status)==='success' && Boolean(row?.last_success_at)
 }
 
+function cleanBackfillMetadata(stage,source,deepFrom,deepTo) {
+  const additions={
+    ...(source || {}),
+    bootstrapBusinessFirst:true,
+    bootstrapPhase:'history_backfill',
+    bootstrapCoreReadyAt:new Date().toISOString(),
+    bootstrapBackfillFrom:deepFrom,
+    bootstrapBackfillTo:deepTo,
+  }
+  for (const key of [
+    'bootstrapBusinessPriority','bootstrapDeferred','syncId','rrdId','pageNumber','offset','persistedCount',
+    'taskCreatedAt','taskCompletedAt','taskStatus','reportFrom','reportTo','pollAttempts','nextStatsOffset',
+  ]) delete additions[key]
+  if (stage==='orders' || stage==='sales') additions.dateFrom=deepFrom
+  if (PERIOD_STAGES.has(stage)) additions.period=periodPayload(deepFrom,deepTo)
+  if (GENERATED_REPORT_STAGES.has(stage)) {
+    additions.chunks=reportChunks(stage,deepFrom,deepTo)
+    additions.chunkIndex=0
+    additions.pollAttempts=0
+  }
+  return additions
+}
+
 async function releaseAfterBusinessCore(bootstrap,states,{timedOut=false}={}) {
   const connectionId=bootstrap.connection_id
-  const range={
-    yesterday:String(bootstrap.yesterday).slice(0,10),
-    weekFrom:String(bootstrap.week_from).slice(0,10),
-    weekTo:String(bootstrap.week_to).slice(0,10),
-  }
-  const deepFrom=shiftDate(range.yesterday,-29)
-  const deepPeriod=periodPayload(deepFrom,range.yesterday)
+  const yesterday=String(bootstrap.yesterday).slice(0,10)
+  const deepFrom=shiftDate(yesterday,-29)
   const releaseAt=Date.now()
 
   for (const row of states) {
@@ -218,27 +265,18 @@ async function releaseAfterBusinessCore(bootstrap,states,{timedOut=false}={}) {
             ),
             updated_at=NOW()
         WHERE connection_id=$1 AND stage=$2
-      `,[connectionId,stage,new Date(releaseAt+businessPriority(stage)*1000).toISOString()])
+      `,[connectionId,stage,new Date(releaseAt+Math.max(1,businessPriority(stage))*1000).toISOString()])
       continue
     }
 
     if (!BACKFILL_STAGES.has(stage) || !stageIsReady(row)) continue
-    const additions={
-      ...metadata,
-      bootstrapBusinessFirst:true,
-      bootstrapPhase:'history_backfill',
-      bootstrapCoreReadyAt:new Date().toISOString(),
-      bootstrapBackfillFrom:deepFrom,
-      bootstrapBackfillTo:range.yesterday,
-    }
-    delete additions.bootstrapBusinessPriority
-    if (stage==='orders' || stage==='sales') additions.dateFrom=deepFrom
-    if (PERIOD_STAGES.has(stage)) additions.period=deepPeriod
+    const additions=cleanBackfillMetadata(stage,metadata,deepFrom,yesterday)
     await pool.query(`
       UPDATE wb_sync_states
       SET status='queued',
           next_allowed_at=$3::timestamptz,
           last_error=NULL,
+          task_id=NULL,
           metadata=$4::jsonb,
           updated_at=NOW()
       WHERE connection_id=$1 AND stage=$2
@@ -254,7 +292,7 @@ async function releaseAfterBusinessCore(bootstrap,states,{timedOut=false}={}) {
     WHERE connection_id=$1
   `,[connectionId,timedOut ? 'business_core_partial_released' : (bootstrap.finance_available ? 'business_core_ready' : 'business_core_ready_finance_unavailable'),timedOut])
 
-  console.log('[ELISEI 5.14.0 BOOTSTRAP] Secondary streams released:',{connectionId,timedOut,deepFrom,deepTo:range.yesterday})
+  console.log('[ELISEI 5.14.0 BOOTSTRAP] Secondary streams released:',{connectionId,timedOut,deepFrom,deepTo:yesterday})
 }
 
 async function monitorBootstrapRows() {
