@@ -1,7 +1,7 @@
 {
   "name": "elisei-platform",
   "private": true,
-  "version": "5.13.8",
+  "version": "5.13.9",
   "type": "module",
   "scripts": {
     "dev": "vite",
