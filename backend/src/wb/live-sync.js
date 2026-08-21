@@ -110,7 +110,11 @@ export function liveCadenceWindow(now = Date.now(), timeZone = DEFAULT_TIME_ZONE
 export function effectiveLiveIntervalSeconds(stage,{ settings = {}, now = Date.now(), timeZone = DEFAULT_TIME_ZONE } = {}) {
   const normalized = normalizeLiveSyncSettings(settings)
   const name = String(stage || '')
-  const base = Number(normalized.intervals[name] || STAGE_DEFAULTS[name] || 3600)
+  const configured = Number(normalized.intervals[name] || STAGE_DEFAULTS[name] || 3600)
+  // Existing cabinets may still store the older 5.13 cadence in settings.
+  // The automatic 5.15.1 policy is authoritative, so legacy slower values are
+  // treated as a ceiling; we never poll orders/sales faster than their WB source.
+  const base = Math.min(configured,Number(STAGE_DEFAULTS[name] || configured))
   let multiplier = liveCadenceWindow(now,timeZone) === 'overnight'
     ? Number(OVERNIGHT_MULTIPLIERS[name] || 1)
     : 1
