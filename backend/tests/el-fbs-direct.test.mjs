@@ -44,7 +44,9 @@ assert.match(targeted.text,/(?:разбивку|схема) FBS\/FBO/i)
 assert.doesNotMatch(targeted.text,/проверим подключение WB|поток притормозил/i)
 
 const routeSource = fs.readFileSync(new URL('../src/routes/elCore.cjs', import.meta.url),'utf8')
-assert.match(routeSource,/salesFollowupMetrics\.has\(conversationFollowup\.metric\)/)
+assert.match(routeSource,/shouldForceSalesModule\(\{/)
+assert.match(routeSource,/metric:conversationFollowup\.metric/)
+assert.match(routeSource,/classification\.modules = \['sales'\]/)
 assert.match(routeSource,/direct-sales-metric/)
 
 console.log('ELISEI direct FBS/FBO routing tests passed')

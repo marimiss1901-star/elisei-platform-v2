@@ -7,6 +7,7 @@ const register = fs.readFileSync(new URL('../../src/pages/RegisterPage.jsx', imp
 const dashboard = fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx', import.meta.url), 'utf8')
 const app = fs.readFileSync(new URL('../../src/App.jsx', import.meta.url), 'utf8')
 
+// 5.13.7 SMS endpoints remain compatible for profile/security flows.
 assert.match(server, /CREATE TABLE IF NOT EXISTS phone_verification_otps/)
 assert.match(server, /app\.post\('\/api\/auth\/register\/phone\/request'/)
 assert.match(server, /app\.post\('\/api\/auth\/register\/phone\/confirm'/)
@@ -23,12 +24,14 @@ assert.match(api, /requestRegisterPhoneCode/)
 assert.match(api, /confirmRegisterPhoneCode/)
 assert.match(api, /requestPhoneChange/)
 assert.match(api, /confirmPhoneChange/)
-assert.match(register, /Подтвердить телефон/)
+// Registration itself migrated in 5.13.9 to user-initiated callcheck.
+assert.match(register, /Я позвонила — проверить/)
 assert.match(register, /phoneVerificationToken/)
 assert.match(register, /Телефон подтверждён/)
+assert.doesNotMatch(register, /Подтвердить телефон кодом из SMS/)
 assert.match(dashboard, /Безопасность аккаунта/)
 assert.match(dashboard, /Сменить телефон/)
 assert.match(dashboard, /confirmPhoneChange/)
 assert.match(app, /onUserUpdate=\{setUser\}/)
 
-console.log('auth-phone-verification-5137: registration and profile SMS phone verification ok')
+console.log('auth-phone-verification-5137: legacy SMS security flow preserved; registration uses callcheck')
