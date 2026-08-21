@@ -44,6 +44,7 @@ import {
 import {
   LIVE_SYNC_STAGES, defaultLiveSyncSettings, normalizeLiveSyncSettings, dueLiveStages, eventStages, safeEqualSecret, publicLiveSyncStatus,
 } from './wb/live-sync.js'
+import { wbRateWindowDelaySeconds } from './wb/rate-window.js'
 import { buildDataQualityReport } from './wb/data-quality.js'
 import { buildProduct360, buildProduct360Comparison, findProduct360Product, product360Matches, product360Identities, bindWbSearchRowsToNmId, trustedWbSearchRowForProduct, SEARCH_BINDING_VERSION } from './wb/product-360.js'
 import {
@@ -220,11 +221,38 @@ async function recoverRetryableErrorStates() {
 
 
 async function recoverLegacyFinanceCooldowns({ connectionId = null } = {}) {
-  // 5.10.4: длинная пауза finance больше не считается ошибкой сама по себе.
-  // Для Базового токена без X-Client-Secret официальный интервал WB между
-  // запросами детализации — 12 часов. Настоящие queued/rate_limited состояния
-  // сохраняем и никогда не сбрасываем искусственно.
+  // 5.10.4: legacy compatibility hook; current finance period pagination is
+  // paced separately by financePageCooldownMs and is not reset here.
   return []
+}
+
+async function recoverLegacyRuntimeRateWindows({ connectionId = null } = {}) {
+  if (!pool) return []
+  const params=[]
+  let connectionFilter=''
+  if(connectionId){
+    params.push(connectionId)
+    connectionFilter=' AND connection_id=$1'
+  }
+  const result=await pool.query(
+    `UPDATE wb_sync_states
+     SET status='queued',
+         next_allowed_at=NOW(),
+         last_error='ELISEI 5.15.2 снял устаревшее внутреннее окно ожидания. Поток будет проверен по актуальному лимиту WB.',
+         metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object(
+           'runtimeWindowMigration',true,
+           'runtimeWindowMigratedAt',NOW()
+         ),
+         updated_at=NOW()
+     WHERE status='queued'
+       AND COALESCE(metadata->'scheduler'->>'reason','')='preflight_window'
+       AND COALESCE(metadata->'scheduler'->>'requestSent','false')='false'
+       AND next_allowed_at IS NOT NULL
+       AND next_allowed_at>NOW()
+       ${connectionFilter}
+     RETURNING connection_id,stage`,params)
+  if(result.rows.length) console.log(`[ELISEI 5.15.2] Released ${result.rows.length} stale runtime rate-window wait(s).`)
+  return result.rows
 }
 
 
@@ -631,6 +659,7 @@ async function initDatabase() {
   // 5.10.3: миграция старого длинного finance next_allowed_at выполняется
   // сразу при старте backend, ещё до первого открытия пользователем страницы.
   await recoverLegacyFinanceCooldowns()
+  await recoverLegacyRuntimeRateWindows()
   await recoverLegacySearchQueryBindings()
 }
 
@@ -1006,15 +1035,7 @@ function wbRateWindowKey(url) {
 }
 
 function rememberWbRateWindow(url, response) {
-  if (!response?.headers) return null
-  const remaining = Number(response.headers.get('x-ratelimit-remaining'))
-  const reset = Number(response.headers.get('x-ratelimit-reset'))
-  const retry = Number(response.headers.get('x-ratelimit-retry') || response.headers.get('retry-after'))
-  const seconds = Number.isFinite(retry) && retry > 0
-    ? retry
-    : Number.isFinite(remaining) && remaining <= 0 && Number.isFinite(reset) && reset > 0
-      ? reset
-      : 0
+  const seconds = wbRateWindowDelaySeconds(response)
   if (!(seconds > 0)) return null
   const key = wbRateWindowKey(url)
   const nextAllowedAt = Date.now() + Math.ceil(seconds * 1000) + 350
@@ -5882,6 +5903,7 @@ app.get('/api/wb/connection', authRequired, async (req, res) => {
   let connection = await getConnection(req.auth.sub)
   if (!connection) return res.json(publicConnection(null))
   await recoverLegacyFinanceCooldowns({ connectionId:connection.id })
+  await recoverLegacyRuntimeRateWindows({ connectionId:connection.id })
   await recoverLegacySearchQueryBindings({ connectionId:connection.id })
   let [tokens, states] = await Promise.all([getWbTokens(req.auth.sub, connection.id), getSyncStates(connection.id)])
   // 5.10.1 migration: уже подключённому кабинету не нужно перевыпускать ключ
