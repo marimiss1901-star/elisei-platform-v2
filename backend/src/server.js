@@ -296,7 +296,7 @@ async function prepareSmartSchedulerCycle() {
   // Раньше orders/sales/advertising могли одновременно стать due и визуально
   // застревать среди остальных фоновых потоков. Для каждого кабинета выбираем
   // ровно один due recovery-stage; созданный WB taskId всегда имеет приоритет.
-  const recoveryOrder = new Map([['orders',0],['sales',1],['advertising',2]])
+  const recoveryOrder = new Map([['orders',0],['sales',1]])
   const byConnection = new Map()
   for (const row of dueRows) {
     const key = String(row.connection_id || '')
@@ -310,7 +310,7 @@ async function prepareSmartSchedulerCycle() {
       .sort((a,b) => recoveryOrder.get(String(a.stage)) - recoveryOrder.get(String(b.stage)))
     if (!recoveryRows.length) continue
     const winner = recoveryRows[0]
-    smartSchedulerWinners.set(connectionId,String(winner.stage))
+    smartSchedulerWinners.set(`${connectionId}:${schedulerGroup(winner.stage)}`,String(winner.stage))
     const deferredStages = recoveryRows.slice(1).map(row=>String(row.stage))
     if (deferredStages.length) {
       await pool.query(`
@@ -331,7 +331,7 @@ async function prepareSmartSchedulerCycle() {
 
 function smartSchedulerAllows(connectionId, stage) {
   if (!smartSchedulerPreparedAt) return true
-  const winner = smartSchedulerWinners.get(String(connectionId))
+  const winner = smartSchedulerWinners.get(`${String(connectionId)}:${schedulerGroup(stage)}`)
   return winner === String(stage)
 }
 
@@ -366,9 +366,9 @@ function kickBackgroundWorkers(reason = 'timer') {
     await recoverStaleSyncStates({ reason:`worker:${reason}` })
     await recoverLegacyFinanceCooldowns()
     // 5.10.5 Smart WB Scheduler: сначала добавляем живые задачи в очередь,
-    // затем выбираем ровно один приоритетный due-этап на каждый кабинет.
-    // Это исключает cold-start burst: разные lanes больше не стреляют по WB
-    // одновременно от имени одного продавца.
+    // затем выбираем по одному due-этапу на каждую независимую WB API-группу.
+    // Один токен может обслуживать несколько категорий: независимые группы идут
+    // параллельно, а внутри одной группы сохраняются приоритет и rate-limit окна.
     await scheduleDueLiveSyncStages()
     await scheduleDailyReadyStages()
     await prepareSmartSchedulerCycle()
