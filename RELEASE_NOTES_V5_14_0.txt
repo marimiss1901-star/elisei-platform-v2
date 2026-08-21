@@ -1,0 +1,15 @@
+ELISEI 5.14.0 / backend 2.26.0
+
+Business First Bootstrap for newly connected Wildberries shops.
+
+First useful view:
+- yesterday;
+- last 7 complete calendar days ending yesterday;
+- products, orders, sales/returns, finance, advertising, acquiring, paid storage and acceptance;
+- current stocks follow in the same high-priority bootstrap lane.
+
+Deep history, archives, reviews, search reports, documents and other secondary streams are deferred until the business core is ready. Then ELISEI releases them automatically and expands orders/sales/advertising/finance/acquiring to 30 completed days.
+
+If WB prevents completion, a 45-minute safety release avoids a permanent deadlock while preserving partial-data language.
+
+Existing connected shops are not migrated into this bootstrap mode.
