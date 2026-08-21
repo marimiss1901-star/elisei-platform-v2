@@ -6,8 +6,8 @@ const scheduler = fs.readFileSync(new URL('../src/wb/smart-scheduler.js', import
 const backendPackage = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 const frontendPackage = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
 
-assert.equal(frontendPackage.version, '5.15.0')
-assert.equal(backendPackage.version, '2.27.0')
+assert.equal(frontendPackage.version, '5.15.1')
+assert.equal(backendPackage.version, '2.27.1')
 assert.match(backendPackage.scripts.start, /callcheck-auth-preload\.mjs/)
 assert.match(backendPackage.scripts.start, /bootstrap-business-preload\.mjs/)
 
@@ -34,4 +34,4 @@ assert.match(scheduler, /bootstrapBusinessPriority/)
 assert.match(scheduler, /explicitA \?\? stagePriority/)
 assert.match(scheduler, /schedulerWinnerKey/)
 
-console.log('ELISEI 5.15.0 business-first bootstrap regression: OK')
+console.log('ELISEI 5.15.1 business-first bootstrap regression: OK')

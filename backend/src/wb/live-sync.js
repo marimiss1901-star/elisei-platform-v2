@@ -1,27 +1,61 @@
+const DEFAULT_TIME_ZONE = 'Europe/Moscow'
+
 const STAGE_DEFAULTS = Object.freeze({
-  // 5.13.2: business-ready cadence. ELISEI refreshes before the user opens the cabinet;
-  // it no longer polls operational WB streams every 2–5 minutes.
+  // ELISEI follows the freshness of the underlying WB source instead of polling
+  // every stream equally often. Orders/sales do not need sub-30-minute polling;
+  // chats need a noticeably faster CRM lane; products are event-first + fallback.
   orders: 1800,
   sales: 1800,
   stocks: 3600,
-  sellerStocks: 3600,
+  sellerStocks: 1800,
   products: 21600,
-  advertising: 3600,
-  reviews: 10800,
-  questions: 10800,
-  chats: 3600,
+  advertising: 1800,
+  reviews: 3600,
+  questions: 3600,
+  chats: 900,
 })
 
 const MIN_INTERVALS = Object.freeze({
-  orders: 900,
-  sales: 900,
+  // Guardrails prevent a cabinet setting from polling faster than is useful.
+  orders: 1800,
+  sales: 1800,
   stocks: 1800,
   sellerStocks: 1800,
   products: 3600,
   advertising: 1800,
   reviews: 3600,
   questions: 3600,
-  chats: 1800,
+  chats: 300,
+})
+
+const OVERNIGHT_MULTIPLIERS = Object.freeze({
+  orders: 2,
+  sales: 2,
+  stocks: 2,
+  sellerStocks: 2,
+  products: 2,
+  advertising: 2,
+  reviews: 3,
+  questions: 3,
+  chats: 2,
+})
+
+const WEBHOOK_FALLBACK_MULTIPLIERS = Object.freeze({
+  products: 2,
+  reviews: 2,
+  questions: 2,
+})
+
+const LIVE_PRIORITY = Object.freeze({
+  chats: 5,
+  orders: 10,
+  sales: 20,
+  sellerStocks: 30,
+  stocks: 40,
+  advertising: 50,
+  reviews: 60,
+  questions: 70,
+  products: 90,
 })
 
 export const LIVE_SYNC_STAGES = Object.freeze(Object.keys(STAGE_DEFAULTS))
@@ -57,7 +91,38 @@ function toTimestamp(value) {
   return Number.isFinite(timestamp) ? timestamp : 0
 }
 
-export function dueLiveStages({ settings = {}, states = [], now = Date.now() } = {}) {
+function hourInTimeZone(now = Date.now(), timeZone = DEFAULT_TIME_ZONE) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB',{
+      timeZone:String(timeZone || DEFAULT_TIME_ZONE),hour:'2-digit',hourCycle:'h23',
+    }).formatToParts(new Date(now))
+    return Number(parts.find(part=>part.type==='hour')?.value ?? 12)
+  } catch {
+    return 12
+  }
+}
+
+export function liveCadenceWindow(now = Date.now(), timeZone = DEFAULT_TIME_ZONE) {
+  const hour = hourInTimeZone(now,timeZone)
+  return hour >= 7 && hour < 23 ? 'active' : 'overnight'
+}
+
+export function effectiveLiveIntervalSeconds(stage,{ settings = {}, now = Date.now(), timeZone = DEFAULT_TIME_ZONE } = {}) {
+  const normalized = normalizeLiveSyncSettings(settings)
+  const name = String(stage || '')
+  const configured = Number(normalized.intervals[name] || STAGE_DEFAULTS[name] || 3600)
+  // Existing cabinets may still store the older 5.13 cadence in settings.
+  // The automatic 5.15.1 policy is authoritative, so legacy slower values are
+  // treated as a ceiling; we never poll orders/sales faster than their WB source.
+  const base = Math.min(configured,Number(STAGE_DEFAULTS[name] || configured))
+  let multiplier = liveCadenceWindow(now,timeZone) === 'overnight'
+    ? Number(OVERNIGHT_MULTIPLIERS[name] || 1)
+    : 1
+  if (normalized.webhooksEnabled) multiplier *= Number(WEBHOOK_FALLBACK_MULTIPLIERS[name] || 1)
+  return Math.max(Number(MIN_INTERVALS[name] || 1),Math.round(base*multiplier))
+}
+
+export function dueLiveStages({ settings = {}, states = [], now = Date.now(), timeZone = DEFAULT_TIME_ZONE } = {}) {
   const normalized = normalizeLiveSyncSettings(settings)
   if (!normalized.enabled) return []
   const stateMap = new Map((Array.isArray(states) ? states : []).map(state => [String(state?.stage || ''), state]))
@@ -72,10 +137,24 @@ export function dueLiveStages({ settings = {}, states = [], now = Date.now() } =
       toTimestamp(state.last_attempt_at || state.lastAttemptAt),
       toTimestamp(state.updated_at || state.updatedAt),
     )
-    const intervalMs = normalized.intervals[stage] * 1000
-    if (!lastAt || now - lastAt >= intervalMs) due.push(stage)
+    const intervalSeconds = effectiveLiveIntervalSeconds(stage,{settings:normalized,now,timeZone})
+    const intervalMs = intervalSeconds*1000
+    if (!lastAt || now-lastAt >= intervalMs) {
+      // Bootstrap owns never-run streams for a new shop. In the recurring live
+      // queue a never-run stream is only one interval overdue, so a genuinely
+      // stale operational/CRM stream cannot be starved by missing background data.
+      const elapsed = lastAt ? Math.max(0,now-lastAt) : intervalMs
+      const overdueRatio = elapsed/intervalMs
+      due.push({stage,overdueRatio,priority:Number(LIVE_PRIORITY[stage] || 100)})
+    }
   }
   return due
+    .sort((a,b) => {
+      if (a.overdueRatio !== b.overdueRatio) return b.overdueRatio-a.overdueRatio
+      if (a.priority !== b.priority) return a.priority-b.priority
+      return a.stage.localeCompare(b.stage)
+    })
+    .map(item=>item.stage)
 }
 
 export function eventStages(event = {}) {
@@ -117,10 +196,15 @@ function cryptoSafeEqual(a,b) {
 
 export function publicLiveSyncStatus(row = null, webhookCount = 0) {
   const settings = normalizeLiveSyncSettings(row?.settings || {})
+  const now = Date.now()
   return {
     enabled: settings.enabled,
     mode: settings.webhooksEnabled ? 'hybrid' : settings.mode,
     intervals: settings.intervals,
+    effectiveIntervals:Object.fromEntries(LIVE_SYNC_STAGES.map(stage=>[
+      stage,effectiveLiveIntervalSeconds(stage,{settings,now,timeZone:DEFAULT_TIME_ZONE}),
+    ])),
+    cadenceWindow:liveCadenceWindow(now,DEFAULT_TIME_ZONE),
     webhooksEnabled: settings.webhooksEnabled,
     webhookCount: Number(webhookCount || 0),
     lastEventAt: row?.last_event_at || null,
