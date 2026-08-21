@@ -7,8 +7,7 @@ const successStyle = { padding:'12px 14px', borderRadius:12, border:'1px solid r
 
 export default function RegisterPage({ onNavigate, onRegister }) {
   const [form, setForm] = useState({ name:'', company:'', email:'', phone:'', password:'' })
-  const [callCode, setCallCode] = useState('')
-  const [callStarted, setCallStarted] = useState(false)
+  const [callInfo, setCallInfo] = useState({ phone:'', pretty:'' })
   const [phoneVerified, setPhoneVerified] = useState(false)
   const [phoneVerificationToken, setPhoneVerificationToken] = useState('')
   const [error, setError] = useState('')
@@ -20,24 +19,23 @@ export default function RegisterPage({ onNavigate, onRegister }) {
     setForm(current => ({ ...current, ...next }))
     setPhoneVerified(false)
     setPhoneVerificationToken('')
-    setCallStarted(false)
-    setCallCode('')
+    setCallInfo({ phone:'', pretty:'' })
     setMessage('')
   }
 
-  const requestCode = async () => {
+  const requestCallcheck = async () => {
     setError(''); setMessage(''); setCallLoading(true)
     try {
       const result = await authApi.requestRegisterPhoneCode({ email:form.email, phone:form.phone })
-      setCallStarted(true)
-      setMessage(result.message || 'Сейчас поступит входящий звонок. Введите последние 4 цифры номера, с которого звонят.')
+      setCallInfo({ phone:result.callPhone || '', pretty:result.callPhonePretty || result.callPhone || '' })
+      setMessage(result.message || 'Позвоните со своего телефона на показанный номер. Сервис автоматически сбросит вызов.')
     } catch (err) { setError(err.message) } finally { setCallLoading(false) }
   }
 
-  const confirmCode = async () => {
+  const confirmCallcheck = async () => {
     setError(''); setMessage(''); setCallLoading(true)
     try {
-      const result = await authApi.confirmRegisterPhoneCode({ email:form.email, phone:form.phone, code:callCode })
+      const result = await authApi.confirmRegisterPhoneCode({ email:form.email, phone:form.phone })
       setPhoneVerificationToken(result.verificationToken || '')
       setPhoneVerified(true)
       setMessage(result.message || 'Телефон подтверждён.')
@@ -46,21 +44,21 @@ export default function RegisterPage({ onNavigate, onRegister }) {
 
   const submit = async (e) => {
     e.preventDefault(); setError('')
-    if (!phoneVerified || !phoneVerificationToken) return setError('Сначала подтвердите телефон кодом из входящего звонка.')
+    if (!phoneVerified || !phoneVerificationToken) return setError('Сначала подтвердите телефон звонком.')
     setLoading(true)
     try { onRegister(await authApi.register({ ...form, phoneVerificationToken })) }
     catch (err) { setError(err.message) }
     finally { setLoading(false) }
   }
 
-  return <div className="auth-page"><button className="auth-back" onClick={()=>onNavigate('/')}><ArrowLeft size={17}/> На главную</button><section className="auth-card register-card glass-panel"><div className="auth-brand"><span>E</span><strong>ELISEI</strong></div><div className="auth-el"><ElMascot compact/></div><div className="trial-pill">3 дня бесплатно</div><h1>Создайте аккаунт</h1><p>Телефон подтверждается входящим звонком и потом используется только для безопасного восстановления доступа.</p><form onSubmit={submit}>
+  return <div className="auth-page"><button className="auth-back" onClick={()=>onNavigate('/')}><ArrowLeft size={17}/> На главную</button><section className="auth-card register-card glass-panel"><div className="auth-brand"><span>E</span><strong>ELISEI</strong></div><div className="auth-el"><ElMascot compact/></div><div className="trial-pill">3 дня бесплатно</div><h1>Создайте аккаунт</h1><p>Телефон подтверждается коротким звонком с вашего номера и потом используется для безопасного восстановления доступа.</p><form onSubmit={submit}>
     <label><span>Ваше имя</span><div><UserRound size={17}/><input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="Мария" required/></div></label>
     <label><span>Компания или магазин</span><div><Building2 size={17}/><input value={form.company} onChange={e=>setForm({...form,company:e.target.value})} placeholder="Название магазина" required/></div></label>
     <label><span>Электронная почта</span><div><Mail size={17}/><input type="email" value={form.email} onChange={e=>invalidatePhoneVerification({email:e.target.value})} placeholder="name@company.ru" required/></div></label>
     <label><span>Телефон для восстановления</span><div><Phone size={17}/><input type="tel" value={form.phone} onChange={e=>invalidatePhoneVerification({phone:e.target.value})} placeholder="+7 999 123-45-67" autoComplete="tel" required disabled={phoneVerified}/></div></label>
     {!phoneVerified && <div style={{display:'grid',gap:10,marginBottom:10}}>
-      <button className="secondary-btn" type="button" onClick={requestCode} disabled={callLoading || !form.email || !form.phone}><Phone size={17}/>{callLoading ? 'Запрашиваем звонок…' : (callStarted ? 'Позвонить ещё раз' : 'Получить звонок')}</button>
-      {callStarted && <><div style={successStyle}>{message || 'Не отвечайте на звонок — нужны только последние 4 цифры входящего номера.'}</div><div style={{display:'grid',gridTemplateColumns:'1fr auto',gap:8}}><input aria-label="Последние 4 цифры входящего номера" inputMode="numeric" autoComplete="one-time-code" value={callCode} onChange={e=>setCallCode(e.target.value.replace(/\D/g,'').slice(0,4))} placeholder="Последние 4 цифры" maxLength={4}/><button className="secondary-btn" type="button" onClick={confirmCode} disabled={callLoading || callCode.length !== 4}><ShieldCheck size={17}/> Проверить</button></div></>}
+      <button className="secondary-btn" type="button" onClick={requestCallcheck} disabled={callLoading || !form.email || !form.phone}><Phone size={17}/>{callLoading ? 'Получаем номер…' : (callInfo.phone ? 'Получить новый номер' : 'Получить номер для звонка')}</button>
+      {callInfo.phone && <><div style={{...successStyle,textAlign:'center',fontSize:18,fontWeight:700}}><Phone size={18} style={{verticalAlign:'middle',marginRight:7}}/>{callInfo.pretty || callInfo.phone}</div><div style={successStyle}>{message || 'Позвоните со своего номера. SMS.RU автоматически сбросит вызов.'}</div><button className="secondary-btn" type="button" onClick={confirmCallcheck} disabled={callLoading}><ShieldCheck size={17}/> Я позвонила — проверить</button></>}
     </div>}
     {phoneVerified && <div style={successStyle}><CheckCircle2 size={16} style={{verticalAlign:'middle',marginRight:6}}/>Телефон подтверждён</div>}
     <label><span>Пароль</span><div><LockKeyhole size={17}/><input type="password" value={form.password} onChange={e=>setForm({...form,password:e.target.value})} placeholder="Минимум 8 символов" required minLength={8}/></div></label>
