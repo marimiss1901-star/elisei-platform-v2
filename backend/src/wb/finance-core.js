@@ -5,13 +5,13 @@ const number = value => {
 }
 
 export const FINANCE_METHOD_LIMITS = Object.freeze({
-  // POST /api/finance/v1/sales-reports/detailed:
-  // Base без service secret — 2 запроса / 24 ч, интервал 12 ч.
-  // Personal / Service / Base + secret — 1 запрос / мин.
-  baseDetailIntervalMs: 12 * 60 * 60 * 1000,
+  // Current POST /api/finance/v1/sales-reports/detailed period endpoint:
+  // official WB documentation exposes one request per minute. The previous
+  // 12-hour Base-token cooldown belonged to the older throttling model and
+  // must not be carried into this endpoint.
+  baseDetailIntervalMs: 61 * 1000,
   baseBalanceIntervalMs: 24 * 60 * 60 * 1000,
-  // GET /api/v1/documents/list: Base без secret — 1 запрос / 24 ч;
-  // Personal / Service / Base + secret — 1 запрос / 10 сек.
+  // Documents remain a separate endpoint with their own token-dependent rules.
   baseDocumentsIntervalMs: 24 * 60 * 60 * 1000,
   fastDetailIntervalMs: 61 * 1000,
   documentsFastIntervalMs: 11 * 1000,
@@ -27,9 +27,11 @@ export function hasFastFinanceRate(tokenInfo = {}) {
 }
 
 export function financePageCooldownMs(tokenInfo = {}) {
-  return hasFastFinanceRate(tokenInfo)
-    ? FINANCE_METHOD_LIMITS.fastDetailIntervalMs
-    : FINANCE_METHOD_LIMITS.baseDetailIntervalMs
+  // The period-detail endpoint itself is one request/minute in current WB docs.
+  // Keep tokenInfo in the signature because other finance methods still differ
+  // by token type and callers already provide it.
+  void tokenInfo
+  return FINANCE_METHOD_LIMITS.fastDetailIntervalMs
 }
 
 export function financeBalanceCooldownMs(tokenInfo = {}) {
@@ -59,16 +61,14 @@ export function financeContinuation({ incomingRows = [], previousRrdId = '0' } =
 }
 
 export function financeProgressCopy({ tokenInfo = {}, rows = 0, page = 0, nextAllowedAt = null, pageLimit = 100000 } = {}) {
-  const fast = hasFastFinanceRate(tokenInfo)
+  const typeId = Number(tokenInfo?.typeId || 0)
   return {
-    tokenMode:fast ? 'fast' : 'base',
+    tokenMode:[3,4].includes(typeId) ? 'personal_or_service' : 'single_token',
     rows:Number(rows || 0),
     page:Number(page || 0),
     nextAllowedAt:nextAllowedAt || null,
     pageLimit:Number(pageLimit || 100000),
-    limitNote:fast
-      ? 'Финансовая детализация WB работает в быстром режиме сервиса: до 100 000 строк за запрос, следующий запрос — не раньше чем через минуту.'
-      : 'Финансовая детализация WB работает через Базовый токен без сервисного секрета: WB разрешает 2 запроса в 24 часа с интервалом 12 часов. ELISEI забирает до 100 000 строк за один разрешённый запрос.',
+    limitNote:'Финансовая детализация WB за период: до 100 000 строк за запрос; следующий запрос — не раньше чем через минуту. Второй пользовательский токен не требуется.',
   }
 }
 
