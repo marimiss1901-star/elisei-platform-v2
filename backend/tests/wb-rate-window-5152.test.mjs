@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import { rateLimitHeaderSeconds,wbRateWindowDelaySeconds } from '../src/wb/rate-window.js'
 
 function response(status,headers={}){
@@ -25,5 +26,12 @@ assert.equal(wbRateWindowDelaySeconds(response(429,{
 assert.equal(wbRateWindowDelaySeconds(response(429,{
   'retry-after':'Fri, 21 Aug 2026 14:00:15 GMT',
 }),{now}),15)
+
+const server=fs.readFileSync(new URL('../src/server.js',import.meta.url),'utf8')
+assert.match(server,/wbRateWindowDelaySeconds\(response\)/)
+assert.match(server,/recoverLegacyRuntimeRateWindows/)
+assert.match(server,/runtimeWindowMigration/)
+assert.match(server,/metadata->'scheduler'->>'reason',''\)='preflight_window'/)
+assert.match(server,/await recoverLegacyRuntimeRateWindows\(\)/)
 
 console.log('ELISEI 5.15.2 WB rate-window regression: OK')
