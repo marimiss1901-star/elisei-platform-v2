@@ -1,6 +1,8 @@
 name: Validate ELISEI 5.15.0
 
 on:
+  push:
+    branches: [feat/group-parallel-scheduler-5150]
   pull_request:
     branches: [main]
 
