@@ -1,1 +1,0 @@
-Hotfix after Render log showed an unhandled PostgreSQL reconnect rejection in /api/wb/status/:id. 5.14.1 protects async Express routes so transient DB reconnects return 503 instead of terminating Node.
