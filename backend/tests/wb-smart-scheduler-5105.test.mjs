@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import {
-  stagePriority,schedulerGroup,initialStageSchedule,chooseCycleWinners,schedulerVisualState,
+  stagePriority,schedulerGroup,schedulerWinnerKey,initialStageSchedule,chooseCycleWinners,schedulerVisualState,
 } from '../src/wb/smart-scheduler.js'
 
 assert.ok(stagePriority('products') < stagePriority('orders'),'catalog must be ready before operational stages')
-assert.ok(stagePriority('orders') < stagePriority('sales'),'orders are first operational priority')
-assert.ok(stagePriority('sales') < stagePriority('finance'),'sales must precede finance in a cold-start queue')
+assert.ok(stagePriority('orders') < stagePriority('sales'),'orders are first statistics priority')
+assert.ok(stagePriority('sales') < stagePriority('finance'),'sales priority remains ahead of finance inside the business ordering')
 assert.ok(stagePriority('finance') < stagePriority('fbsArchive'),'historical archive must never block current cabinet data')
 assert.equal(schedulerGroup('orders'),'statistics')
 assert.equal(schedulerGroup('advertising'),'promotion')
@@ -15,8 +15,12 @@ assert.equal(schedulerGroup('finance'),'finance')
 const base=Date.parse('2026-08-17T10:00:00Z')
 const schedule=initialStageSchedule(['documents','finance','orders','products','sales'],{now:base,gapMs:5000})
 assert.deepEqual(schedule.map(item=>item.stage),['products','orders','sales','finance','documents'])
-assert.equal(Date.parse(schedule[0].nextAllowedAt),base)
-for(let i=1;i<schedule.length;i++) assert.ok(Date.parse(schedule[i].nextAllowedAt)>Date.parse(schedule[i-1].nextAllowedAt),'initial sync must be staggered, not burst at one timestamp')
+const byStage=Object.fromEntries(schedule.map(item=>[item.stage,item]))
+assert.equal(Date.parse(byStage.products.nextAllowedAt),base)
+assert.equal(Date.parse(byStage.orders.nextAllowedAt),base)
+assert.equal(Date.parse(byStage.finance.nextAllowedAt),base)
+assert.equal(Date.parse(byStage.documents.nextAllowedAt),base)
+assert.ok(Date.parse(byStage.sales.nextAllowedAt)>Date.parse(byStage.orders.nextAllowedAt),'same statistics group must remain staggered')
 
 const winners=chooseCycleWinners([
   {connection_id:'a',stage:'orders',status:'queued'},
@@ -24,9 +28,11 @@ const winners=chooseCycleWinners([
   {connection_id:'b',stage:'advertising',status:'queued'},
   {connection_id:'b',stage:'finance',status:'queued'},
 ])
-assert.equal(winners.get('a'),'stocks','already-created WB report must be finished before starting another call')
-assert.equal(winners.get('b'),'finance','one highest-priority due stage must win per seller account')
-assert.equal(winners.size,2)
+assert.equal(winners.get(schedulerWinnerKey('a','orders')),'orders','statistics group should be allowed')
+assert.equal(winners.get(schedulerWinnerKey('a','stocks')),'stocks','independent analytics group should run in the same cycle')
+assert.equal(winners.get(schedulerWinnerKey('b','advertising')),'advertising','promotion group should run independently')
+assert.equal(winners.get(schedulerWinnerKey('b','finance')),'finance','finance group should run independently')
+assert.equal(winners.size,4,'one winner is expected per seller and API group, not per seller account')
 
 assert.equal(schedulerVisualState({status:'rate_limited',next_allowed_at:'2026-08-17T11:00:00Z'},base),'waiting_window')
 assert.equal(schedulerVisualState({status:'queued',last_count:100,next_allowed_at:'2026-08-17T11:00:00Z'},base),'partial')
@@ -44,6 +50,7 @@ for(const marker of [
   "response.headers.get('x-ratelimit-reset')",
   "code:'WB_SCHEDULER_WAIT'",
   "mode:'smart_wb_scheduler_v1'",
+  "smartSchedulerWinners.get(`${String(connectionId)}:${schedulerGroup(stage)}`)",
 ]) assert.ok(server.includes(marker),`server.js must contain ${marker}`)
 
 const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')
@@ -54,4 +61,4 @@ for(const marker of [
   'Clock3',
 ]) assert.ok(dashboard.includes(marker),`Dashboard must contain ${marker}`)
 
-console.log('WB 5.10.5 Smart Scheduler regression tests passed')
+console.log('WB 5.15.0 grouped Smart Scheduler regression tests passed')
