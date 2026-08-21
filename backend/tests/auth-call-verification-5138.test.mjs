@@ -5,6 +5,8 @@ const preload = fs.readFileSync(new URL('../src/call-auth-preload.mjs', import.m
 const backendPackage = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 const registerPage = fs.readFileSync(new URL('../../src/pages/RegisterPage.jsx', import.meta.url), 'utf8')
 const loginPage = fs.readFileSync(new URL('../../src/pages/LoginPage.jsx', import.meta.url), 'utf8')
+const compat = fs.readFileSync(new URL('../../src/lib/callAuthCompat.js', import.meta.url), 'utf8')
+const main = fs.readFileSync(new URL('../../src/main.jsx', import.meta.url), 'utf8')
 
 assert.equal(backendPackage.version, '2.25.8')
 assert.match(backendPackage.scripts.start, /--import \.\/src\/call-auth-preload\.mjs/)
@@ -26,5 +28,9 @@ for (const source of [registerPage, loginPage]) {
 assert.match(loginPage, /email:recovery\.email/)
 assert.match(loginPage, /Получить звонок/)
 assert.match(registerPage, /Получить звонок/)
+
+assert.match(main, /callAuthCompat/)
+assert.match(compat, /00.*последние 4 цифры/i)
+assert.match(compat, /digits\.slice\(-4\)/)
 
 console.log('ELISEI 5.13.8 call verification regression: OK')
