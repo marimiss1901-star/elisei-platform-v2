@@ -1,0 +1,9 @@
+ELISEI 5.14.1 / backend 2.26.1
+
+Database reconnect resilience hotfix.
+
+- Express 4 async route rejections are now caught instead of becoming unhandled process errors.
+- Short PostgreSQL/Render interruptions return HTTP 503 with code DATABASE_RECONNECTING and Retry-After: 3.
+- The existing PostgreSQL pool recovery loop remains responsible for reconnecting automatically.
+- Unknown/non-database route errors still flow to Express error handling and are not silently swallowed.
+- Business First Bootstrap 5.14.0 remains unchanged.
