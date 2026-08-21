@@ -2,13 +2,13 @@ import 'dotenv/config'
 import express from 'express'
 import pg from 'pg'
 
-// ELISEI 5.14.0 — Business First Bootstrap.
+// ELISEI 5.15.0 — Business First Bootstrap.
 // New WB shops first load a useful management view for:
 //   • yesterday;
 //   • the last 7 COMPLETE calendar days ending yesterday.
-// Finance is mandatory in this first lane when the connected token exposes it.
-// Deep history and secondary streams are released only after the business lane
-// is ready (or after a safety timeout if WB itself is unavailable).
+// Core finance is mandatory when available. FBO stock, acquiring reconciliation,
+// paid storage and acceptance are enrichments: they continue in background and
+// never block the first usable client dashboard.
 
 const { Pool } = pg
 const databaseUrl = String(process.env.DATABASE_URL || '')
@@ -21,20 +21,19 @@ const pool = databaseUrl ? new Pool({
   idleTimeoutMillis:15000,
 }) : null
 
-const BOOTSTRAP_VERSION = 1
+const BOOTSTRAP_VERSION = 2
 const CORE_STAGE_ORDER = Object.freeze([
-  'products','orders','sales','finance','advertising','acquiring','paidStorage','acceptance','sellerStocks','stocks',
+  'products','orders','sales','finance','advertising','sellerStocks','stocks','acquiring','paidStorage','acceptance',
 ])
 const MANDATORY_BUSINESS_STAGES = Object.freeze([
-  'products','orders','sales','finance','advertising','acquiring','paidStorage','acceptance',
+  'products','orders','sales','finance','advertising',
 ])
 const PERIOD_STAGES = new Set(['advertising','finance','acquiring'])
 const GENERATED_REPORT_STAGES = new Set(['paidStorage','acceptance'])
 const BACKFILL_STAGES = new Set(['orders','sales','advertising','finance','acquiring','paidStorage','acceptance'])
-const CORE_GAP_MS = 2200
 const DEFER_MS = 24 * 60 * 60 * 1000
 const BACKFILL_DELAY_MS = 10 * 60 * 1000
-const SAFETY_RELEASE_MS = 45 * 60 * 1000
+const SAFETY_RELEASE_MS = 10 * 60 * 1000
 
 function normalizedStatus(value) { return String(value || '').trim().toLowerCase() }
 
@@ -108,9 +107,6 @@ async function connectionLooksNew(connectionId) {
   const row=result.rows[0]
   if (!row) return false
   const age=Date.now()-new Date(row.created_at).getTime()
-  // queueInitialCabinetSync starts its worker immediately after connection.
-  // We intentionally do not require zero completed stages here: products may
-  // finish during the small response race and the shop is still a new shop.
   return age>=0 && age<15*60*1000
 }
 
@@ -152,9 +148,10 @@ async function applyBusinessFirst(connectionId) {
   const weekPeriod=periodPayload(range.weekFrom,range.weekTo)
   const now=Date.now()
 
-  for (let index=0; index<core.length; index+=1) {
-    const stage=core[index]
-    const scheduledAt=new Date(now+index*CORE_GAP_MS).toISOString()
+  // All business-first groups become due immediately. Smart Scheduler is
+  // responsible for spacing only calls that share the same WB API group.
+  for (const stage of core) {
+    const scheduledAt=new Date(now).toISOString()
     const additions={
       bootstrapBusinessFirst:true,
       bootstrapVersion:BOOTSTRAP_VERSION,
@@ -164,6 +161,7 @@ async function applyBusinessFirst(connectionId) {
       bootstrapWeekFrom:range.weekFrom,
       bootstrapWeekTo:range.weekTo,
       bootstrapGoal:'yesterday_and_7_complete_days',
+      bootstrapNonBlocking:['sellerStocks','stocks','acquiring','paidStorage','acceptance'].includes(stage),
     }
     if (stage==='orders' || stage==='sales') additions.dateFrom=range.weekFrom
     if (PERIOD_STAGES.has(stage)) additions.period=weekPeriod
@@ -205,11 +203,12 @@ async function applyBusinessFirst(connectionId) {
     VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,NOW(),NOW())
   `,[connectionId,BOOTSTRAP_VERSION,initialStatus,range.yesterday,range.weekFrom,range.weekTo,JSON.stringify(required),financeAvailable])
 
-  console.log('[ELISEI 5.14.0 BOOTSTRAP] Business-first lane queued:',{
+  console.log('[ELISEI 5.15.0 BOOTSTRAP] Business-first lane queued:',{
     connectionId,
     yesterday:range.yesterday,
     week:`${range.weekFrom}..${range.weekTo}`,
-    core,
+    required,
+    background:core.filter(stage=>!required.includes(stage)),
     financeAvailable,
   })
   return {status:initialStatus,yesterday:range.yesterday,weekFrom:range.weekFrom,weekTo:range.weekTo,financeAvailable}
@@ -292,7 +291,7 @@ async function releaseAfterBusinessCore(bootstrap,states,{timedOut=false}={}) {
     WHERE connection_id=$1
   `,[connectionId,timedOut ? 'business_core_partial_released' : (bootstrap.finance_available ? 'business_core_ready' : 'business_core_ready_finance_unavailable'),timedOut])
 
-  console.log('[ELISEI 5.14.0 BOOTSTRAP] Secondary streams released:',{connectionId,timedOut,deepFrom,deepTo:yesterday})
+  console.log('[ELISEI 5.15.0 BOOTSTRAP] Secondary streams released:',{connectionId,timedOut,deepFrom,deepTo:yesterday})
 }
 
 async function monitorBootstrapRows() {
@@ -326,10 +325,10 @@ async function monitorBootstrapRows() {
 
       if (!missing.length || timedOut) await releaseAfterBusinessCore(bootstrap,states,{timedOut})
       else if (ready.length) {
-        console.log('[ELISEI 5.14.0 BOOTSTRAP] Core progress:',{connectionId:bootstrap.connection_id,ready,waiting:missing})
+        console.log('[ELISEI 5.15.0 BOOTSTRAP] Core progress:',{connectionId:bootstrap.connection_id,ready,waiting:missing})
       }
     } catch (error) {
-      console.warn('[ELISEI 5.14.0 BOOTSTRAP] Monitor row failed:',error.message)
+      console.warn('[ELISEI 5.15.0 BOOTSTRAP] Monitor row failed:',error.message)
     }
   }
 }
@@ -360,11 +359,11 @@ express.application.post=function bootstrapAwarePost(path,...handlers) {
             financeAvailable:bootstrap.financeAvailable,
           },
           autoSyncMessage:bootstrap.financeAvailable
-            ? 'ELISEI сначала готовит вчера и 7 завершённых дней вместе с финансами. Глубокая история загрузится после готовности этой картины.'
+            ? 'ELISEI сначала готовит вчера и 7 завершённых дней вместе с финансами. FBO и сверочные отчёты догружаются фоном и не блокируют работу.'
             : 'ELISEI готовит вчера и 7 завершённых дней. В подключённом токене не найден финансовый поток, поэтому прибыль останется неполной до добавления финансового доступа.',
         })
       })().catch(error=>{
-        console.warn('[ELISEI 5.14.0 BOOTSTRAP] Connect hook failed:',error.message)
+        console.warn('[ELISEI 5.15.0 BOOTSTRAP] Connect hook failed:',error.message)
         originalJson(payload)
       })
       return res
@@ -375,8 +374,8 @@ express.application.post=function bootstrapAwarePost(path,...handlers) {
 }
 
 if (pool) {
-  setTimeout(()=>monitorBootstrapRows().catch(error=>console.warn('[ELISEI 5.14.0 BOOTSTRAP] startup monitor:',error.message)),5000).unref?.()
-  setInterval(()=>monitorBootstrapRows().catch(error=>console.warn('[ELISEI 5.14.0 BOOTSTRAP] monitor:',error.message)),15000).unref?.()
+  setTimeout(()=>monitorBootstrapRows().catch(error=>console.warn('[ELISEI 5.15.0 BOOTSTRAP] startup monitor:',error.message)),5000).unref?.()
+  setInterval(()=>monitorBootstrapRows().catch(error=>console.warn('[ELISEI 5.15.0 BOOTSTRAP] monitor:',error.message)),15000).unref?.()
 }
 
-console.log('[ELISEI 5.14.0] New-shop bootstrap: yesterday + 7 complete days + finance first')
+console.log('[ELISEI 5.15.0] New-shop bootstrap: yesterday + 7 complete days + finance first; FBO non-blocking')
