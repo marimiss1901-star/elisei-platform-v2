@@ -3,12 +3,14 @@ import fs from 'node:fs'
 
 const server=fs.readFileSync(new URL('../src/server.js',import.meta.url),'utf8')
 const start=server.indexOf('async function recoverLegacyFinanceCooldowns')
-const end=server.indexOf('\n\nasync function recoverLegacySearchQueryBindings',start)
-assert.ok(start>=0 && end>start,'compatibility helper must still exist')
+const end=server.indexOf('\n\nasync function recoverLegacyRuntimeRateWindows',start)
+assert.ok(start>=0 && end>start,'finance compatibility helper must still exist')
 const block=server.slice(start,end)
 
-assert.ok(block.includes('12 часов'),'5.10.4 must document that a long Base finance cooldown can be valid')
-assert.ok(block.includes('return []'),'legacy recovery must be disabled instead of rewriting valid WB cooldowns')
-assert.ok(!block.includes('UPDATE wb_sync_states'),'5.10.4 must never clear finance rate limits by SQL migration')
+// Current finance period pagination is paced by financePageCooldownMs (~1 min).
+// This compatibility hook must not rewrite a real finance rate limit in SQL.
+assert.ok(block.includes('financePageCooldownMs'),'finance compatibility comment must point to current endpoint pacing')
+assert.ok(block.includes('return []'),'legacy finance recovery stays a no-op')
+assert.ok(!block.includes('UPDATE wb_sync_states'),'finance compatibility hook must never clear real WB rate limits')
 
-console.log('WB 5.10.4 finance cooldown preservation regression test passed')
+console.log('WB finance cooldown compatibility regression passed')

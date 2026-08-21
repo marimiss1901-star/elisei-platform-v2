@@ -46,12 +46,18 @@ for(const marker of [
   'chooseCycleWinners',
   'initialStageSchedule',
   'waitForWbRuntimeWindow',
-  "response.headers.get('x-ratelimit-remaining')",
-  "response.headers.get('x-ratelimit-reset')",
+  'wbRateWindowDelaySeconds(response)',
   "code:'WB_SCHEDULER_WAIT'",
   "mode:'smart_wb_scheduler_v1'",
   "smartSchedulerWinners.get(`${String(connectionId)}:${schedulerGroup(stage)}`)",
 ]) assert.ok(server.includes(marker),`server.js must contain ${marker}`)
+
+const rateWindow=fs.readFileSync(new URL('../src/wb/rate-window.js',import.meta.url),'utf8')
+for(const marker of [
+  "response.headers.get('x-ratelimit-retry')",
+  "response.headers.get('x-ratelimit-reset')",
+  "Number(response.status||0)!==429",
+]) assert.ok(rateWindow.includes(marker),`rate-window.js must contain ${marker}`)
 
 const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')
 for(const marker of [
@@ -61,4 +67,4 @@ for(const marker of [
   'Clock3',
 ]) assert.ok(dashboard.includes(marker),`Dashboard must contain ${marker}`)
 
-console.log('WB 5.15.0 grouped Smart Scheduler regression tests passed')
+console.log('WB 5.15.2 grouped Smart Scheduler regression tests passed')
