@@ -91,15 +91,26 @@ export function schedulerVisualState(state = {}, now = Date.now()) {
   return 'idle'
 }
 
+function bootstrapPriority(row = {}) {
+  const value = Number(row?.metadata?.bootstrapBusinessPriority)
+  return Number.isFinite(value) ? value : null
+}
+
 export function compareSchedulerRows(a = {}, b = {}) {
+  // 5.14.0: a brand-new shop may temporarily carry an explicit business-first
+  // priority. It is scoped to that connection through metadata, so existing
+  // shops keep the normal scheduler order.
+  const explicitA = bootstrapPriority(a)
+  const explicitB = bootstrapPriority(b)
+
   // Once WB has already created a report/task, finishing that task is preferred
   // over starting another low-value request. This avoids orphaned report polling.
   const taskBoostA = a?.task_id || a?.taskId ? -20 : 0
   const taskBoostB = b?.task_id || b?.taskId ? -20 : 0
   const pendingBoostA = String(a?.status || '') === 'pending' ? -10 : 0
   const pendingBoostB = String(b?.status || '') === 'pending' ? -10 : 0
-  const pa = stagePriority(a?.stage) + taskBoostA + pendingBoostA
-  const pb = stagePriority(b?.stage) + taskBoostB + pendingBoostB
+  const pa = (explicitA ?? stagePriority(a?.stage)) + taskBoostA + pendingBoostA
+  const pb = (explicitB ?? stagePriority(b?.stage)) + taskBoostB + pendingBoostB
   if (pa !== pb) return pa - pb
   const ta = Date.parse(a?.next_allowed_at || a?.nextAllowedAt || a?.updated_at || '') || 0
   const tb = Date.parse(b?.next_allowed_at || b?.nextAllowedAt || b?.updated_at || '') || 0
