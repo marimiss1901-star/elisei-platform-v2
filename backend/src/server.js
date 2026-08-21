@@ -226,6 +226,38 @@ async function recoverLegacyFinanceCooldowns({ connectionId = null } = {}) {
   return []
 }
 
+async function recoverExcessiveOperationalBackoffs({ connectionId = null } = {}) {
+  if (!pool) return []
+  const stages=['orders','sales','advertising','sellerStocks','stocks','chats','reviews','questions','products']
+  const params=[stages]
+  let connectionFilter=''
+  if(connectionId){
+    params.push(connectionId)
+    connectionFilter=' AND connection_id=$2'
+  }
+  const result=await pool.query(
+    `UPDATE wb_sync_states
+     SET status='retry_scheduled',
+         next_allowed_at=NOW() + INTERVAL '2 minutes',
+         last_error=CASE
+           WHEN COALESCE(last_error,'')='' THEN 'ELISEI сократил чрезмерный автоповтор оперативного потока.'
+           ELSE last_error
+         END,
+         metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object(
+           'operationalBackoffClamped',true,
+           'operationalBackoffClampedAt',NOW()
+         ),
+         updated_at=NOW()
+     WHERE stage=ANY($1::text[])
+       AND status IN ('queued','retry_scheduled')
+       AND metadata ? 'automaticRetryAttempt'
+       AND next_allowed_at > NOW() + INTERVAL '30 minutes'
+       ${connectionFilter}
+     RETURNING connection_id,stage,next_allowed_at`,params)
+  if(result.rows.length) console.log(`[ELISEI 5.15.3] Clamped ${result.rows.length} excessive operational backoff(s).`)
+  return result.rows
+}
+
 async function recoverLegacyRuntimeRateWindows({ connectionId = null } = {}) {
   if (!pool) return []
   const params=[]
@@ -656,6 +688,7 @@ async function initDatabase() {
   await migrateAutomaticRefreshSettings()
   await recoverStaleSyncStates({ reason:'startup' })
   await recoverRetryableErrorStates()
+  await recoverExcessiveOperationalBackoffs()
   // 5.10.3: миграция старого длинного finance next_allowed_at выполняется
   // сразу при старте backend, ещё до первого открытия пользователем страницы.
   await recoverLegacyFinanceCooldowns()
@@ -1067,13 +1100,26 @@ async function waitForWbRuntimeWindow(url, label = 'WB API', deadlineAt = 0) {
   })
 }
 
+const OPERATIONAL_RETRY_CAP_SECONDS = Object.freeze({
+  chats:10*60,
+  orders:15*60,
+  sales:15*60,
+  advertising:15*60,
+  sellerStocks:15*60,
+  stocks:20*60,
+  products:30*60,
+  reviews:30*60,
+  questions:30*60,
+})
+
 function transientRetryPlan(state, stage, error) {
   const previous = Math.max(0,Number(state?.metadata?.automaticRetryAttempt || 0))
   const attempt = Math.min(MAX_AUTOMATIC_RETRY_ATTEMPTS,previous + 1)
   const baseSeconds = stage === 'fbsArchive' ? 90 : 60
-  const seconds = Math.min(6 * 3600,baseSeconds * (2 ** Math.max(0,attempt - 1)))
+  const capSeconds = Number(OPERATIONAL_RETRY_CAP_SECONDS[String(stage)] || (stage === 'fbsArchive' ? 6*3600 : 2*3600))
+  const seconds = Math.min(capSeconds,baseSeconds * (2 ** Math.max(0,attempt - 1)))
   const jitter = 0.85 + Math.random() * 0.3
-  const delaySeconds = Math.max(30,Math.round(seconds * jitter))
+  const delaySeconds = Math.max(30,Math.min(capSeconds,Math.round(seconds * jitter)))
   return {
     attempt,
     nextAllowedAt:new Date(Date.now()+delaySeconds*1000).toISOString(),
@@ -5903,6 +5949,7 @@ app.get('/api/wb/connection', authRequired, async (req, res) => {
   let connection = await getConnection(req.auth.sub)
   if (!connection) return res.json(publicConnection(null))
   await recoverLegacyFinanceCooldowns({ connectionId:connection.id })
+  await recoverExcessiveOperationalBackoffs({ connectionId:connection.id })
   await recoverLegacyRuntimeRateWindows({ connectionId:connection.id })
   await recoverLegacySearchQueryBindings({ connectionId:connection.id })
   let [tokens, states] = await Promise.all([getWbTokens(req.auth.sub, connection.id), getSyncStates(connection.id)])
@@ -8127,11 +8174,19 @@ async function scheduleDailyReadyStages() {
       }
 
       const heavyPlan=dailyHeavyStagePlan({states,now,timeZone:dailyReadyTimezone})
-      for(const stage of heavyPlan){
+      const cabinetHash=[...String(row.id || '')].reduce((sum,char)=>((sum*31)+char.charCodeAt(0))>>>0,7)
+      const cabinetSpreadSeconds=slot==='overnight' ? cabinetHash%(30*60) : cabinetHash%(5*60)
+      for(const [heavyIndex,stage] of heavyPlan.entries()){
         const current=states.find(item=>item.stage===stage) || null
-        const metadata={...(current?.metadata || {}),trigger:'daily_ready',dailyReadySlot:slot,dailyReadyDate:targetDate}
+        const metadata={
+          ...(current?.metadata || {}),
+          trigger:'nightly_ready',dailyReadySlot:slot,dailyReadyDate:targetDate,
+          nightlyReady:true,nightlyReadyVersion:1,
+        }
         if(['finance','acquiring'].includes(stage)) metadata.period=reportPeriod(30)
-        await updateSyncState(row.id,stage,{status:'queued',nextAllowedAt:new Date().toISOString(),lastError:null,metadata})
+        const spreadSeconds=cabinetSpreadSeconds+heavyIndex*75
+        const nextAllowedAt=new Date(now+spreadSeconds*1000).toISOString()
+        await updateSyncState(row.id,stage,{status:'queued',nextAllowedAt,lastError:null,metadata})
       }
     }catch(error){
       console.warn(`Daily Ready scheduler failed for ${row.id || row.connection_id}:`,error.message)

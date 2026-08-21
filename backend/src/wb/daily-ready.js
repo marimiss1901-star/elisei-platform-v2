@@ -1,18 +1,18 @@
 const DAY_MS = 86400000
 
-export const DAILY_READY_VERSION = 5
+export const DAILY_READY_VERSION = 6
 export const DEFAULT_DAILY_READY_TIMEZONE = 'Europe/Moscow'
 
 export const AUTOMATIC_REFRESH_INTERVALS_SECONDS = Object.freeze({
   orders: 30 * 60,
   sales: 30 * 60,
   stocks: 60 * 60,
-  sellerStocks: 60 * 60,
+  sellerStocks: 30 * 60,
   products: 6 * 60 * 60,
-  advertising: 60 * 60,
-  reviews: 3 * 60 * 60,
-  questions: 3 * 60 * 60,
-  chats: 60 * 60,
+  advertising: 30 * 60,
+  reviews: 60 * 60,
+  questions: 60 * 60,
+  chats: 15 * 60,
 })
 
 export const DAILY_READY_CORE_STAGES = Object.freeze([
@@ -22,10 +22,14 @@ export const DAILY_READY_CORE_STAGES = Object.freeze([
 export const DAILY_READY_OPERATIONAL_RECOVERY_STAGES = Object.freeze(['orders','sales','advertising'])
 
 export const DAILY_READY_HEAVY_INTERVALS_SECONDS = Object.freeze({
-  finance: 12 * 60 * 60,
+  // Nightly Ready: one complete heavy pass per business night. 20h for the two
+  // financial contours guarantees the next night's pass is eligible even when
+  // the previous run finished closer to morning.
+  finance: 20 * 60 * 60,
+  acquiring: 20 * 60 * 60,
   paidStorage: 24 * 60 * 60,
   acceptance: 24 * 60 * 60,
-  acquiring: 12 * 60 * 60,
+  documents: 24 * 60 * 60,
 })
 
 const formatterCache = new Map()
@@ -98,7 +102,10 @@ export function stageCanBeQueued(state = {}, { now = Date.now(), minimumAgeSecon
 
 export function dailyHeavyStagePlan({ states = [], now = Date.now(), timeZone = DEFAULT_DAILY_READY_TIMEZONE } = {}) {
   const slot = dailyReadySlot(new Date(now),timeZone)
-  if (!['preopen','morning-ready','late-check'].includes(slot)) return []
+  // Heavy API work starts only in the business-night window 01:30–07:30.
+  // Pending WB jobs may finish later, but ELISEI does not start a fresh heavy
+  // download during the seller's working day.
+  if (!['overnight','preopen'].includes(slot)) return []
   const map = new Map((Array.isArray(states) ? states : []).map(item=>[String(item?.stage || ''),item]))
   const plan = []
   for (const [stage,seconds] of Object.entries(DAILY_READY_HEAVY_INTERVALS_SECONDS)) {

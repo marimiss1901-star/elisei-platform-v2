@@ -11,14 +11,17 @@ assert.equal(yesterdayDateKey(new Date('2026-08-19T08:00:00Z'),moscow),'2026-08-
 assert.equal(dailyReadySlot(new Date('2026-08-19T02:30:00Z'),moscow),'preopen') // 05:30 MSK
 assert.equal(dailyReadySlot(new Date('2026-08-19T04:45:00Z'),moscow),'morning-ready') // 07:45 MSK
 
-const now=Date.parse('2026-08-19T05:00:00Z')
+// 5.15.3: heavy work is eligible before opening time, not during the workday.
+const now=Date.parse('2026-08-19T02:00:00Z') // 05:00 MSK
 const states=[
-  {stage:'finance',status:'success',last_success_at:new Date(now-13*3600000).toISOString()},
+  {stage:'finance',status:'success',last_success_at:new Date(now-21*3600000).toISOString()},
   {stage:'paidStorage',status:'success',last_success_at:new Date(now-25*3600000).toISOString()},
   {stage:'acceptance',status:'queued',next_allowed_at:new Date(now+3600000).toISOString(),last_success_at:new Date(now-30*3600000).toISOString()},
   {stage:'acquiring',status:'success',last_success_at:new Date(now-2*3600000).toISOString()},
+  {stage:'documents',status:'success',last_success_at:new Date(now-2*3600000).toISOString()},
 ]
 assert.deepEqual(dailyHeavyStagePlan({states,now,timeZone:moscow}),['finance','paidStorage'])
+assert.deepEqual(dailyHeavyStagePlan({states,now:Date.parse('2026-08-19T12:00:00Z'),timeZone:moscow}),[])
 
 const core={
   periodCoverage:{
@@ -97,7 +100,6 @@ assert.equal(compact.summary.sellerPayable,700)
 const rev=dailySnapshotSourceRevision([{stage:'orders',status:'success',last_success_at:'2026-08-19T01:00:00Z',last_count:10}], '2026-08-18')
 assert.equal(snapshotNeedsRefresh({source_revision:rev,generated_at:new Date(now-1000).toISOString()},rev,{now,maxAgeMs:60000}),false)
 assert.equal(snapshotNeedsRefresh({source_revision:'old',generated_at:new Date(now-1000).toISOString()},rev,{now,maxAgeMs:60000}),true)
-
 
 const workflow=fs.readFileSync(new URL('../../.github/workflows/elisei-daily-ready-wake.yml',import.meta.url),'utf8')
 for (const marker of ["'0 2 * * *'","'30 4 * * *'","'30 8 * * *'",'/health','ELISEI_BACKEND_URL']) {
