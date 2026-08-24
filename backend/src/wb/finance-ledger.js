@@ -73,7 +73,7 @@ const identity = (row = {}) => ({
   currency:text(row,['currency'],'RUB'),
   reportId:text(row,['reportId','report_id','realizationreport_id']),
   rrdId:text(row,['rrdId','rrd_id']),
-  operationDate:compactDate(text(row,['rrDate','rr_dt','saleDt','sale_dt','orderDt','order_dt','date','dateFrom','date_from','dtBonus','originalDate','shkCreateDate','giCreateDate'])),
+  operationDate:compactDate(text(row,['operationDate','rrDate','rr_dt','saleDt','sale_dt','saleDate','acqDate','orderDt','order_dt','orderDate','date','dateFrom','date_from','dtBonus','originalDate','shkCreateDate','giCreateDate','createDate'])),
   fulfillmentMode:financeFulfillmentMode(row),
 })
 
@@ -258,6 +258,7 @@ export async function ensureFinanceLedgerSchema(db) {
     CREATE INDEX IF NOT EXISTS wb_finance_ledger_product_idx ON wb_finance_ledger(connection_id,nm_id,operation_date DESC);
     CREATE INDEX IF NOT EXISTS wb_finance_ledger_group_idx ON wb_finance_ledger(connection_id,operation_group,operation_date DESC);
     CREATE INDEX IF NOT EXISTS wb_finance_ledger_mode_idx ON wb_finance_ledger(connection_id,fulfillment_mode,operation_date DESC);
+    ALTER TABLE wb_finance_ledger ADD COLUMN IF NOT EXISTS normalization_version INTEGER NOT NULL DEFAULT 1;
   `)
 }
 
@@ -274,7 +275,7 @@ export async function persistFinanceLedgerBatch(db,{ connectionId,stream,rows,ke
         connection_id,movement_key,source_stream,source_row_key,source_report_id,source_rrd_id,
         operation_date,operation_code,operation_group,operation_name,direction,amount,currency,
         metric_role,detail_only,included_in_pnl,fulfillment_mode,nm_id,vendor_code,barcode,srid,order_id,
-        warehouse,document_type,seller_operation,bonus_type,payment_processing,source_field,note,source_payload,updated_at
+        warehouse,document_type,seller_operation,bonus_type,payment_processing,source_field,note,source_payload,normalization_version,updated_at
       )
       SELECT $1,
         item->>'movementKey',item->>'sourceStream',item->>'sourceRowKey',NULLIF(item->>'reportId',''),NULLIF(item->>'rrdId',''),
@@ -283,7 +284,7 @@ export async function persistFinanceLedgerBatch(db,{ connectionId,stream,rows,ke
         COALESCE((item->>'detailOnly')::boolean,false),COALESCE((item->>'includedInPnl')::boolean,false),NULLIF(item->>'fulfillmentMode',''),
         NULLIF(item->>'nmId',''),NULLIF(item->>'vendorCode',''),NULLIF(item->>'barcode',''),NULLIF(item->>'srid',''),NULLIF(item->>'orderId',''),
         NULLIF(item->>'warehouse',''),NULLIF(item->>'documentType',''),NULLIF(item->>'sellerOperation',''),NULLIF(item->>'bonusType',''),
-        NULLIF(item->>'paymentProcessing',''),NULLIF(item->>'sourceField',''),NULLIF(item->>'note',''),COALESCE(item->'sourcePayload','{}'::jsonb),NOW()
+        NULLIF(item->>'paymentProcessing',''),NULLIF(item->>'sourceField',''),NULLIF(item->>'note',''),COALESCE(item->'sourcePayload','{}'::jsonb),3,NOW()
       FROM jsonb_array_elements($2::jsonb) item
       ON CONFLICT (connection_id,movement_key) DO UPDATE SET
         operation_date=EXCLUDED.operation_date,operation_group=EXCLUDED.operation_group,operation_name=EXCLUDED.operation_name,
@@ -292,54 +293,68 @@ export async function persistFinanceLedgerBatch(db,{ connectionId,stream,rows,ke
         nm_id=EXCLUDED.nm_id,vendor_code=EXCLUDED.vendor_code,barcode=EXCLUDED.barcode,srid=EXCLUDED.srid,order_id=EXCLUDED.order_id,
         warehouse=EXCLUDED.warehouse,document_type=EXCLUDED.document_type,seller_operation=EXCLUDED.seller_operation,
         bonus_type=EXCLUDED.bonus_type,payment_processing=EXCLUDED.payment_processing,source_field=EXCLUDED.source_field,
-        note=EXCLUDED.note,source_payload=EXCLUDED.source_payload,updated_at=NOW()
+        note=EXCLUDED.note,source_payload=EXCLUDED.source_payload,normalization_version=3,updated_at=NOW()
     `,[connectionId,JSON.stringify(movements)])
     movementCount += movements.length
   }
   return { sourceRows:sourceRows.length,movements:movementCount }
 }
 
-export async function backfillFinanceLedgerFromStreamItems(db,{ connectionId,limitPerStream=100000 }) {
-  const syncs = await db.query(`
-    SELECT DISTINCT ON (stream) stream,sync_id,updated_at AS source_updated_at
+export async function backfillFinanceLedgerFromStreamItems(db,{ connectionId,limitPerStream=150000 } = {}) {
+  const streamResult = await db.query(`
+    SELECT stream,
+           COUNT(DISTINCT row_key)::int AS source_rows,
+           MAX(updated_at) AS source_updated_at
     FROM wb_stream_items
     WHERE connection_id=$1 AND stream=ANY($2::text[])
-    ORDER BY stream,updated_at DESC
+    GROUP BY stream
+    ORDER BY stream
   `,[connectionId,STREAMS])
-  let movements = 0
-  let processedStreams = 0
-  let skippedStreams = 0
-  for (const sync of syncs.rows) {
-    const ledgerFreshness = await db.query(`
-      SELECT MAX(updated_at) AS ledger_updated_at
+  let movements=0
+  let processedStreams=0
+  let skippedStreams=0
+
+  for(const sourceStats of streamResult.rows){
+    const stream=String(sourceStats.stream)
+    const sourceRows=Number(sourceStats.source_rows || 0)
+    const ledgerStats=await db.query(`
+      SELECT COUNT(DISTINCT source_row_key)::int AS ledger_source_rows,
+             COALESCE(MIN(normalization_version),1)::int AS min_version,
+             MAX(updated_at) AS ledger_updated_at
       FROM wb_finance_ledger
       WHERE connection_id=$1 AND source_stream=$2
-    `,[connectionId,sync.stream])
-    const ledgerUpdatedAt = ledgerFreshness.rows[0]?.ledger_updated_at ? new Date(ledgerFreshness.rows[0].ledger_updated_at).getTime() : 0
-    const sourceUpdatedAt = sync.source_updated_at ? new Date(sync.source_updated_at).getTime() : 0
-    if (ledgerUpdatedAt && sourceUpdatedAt && ledgerUpdatedAt >= sourceUpdatedAt) {
-      skippedStreams += 1
-      continue
-    }
+    `,[connectionId,stream])
+    const ledgerSourceRows=Number(ledgerStats.rows[0]?.ledger_source_rows || 0)
+    const minVersion=Number(ledgerStats.rows[0]?.min_version || 1)
+    const sourceUpdatedAt=sourceStats.source_updated_at ? new Date(sourceStats.source_updated_at).getTime() : 0
+    const ledgerUpdatedAt=ledgerStats.rows[0]?.ledger_updated_at ? new Date(ledgerStats.rows[0].ledger_updated_at).getTime() : 0
+    const needsRebuild=minVersion < 3 || ledgerSourceRows < sourceRows || (sourceUpdatedAt && sourceUpdatedAt > ledgerUpdatedAt)
+    if(!needsRebuild){ skippedStreams += 1; continue }
 
-    let afterKey = ''
-    let seen = 0
-    while (seen < limitPerStream) {
-      const page = await db.query(`
-        SELECT row_key,payload FROM wb_stream_items
-        WHERE connection_id=$1 AND stream=$2 AND sync_id=$3::uuid AND row_key>$4
-        ORDER BY row_key LIMIT 1000
-      `,[connectionId,sync.stream,sync.sync_id,afterKey])
-      if (!page.rows.length) break
-      const result = await persistFinanceLedgerBatch(db,{connectionId,stream:sync.stream,rows:page.rows.map(item=>item.payload),keyOf:(_row,index)=>page.rows[index].row_key,batchSize:250})
+    let afterKey=''
+    let seen=0
+    while(seen < limitPerStream){
+      const page=await db.query(`
+        SELECT DISTINCT ON (row_key) row_key,payload
+        FROM wb_stream_items
+        WHERE connection_id=$1 AND stream=$2 AND row_key>$3
+        ORDER BY row_key,updated_at DESC
+        LIMIT 1000
+      `,[connectionId,stream,afterKey])
+      if(!page.rows.length) break
+      const result=await persistFinanceLedgerBatch(db,{
+        connectionId,stream,rows:page.rows.map(item=>item.payload),
+        keyOf:(_row,index)=>page.rows[index].row_key,batchSize:250,
+      })
       movements += result.movements
       seen += page.rows.length
-      afterKey = page.rows.at(-1).row_key
-      if (page.rows.length < 1000) break
+      afterKey=page.rows.at(-1).row_key
+      if(page.rows.length < 1000) break
     }
     processedStreams += 1
   }
-  return { skipped:processedStreams===0,movements,processedStreams,skippedStreams }
+
+  return { skipped:processedStreams===0,movements,processedStreams,skippedStreams,normalizationVersion:3 }
 }
 
 function addFilter(filters, params, sql, value) {
