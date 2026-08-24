@@ -77,8 +77,11 @@ const identity = (row = {}) => ({
   fulfillmentMode:financeFulfillmentMode(row),
 })
 
-function movementKey(stream, sourceRowKey, code, index) {
-  return `${stream}:${sourceRowKey}:${code}:${index}`
+function movementKey(stream, sourceRowKey, code, sourceField = '') {
+  // sourceRowKey is already stable (rrdId/report row identity). Do not use the
+  // page-local array index: page boundaries can change between WB responses and
+  // would otherwise create duplicate money movements after a re-normalization.
+  return [stream,sourceRowKey,code,sourceField || 'value'].join(':')
 }
 
 function directionFor(value) {
@@ -95,7 +98,7 @@ function addMovement(target, base, {
   if (!Number.isFinite(numeric) || Math.abs(numeric) < 0.000001) return
   target.push({
     ...base,
-    movementKey:movementKey(base.sourceStream,base.sourceRowKey,code,index),
+    movementKey:movementKey(base.sourceStream,base.sourceRowKey,code,sourceField),
     operationCode:code,
     operationGroup:group,
     operationName:name,
@@ -284,7 +287,7 @@ export async function persistFinanceLedgerBatch(db,{ connectionId,stream,rows,ke
         COALESCE((item->>'detailOnly')::boolean,false),COALESCE((item->>'includedInPnl')::boolean,false),NULLIF(item->>'fulfillmentMode',''),
         NULLIF(item->>'nmId',''),NULLIF(item->>'vendorCode',''),NULLIF(item->>'barcode',''),NULLIF(item->>'srid',''),NULLIF(item->>'orderId',''),
         NULLIF(item->>'warehouse',''),NULLIF(item->>'documentType',''),NULLIF(item->>'sellerOperation',''),NULLIF(item->>'bonusType',''),
-        NULLIF(item->>'paymentProcessing',''),NULLIF(item->>'sourceField',''),NULLIF(item->>'note',''),COALESCE(item->'sourcePayload','{}'::jsonb),3,NOW()
+        NULLIF(item->>'paymentProcessing',''),NULLIF(item->>'sourceField',''),NULLIF(item->>'note',''),COALESCE(item->'sourcePayload','{}'::jsonb),4,NOW()
       FROM jsonb_array_elements($2::jsonb) item
       ON CONFLICT (connection_id,movement_key) DO UPDATE SET
         operation_date=EXCLUDED.operation_date,operation_group=EXCLUDED.operation_group,operation_name=EXCLUDED.operation_name,
@@ -293,7 +296,7 @@ export async function persistFinanceLedgerBatch(db,{ connectionId,stream,rows,ke
         nm_id=EXCLUDED.nm_id,vendor_code=EXCLUDED.vendor_code,barcode=EXCLUDED.barcode,srid=EXCLUDED.srid,order_id=EXCLUDED.order_id,
         warehouse=EXCLUDED.warehouse,document_type=EXCLUDED.document_type,seller_operation=EXCLUDED.seller_operation,
         bonus_type=EXCLUDED.bonus_type,payment_processing=EXCLUDED.payment_processing,source_field=EXCLUDED.source_field,
-        note=EXCLUDED.note,source_payload=EXCLUDED.source_payload,normalization_version=3,updated_at=NOW()
+        note=EXCLUDED.note,source_payload=EXCLUDED.source_payload,normalization_version=4,updated_at=NOW()
     `,[connectionId,JSON.stringify(movements)])
     movementCount += movements.length
   }
@@ -328,12 +331,21 @@ export async function backfillFinanceLedgerFromStreamItems(db,{ connectionId,lim
     const minVersion=Number(ledgerStats.rows[0]?.min_version || 1)
     const sourceUpdatedAt=sourceStats.source_updated_at ? new Date(sourceStats.source_updated_at).getTime() : 0
     const ledgerUpdatedAt=ledgerStats.rows[0]?.ledger_updated_at ? new Date(ledgerStats.rows[0].ledger_updated_at).getTime() : 0
-    const needsRebuild=minVersion < 3 || ledgerSourceRows < sourceRows || (sourceUpdatedAt && sourceUpdatedAt > ledgerUpdatedAt)
+    const needsRebuild=minVersion < 4 || ledgerSourceRows < sourceRows || (sourceUpdatedAt && sourceUpdatedAt > ledgerUpdatedAt)
     if(!needsRebuild){ skippedStreams += 1; continue }
+
+    // Version 4 is an authoritative rebuild. Remove movements created by the
+    // older index-based key so that the same WB source row cannot be counted
+    // twice. Raw source rows remain untouched in wb_stream_items.
+    await db.query(`
+      DELETE FROM wb_finance_ledger
+      WHERE connection_id=$1 AND source_stream=$2 AND normalization_version<4
+    `,[connectionId,stream])
 
     let afterKey=''
     let seen=0
-    while(seen < limitPerStream){
+    const effectiveLimit=Math.max(Number(limitPerStream || 0),sourceRows)
+    while(seen < effectiveLimit){
       const page=await db.query(`
         SELECT DISTINCT ON (row_key) row_key,payload
         FROM wb_stream_items
@@ -354,7 +366,7 @@ export async function backfillFinanceLedgerFromStreamItems(db,{ connectionId,lim
     processedStreams += 1
   }
 
-  return { skipped:processedStreams===0,movements,processedStreams,skippedStreams,normalizationVersion:3 }
+  return { skipped:processedStreams===0,movements,processedStreams,skippedStreams,normalizationVersion:4 }
 }
 
 function addFilter(filters, params, sql, value) {
