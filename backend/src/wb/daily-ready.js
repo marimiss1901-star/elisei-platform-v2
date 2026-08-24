@@ -90,10 +90,9 @@ function millis(value) {
 
 export function stageCanBeQueued(state = {}, { now = Date.now(), minimumAgeSeconds = 0 } = {}) {
   const status = String(state?.status || '')
-  if (['running','pending','queued','rate_limited','retry_scheduled'].includes(status)) {
-    const nextAllowed = millis(state?.next_allowed_at || state?.nextAllowedAt)
-    if (!nextAllowed || nextAllowed > now) return false
-  }
+  // A continuation already owned by Smart Scheduler is not a fresh nightly job.
+  // It must resume with its existing cursor instead of being reinitialized.
+  if (['running','pending','queued','rate_limited','retry_scheduled'].includes(status)) return false
   const nextAllowed = millis(state?.next_allowed_at || state?.nextAllowedAt)
   if (nextAllowed > now) return false
   const lastSuccess = millis(state?.last_success_at || state?.lastSuccessAt)
