@@ -1762,7 +1762,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   }
 
   const renderFinance = () => {
-    const periodFinanceSummary = analyticsCore?.summary || summary
+    const basePeriodFinanceSummary = analyticsCore?.summary || summary || {}
     const periodFinanceRows = analyticsBaseProducts.length ? analyticsBaseProducts : productRows
     const financeProductNeedle = query.trim().toLowerCase()
     const visibleFinanceProducts = periodFinanceRows.filter(row => !financeProductNeedle || [row.article,row.vendorCode,row.barcode,row.title,row.brand,row.nmID,row.key].join(' ').toLowerCase().includes(financeProductNeedle))
@@ -1772,6 +1772,67 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const financeReady = Boolean(ledger.coverage?.financeReady || coreData?.availability?.finance)
     const financePartial = Boolean(ledger.coverage?.financePartial)
     const financeComplete = financeReady && !financePartial
+    const ledgerHasMovements = Number(ledgerSummary.movements || 0) > 0
+    const ledgerAmount = (key, fallbackKey = key) => {
+      if (ledgerHasMovements) {
+        const value = Number(ledgerSummary?.[key] || 0)
+        // Пока финансовая детализация догружается, отсутствие конкретной
+        // категории не является подтверждённым нулём.
+        return financePartial && value === 0 ? null : value
+      }
+      if (!financeComplete) return null
+      const fallback = basePeriodFinanceSummary?.[fallbackKey]
+      return fallback == null ? 0 : Number(fallback || 0)
+    }
+    const ledgerAdvertisingCharges = ledgerHasMovements ? Number(ledgerSummary.advertisingCharges || 0) : null
+    const campaignAdvertising = basePeriodFinanceSummary.advertising == null ? null : Number(basePeriodFinanceSummary.advertising || 0)
+    // Реклама берётся из рекламной статистики, если она доступна. Финансовое
+    // списание рекламы используется как fallback и не суммируется второй раз.
+    const pnlAdvertising = campaignAdvertising ?? ledgerAdvertisingCharges
+    const wbExpensesExAdvertising = ledgerHasMovements
+      ? Math.max(0, Number(ledgerSummary.expenses || 0) - Number(ledgerSummary.advertisingCharges || 0))
+      : financeComplete
+        ? [
+            basePeriodFinanceSummary.commission, basePeriodFinanceSummary.logistics, basePeriodFinanceSummary.storage,
+            basePeriodFinanceSummary.acceptance, basePeriodFinanceSummary.acquiring, basePeriodFinanceSummary.penalties,
+            basePeriodFinanceSummary.deductions,
+          ].reduce((total, value) => total + Number(value || 0), 0)
+        : null
+    const knownWbExpenseParts = ['commission','logistics','storage','acceptance','acquiring','penalties','deductions','subscriptions']
+      .map(key => ledgerAmount(key))
+      .filter(value => value != null)
+      .reduce((total, value) => total + Number(value || 0), 0)
+    const otherWbExpenses = wbExpensesExAdvertising == null
+      ? null
+      : Math.max(0, wbExpensesExAdvertising - knownWbExpenseParts)
+    const pnlCompensations = ledgerHasMovements
+      ? (financePartial && Number(ledgerSummary.compensations || 0) === 0 ? null : Number(ledgerSummary.compensations || 0))
+      : financeComplete
+        ? Number(basePeriodFinanceSummary.additionalPayment || 0)
+        : null
+    const pnlRevenue = basePeriodFinanceSummary.revenue == null ? null : Number(basePeriodFinanceSummary.revenue || 0)
+    const pnlCogs = basePeriodFinanceSummary.cogs == null ? null : Number(basePeriodFinanceSummary.cogs || 0)
+    const pnlFixed = basePeriodFinanceSummary.fixed == null ? 0 : Number(basePeriodFinanceSummary.fixed || 0)
+    const pnlTax = basePeriodFinanceSummary.tax == null ? 0 : Number(basePeriodFinanceSummary.tax || 0)
+    const pnlOperatingProfit = pnlRevenue != null && pnlCogs != null && wbExpensesExAdvertising != null && pnlAdvertising != null
+      ? pnlRevenue - pnlCogs - wbExpensesExAdvertising - pnlAdvertising - pnlFixed - pnlTax + Number(pnlCompensations || 0)
+      : null
+    const periodFinanceSummary = {
+      ...basePeriodFinanceSummary,
+      commission:ledgerAmount('commission'),
+      logistics:ledgerAmount('logistics'),
+      storage:ledgerAmount('storage'),
+      acceptance:ledgerAmount('acceptance'),
+      acquiring:ledgerAmount('acquiring'),
+      penalties:ledgerAmount('penalties'),
+      deductions:ledgerAmount('deductions'),
+      subscriptions:ledgerAmount('subscriptions'),
+      otherWbExpenses,
+      additionalPayment:pnlCompensations,
+      advertising:pnlAdvertising,
+      operatingProfit:pnlOperatingProfit,
+      margin:pnlOperatingProfit != null && pnlRevenue > 0 ? pnlOperatingProfit / pnlRevenue * 100 : null,
+    }
     const tabs = [
       ['overview','Обзор'],['all','Все операции'],['products','По товарам'],['fbs','FBS'],['fbo','FBO'],
       ['penalties','Удержания и штрафы'],['compensations','Компенсации'],['subscriptions','Подписки и Джем'],['promotionCharges','Списания рекламы'],['dynamics','Динамика'],['risks','Причины удержаний'],['reconciliation','Сверка с WB'],
@@ -1847,7 +1908,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
       {financeTab === 'overview' && <>
         <div className="finance-layout">
           <div className="settings-card"><h3><Calculator size={19}/> Резервные параметры и себестоимость</h3><p className="settings-hint">WB-расходы подставляются автоматически. Здесь остаются себестоимость, налог, постоянные расходы и fallback на случай недоступности отчёта.</p><div className="settings-grid"><label>Комиссия WB, %<input type="number" min="0" max="100" value={settingsDraft.commissionPercent ?? 0} onChange={e => updateSetting('commissionPercent',e.target.value)}/></label><label>Логистика за продажу, ₽<input type="number" min="0" value={settingsDraft.logisticsPerSale ?? 0} onChange={e => updateSetting('logisticsPerSale',e.target.value)}/></label><label>Реклама, ₽/мес.<input type="number" min="0" value={settingsDraft.advertisingMonthly ?? 0} onChange={e => updateSetting('advertisingMonthly',e.target.value)}/></label><label>Хранение, ₽/мес.<input type="number" min="0" value={settingsDraft.storageMonthly ?? 0} onChange={e => updateSetting('storageMonthly',e.target.value)}/></label><label>Постоянные расходы, ₽/мес.<input type="number" min="0" value={settingsDraft.fixedMonthly ?? 0} onChange={e => updateSetting('fixedMonthly',e.target.value)}/></label><label>Налог с выручки, %<input type="number" min="0" max="100" value={settingsDraft.taxPercent ?? 0} onChange={e => updateSetting('taxPercent',e.target.value)}/></label><label>Себестоимость по умолчанию, % цены<input type="number" min="0" max="100" value={settingsDraft.defaultCostPercent ?? 0} onChange={e => updateSetting('defaultCostPercent',e.target.value)}/></label><label>Целевая маржа, %<input type="number" min="0" max="90" value={settingsDraft.targetMarginPercent ?? 20} onChange={e => updateSetting('targetMarginPercent',e.target.value)}/></label></div><button className="primary-btn" disabled={savingSettings} onClick={saveSettings}>{savingSettings ? <RefreshCw className="spin" size={17}/> : <Save size={17}/>} Сохранить и пересчитать</button></div>
-          <div className="pnl-card"><h3>P&amp;L за выбранный период</h3>{[['Выручка',periodFinanceSummary.revenue],['Себестоимость',periodFinanceSummary.cogs],['Комиссия WB',periodFinanceSummary.commission],['Логистика',periodFinanceSummary.logistics],['Хранение',periodFinanceSummary.storage],['Платная приёмка',periodFinanceSummary.acceptance],['Эквайринг',periodFinanceSummary.acquiring],['Штрафы',periodFinanceSummary.penalties],['Удержания',periodFinanceSummary.deductions],['Корректировки / доплаты',periodFinanceSummary.additionalPayment],['Реклама',periodFinanceSummary.advertising],['Постоянные расходы',periodFinanceSummary.fixed],['Налог',periodFinanceSummary.tax]].map(([label,value]) => <div className="pnl-line" key={label}><span>{label}</span><strong>{formatMoney(value)}</strong></div>)}<div className={`pnl-line total ${periodFinanceSummary.operatingProfit != null && periodFinanceSummary.operatingProfit < 0 ? 'negative' : ''}`}><span>Операционная прибыль</span><strong>{formatMoney(periodFinanceSummary.operatingProfit)}</strong></div><div className="pnl-margin"><span>Операционная маржа</span><strong>{formatPercent(periodFinanceSummary.margin)}</strong></div><div className="finance-source-note"><ShieldCheck size={16}/><span>«К перечислению» не уменьшается повторно на компоненты отчёта. Отдельные отчёты хранения, приёмки и эквайринга используются для детализации без двойного счёта.</span></div></div>
+          <div className="pnl-card"><h3>P&amp;L за выбранный период</h3>{[['Выручка',periodFinanceSummary.revenue],['Себестоимость',periodFinanceSummary.cogs],['Комиссия WB',periodFinanceSummary.commission],['Логистика',periodFinanceSummary.logistics],['Хранение',periodFinanceSummary.storage],['Платная приёмка',periodFinanceSummary.acceptance],['Эквайринг',periodFinanceSummary.acquiring],['Штрафы',periodFinanceSummary.penalties],['Удержания',periodFinanceSummary.deductions],['Подписки / сервисы WB',periodFinanceSummary.subscriptions],['Прочие списания WB',periodFinanceSummary.otherWbExpenses],['Корректировки / доплаты',periodFinanceSummary.additionalPayment],['Реклама',periodFinanceSummary.advertising],['Постоянные расходы',periodFinanceSummary.fixed],['Налог',periodFinanceSummary.tax]].map(([label,value]) => <div className="pnl-line" key={label}><span>{label}</span><strong>{formatMoney(value)}</strong></div>)}<div className={`pnl-line total ${periodFinanceSummary.operatingProfit != null && periodFinanceSummary.operatingProfit < 0 ? 'negative' : ''}`}><span>Операционная прибыль</span><strong>{formatMoney(periodFinanceSummary.operatingProfit)}</strong></div><div className="pnl-margin"><span>Операционная маржа</span><strong>{formatPercent(periodFinanceSummary.margin)}</strong></div><div className="finance-source-note"><ShieldCheck size={16}/><span>WB-расходы в P&L берутся из финансового реестра за выбранный период. Неподтверждённый ноль не показывается; отдельные отчёты используются для детализации без двойного счёта.</span></div></div>
         </div>
         <div className="finance-breakdown-grid">{(ledger.groups || []).map(item => <div key={item.group}><span>{groupNames[item.group] || item.group}</span><strong>{formatMoney(item.expense || item.income)}</strong><small>{formatNumber(item.movements)} операций</small></div>)}</div>
         <div className="section-title-row"><div><span>Себестоимость</span><h2>По товарам</h2></div><button className="secondary-btn" onClick={saveSettings}><Save size={16}/> Сохранить</button></div><div className="data-table cost-table"><div className="data-row head cost-row"><span>Товар</span><span>Средняя цена</span><span>Себестоимость за единицу</span><span>Цена в ноль</span><span>Прибыль</span><span>Маржа</span></div>{visibleFinanceProducts.slice(0,100).map(p => { const costKey=String(p.key || p.nmID || p.vendorCode); const cost=settingsDraft.productCosts?.[costKey] ?? p.unitCost ?? 0; return <div className="data-row cost-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatMoney(p.averagePrice)}</span><span><input className="inline-cost" type="number" min="0" value={cost} onChange={e => updateProductCost(p,e.target.value)} /></span><span>{formatMoney(p.breakevenPrice)}</span><span className={p.profit != null && p.profit < 0 ? 'negative' : 'positive'}>{formatMoney(p.profit)}</span><span>{formatPercent(p.margin)}</span></div>})}</div>
