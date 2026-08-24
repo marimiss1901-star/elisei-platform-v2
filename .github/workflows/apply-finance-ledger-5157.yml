@@ -1,0 +1,34 @@
+name: Apply ELISEI 5.15.7 finance migration
+
+on:
+  push:
+    branches: [fix/finance-ledger-5157]
+    paths:
+      - '.github/scripts/patch-finance-ledger-5157.mjs'
+      - '.github/workflows/apply-finance-ledger-5157.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/finance-ledger-5157
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node .github/scripts/patch-finance-ledger-5157.mjs
+      - name: Commit source patch
+        run: |
+          if git diff --quiet; then
+            echo 'No source changes required.'
+            exit 0
+          fi
+          git config user.name 'ELISEI Automation'
+          git config user.email 'actions@users.noreply.github.com'
+          git add backend/src/wb/finance-ledger.js package.json backend/package.json backend/tests
+          git commit -m 'ELISEI 5.15.7: rebuild finance ledger with current WB schema'
+          git push origin HEAD:fix/finance-ledger-5157
