@@ -1,0 +1,34 @@
+name: Apply ELISEI 5.15.5 finance freshness repair
+
+on:
+  push:
+    branches: [fix/display-name-5155]
+    paths:
+      - '.github/scripts/patch-finance-freshness-5155.mjs'
+      - '.github/workflows/apply-finance-freshness-5155.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/display-name-5155
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node .github/scripts/patch-finance-freshness-5155.mjs
+      - name: Commit source patch
+        run: |
+          if git diff --quiet; then
+            echo 'No source changes required.'
+            exit 0
+          fi
+          git config user.name 'ELISEI Automation'
+          git config user.email 'actions@users.noreply.github.com'
+          git add backend/src/server.js backend/src/wb/daily-ready.js package.json backend/package.json backend/tests
+          git commit -m 'ELISEI 5.15.5: repair stale finance cursors'
+          git push origin HEAD:fix/display-name-5155
