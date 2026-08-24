@@ -8173,17 +8173,49 @@ async function scheduleDailyReadyStages() {
         await updateSyncState(row.id,stage,{status:'queued',nextAllowedAt,lastError:null,metadata})
       }
 
+      const repairedHeavyStages=new Set()
+      const financeCurrent=states.find(item=>item.stage==='finance') || null
+      const financePayload=canonical?.data?.finance && typeof canonical.data.finance==='object' ? canonical.data.finance : null
+      const financePeriod=financeCurrent?.metadata?.period || financePayload?.period || null
+      const financePeriodTo=dateKey(financePeriod?.dateTo || financePeriod?.to || financePeriod?.end)
+      const financeStatus=String(financeCurrent?.status || '')
+      const financeHardBlocked=new Set(['running','pending','missing_token','token_invalid','forbidden','subscription_required'])
+      const financeContinuationActive=new Set(['queued','rate_limited','retry_scheduled']).has(financeStatus)
+        && financePeriodTo && financePeriodTo>=targetDate
+      const financeStale=Boolean(financeCurrent)
+        && (!financePeriodTo || financePeriodTo<targetDate || financePayload?.complete!==true)
+      if(financeStale && !financeHardBlocked.has(financeStatus) && !financeContinuationActive){
+        const period=reportPeriod(30)
+        await updateSyncState(row.id,'finance',{
+          status:'queued',nextAllowedAt:new Date(now+2*60*1000).toISOString(),lastError:null,lastCount:0,taskId:null,
+          metadata:{
+            trigger:'finance_freshness_repair',dailyReadySlot:slot,dailyReadyDate:targetDate,
+            nightlyReady:true,nightlyReadyVersion:2,financeFreshnessRepair:true,
+            period,syncId:crypto.randomUUID(),rrdId:'0',pageNumber:0,persistedCount:0,
+          },
+        })
+        repairedHeavyStages.add('finance')
+        console.log('[ELISEI 5.15.5] Finance freshness repair queued:',{connectionId:row.id,previousPeriodTo:financePeriodTo,targetDate})
+      }
+
       const heavyPlan=dailyHeavyStagePlan({states,now,timeZone:dailyReadyTimezone})
+        .filter(stage=>!repairedHeavyStages.has(stage))
       const cabinetHash=[...String(row.id || '')].reduce((sum,char)=>((sum*31)+char.charCodeAt(0))>>>0,7)
       const cabinetSpreadSeconds=slot==='overnight' ? cabinetHash%(30*60) : cabinetHash%(5*60)
       for(const [heavyIndex,stage] of heavyPlan.entries()){
         const current=states.find(item=>item.stage===stage) || null
-        const metadata={
-          ...(current?.metadata || {}),
-          trigger:'nightly_ready',dailyReadySlot:slot,dailyReadyDate:targetDate,
-          nightlyReady:true,nightlyReadyVersion:1,
-        }
-        if(['finance','acquiring'].includes(stage)) metadata.period=reportPeriod(30)
+        const pagedFinance=['finance','acquiring'].includes(stage)
+        const metadata=pagedFinance
+          ? {
+              trigger:'nightly_ready',dailyReadySlot:slot,dailyReadyDate:targetDate,
+              nightlyReady:true,nightlyReadyVersion:2,
+              period:reportPeriod(30),syncId:crypto.randomUUID(),rrdId:'0',pageNumber:0,persistedCount:0,
+            }
+          : {
+              ...(current?.metadata || {}),
+              trigger:'nightly_ready',dailyReadySlot:slot,dailyReadyDate:targetDate,
+              nightlyReady:true,nightlyReadyVersion:2,
+            }
         const spreadSeconds=cabinetSpreadSeconds+heavyIndex*75
         const nextAllowedAt=new Date(now+spreadSeconds*1000).toISOString()
         await updateSyncState(row.id,stage,{status:'queued',nextAllowedAt,lastError:null,metadata})

@@ -6,8 +6,8 @@ const scheduler = fs.readFileSync(new URL('../src/wb/smart-scheduler.js', import
 const backendPackage = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 const frontendPackage = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
 
-assert.equal(frontendPackage.version, '5.15.4')
-assert.equal(backendPackage.version, '2.27.4')
+assert.equal(frontendPackage.version, '5.15.5')
+assert.equal(backendPackage.version, '2.27.5')
 assert.match(backendPackage.scripts.start, /callcheck-auth-preload\.mjs/)
 assert.match(backendPackage.scripts.start, /bootstrap-business-preload\.mjs/)
 

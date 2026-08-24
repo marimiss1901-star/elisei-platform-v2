@@ -7,8 +7,8 @@ const frontendPackage = JSON.parse(fs.readFileSync(new URL('../../package.json',
 const registerPage = fs.readFileSync(new URL('../../src/pages/RegisterPage.jsx', import.meta.url), 'utf8')
 const loginPage = fs.readFileSync(new URL('../../src/pages/LoginPage.jsx', import.meta.url), 'utf8')
 
-assert.equal(backendPackage.version, '2.27.4')
-assert.equal(frontendPackage.version, '5.15.4')
+assert.equal(backendPackage.version, '2.27.5')
+assert.equal(frontendPackage.version, '5.15.5')
 assert.match(backendPackage.scripts.start, /callcheck-auth-preload\.mjs/)
 assert.match(preload, /\/callcheck\/add/)
 assert.match(preload, /\/callcheck\/status/)
