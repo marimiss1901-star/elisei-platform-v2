@@ -682,6 +682,17 @@ async function initDatabase() {
   await ensureSnapshotSchema(pool)
   await ensureStreamSchema(pool)
   await ensureFinanceLedgerSchema(pool)
+  const ledgerBackfillConnections = await pool.query(`SELECT id FROM marketplace_connections WHERE marketplace='wildberries' AND status='connected' ORDER BY updated_at DESC LIMIT 100`)
+  for (const connection of ledgerBackfillConnections.rows) {
+    try {
+      const repaired = await backfillFinanceLedgerFromStreamItems(pool,{connectionId:connection.id,limitPerStream:100000})
+      if (repaired.processedStreams || repaired.movements) {
+        console.log('[ELISEI 5.15.6] Finance ledger backfill:',{connectionId:connection.id,...repaired})
+      }
+    } catch (error) {
+      console.warn('[ELISEI 5.15.6] Finance ledger backfill skipped:',connection.id,error.message)
+    }
+  }
   await ensureDailyReadySchema()
   await migrateLegacyWbTokens()
   await ensurePrimaryTokens()

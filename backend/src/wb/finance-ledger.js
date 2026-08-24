@@ -37,6 +37,8 @@ export function classifyFinanceSpecialOperation(row = {}) {
     text(row,['sellerOperName','seller_oper_name','supplier_oper_name']),
     text(row,['bonusTypeName','bonus_type_name']),
     text(row,['paymentProcessing','payment_processing']),
+    text(row,['serviceName','service_name']),
+    text(row,['name','title','subjectName','subject_name']),
   ].join(' ').toLowerCase()
   if (/(?:^|[^a-zа-яё])(джем|jam)(?:[^a-zа-яё]|$)/i.test(source)) {
     return { code:'jam_subscription', group:'subscriptions', name:'Подписка «Джем»', confirmed:true }
@@ -298,16 +300,28 @@ export async function persistFinanceLedgerBatch(db,{ connectionId,stream,rows,ke
 }
 
 export async function backfillFinanceLedgerFromStreamItems(db,{ connectionId,limitPerStream=100000 }) {
-  const countResult = await db.query('SELECT COUNT(*)::int AS count FROM wb_finance_ledger WHERE connection_id=$1',[connectionId])
-  if (Number(countResult.rows[0]?.count || 0) > 0) return { skipped:true,movements:Number(countResult.rows[0]?.count || 0) }
   const syncs = await db.query(`
-    SELECT DISTINCT ON (stream) stream,sync_id
+    SELECT DISTINCT ON (stream) stream,sync_id,updated_at AS source_updated_at
     FROM wb_stream_items
     WHERE connection_id=$1 AND stream=ANY($2::text[])
     ORDER BY stream,updated_at DESC
   `,[connectionId,STREAMS])
   let movements = 0
+  let processedStreams = 0
+  let skippedStreams = 0
   for (const sync of syncs.rows) {
+    const ledgerFreshness = await db.query(`
+      SELECT MAX(updated_at) AS ledger_updated_at
+      FROM wb_finance_ledger
+      WHERE connection_id=$1 AND source_stream=$2
+    `,[connectionId,sync.stream])
+    const ledgerUpdatedAt = ledgerFreshness.rows[0]?.ledger_updated_at ? new Date(ledgerFreshness.rows[0].ledger_updated_at).getTime() : 0
+    const sourceUpdatedAt = sync.source_updated_at ? new Date(sync.source_updated_at).getTime() : 0
+    if (ledgerUpdatedAt && sourceUpdatedAt && ledgerUpdatedAt >= sourceUpdatedAt) {
+      skippedStreams += 1
+      continue
+    }
+
     let afterKey = ''
     let seen = 0
     while (seen < limitPerStream) {
@@ -323,8 +337,9 @@ export async function backfillFinanceLedgerFromStreamItems(db,{ connectionId,lim
       afterKey = page.rows.at(-1).row_key
       if (page.rows.length < 1000) break
     }
+    processedStreams += 1
   }
-  return { skipped:false,movements }
+  return { skipped:processedStreams===0,movements,processedStreams,skippedStreams }
 }
 
 function addFilter(filters, params, sql, value) {
