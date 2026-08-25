@@ -1,10 +1,36 @@
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 const TOKEN_KEY = 'elisei_auth_token'
+const WB_CONNECTION_CACHE_KEY = 'elisei_wb_connection_v1'
+const BUSINESS_SETTINGS_CACHE_KEY = 'elisei_business_settings_v1'
+
+function readLocalJson(key, fallback = null) {
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? JSON.parse(raw) : fallback
+  } catch { return fallback }
+}
+
+function writeLocalJson(key, value) {
+  try {
+    if (value == null) localStorage.removeItem(key)
+    else localStorage.setItem(key, JSON.stringify(value))
+  } catch { /* browser cache is best-effort */ }
+}
+
+function clearSessionCaches() {
+  try {
+    localStorage.removeItem(WB_CONNECTION_CACHE_KEY)
+    localStorage.removeItem(BUSINESS_SETTINGS_CACHE_KEY)
+  } catch { /* ignore */ }
+}
 
 export const authStore = {
   getToken: () => localStorage.getItem(TOKEN_KEY) || '',
   setToken: (token) => token ? localStorage.setItem(TOKEN_KEY, token) : localStorage.removeItem(TOKEN_KEY),
-  clear: () => localStorage.removeItem(TOKEN_KEY),
+  clear: () => {
+    localStorage.removeItem(TOKEN_KEY)
+    clearSessionCaches()
+  },
 }
 
 async function request(path, options = {}) {
@@ -22,9 +48,13 @@ async function request(path, options = {}) {
     })
   } catch (error) {
     if (error?.name === 'AbortError' || error?.name === 'TimeoutError') {
-      throw new Error('Синхронизация превысила безопасное время ожидания. Повторите позже — повторно нажимать кнопку несколько раз не нужно.')
+      const timeoutError = new Error('Синхронизация превысила безопасное время ожидания. Повторите позже — повторно нажимать кнопку несколько раз не нужно.')
+      timeoutError.code = 'REQUEST_TIMEOUT'
+      throw timeoutError
     }
-    throw new Error(`Не удалось связаться с backend ELISEI (${API_BASE}). Проверьте, что сервис Render запущен и VITE_API_BASE_URL указан верно.`)
+    const networkError = new Error(`Не удалось связаться с backend ELISEI (${API_BASE}). Проверьте, что сервис Render запущен и VITE_API_BASE_URL указан верно.`)
+    networkError.code = 'BACKEND_UNAVAILABLE'
+    throw networkError
   }
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) {
@@ -35,6 +65,59 @@ async function request(path, options = {}) {
     throw error
   }
   return payload
+}
+
+function isTransientBackendError(error) {
+  if (!error) return false
+  if (error.status >= 500) return true
+  return ['DATABASE_RECONNECTING','REQUEST_TIMEOUT','BACKEND_UNAVAILABLE'].includes(String(error.code || ''))
+    || /база данных.*переподключ|database.*reconnect|connection terminated|recovery mode/i.test(String(error.message || ''))
+}
+
+async function currentWbConnection() {
+  try {
+    const result = await request('/api/wb/connection', { signal:AbortSignal.timeout(8000) })
+    if (result?.connected && result?.connectionId) writeLocalJson(WB_CONNECTION_CACHE_KEY, result)
+    else writeLocalJson(WB_CONNECTION_CACHE_KEY, null)
+    return result
+  } catch (error) {
+    if (error?.status === 401) throw error
+    const cached = readLocalJson(WB_CONNECTION_CACHE_KEY, null)
+    if (isTransientBackendError(error) && cached?.connected && cached?.connectionId) {
+      return {
+        ...cached,
+        connected:true,
+        transientFallback:true,
+        transientErrorCode:String(error.code || 'BACKEND_RECONNECTING'),
+      }
+    }
+    throw error
+  }
+}
+
+async function connectWb(token, label = '') {
+  const result = await request('/api/wb/connect', { method:'POST', body:JSON.stringify({ token, label }) })
+  if (result?.connected && result?.connectionId) writeLocalJson(WB_CONNECTION_CACHE_KEY, result)
+  return result
+}
+
+async function disconnectWb(connectionId) {
+  const result = await request('/api/wb/disconnect', { method:'POST', body:JSON.stringify({ connectionId }) })
+  writeLocalJson(WB_CONNECTION_CACHE_KEY, null)
+  return result
+}
+
+async function currentBusinessSettings() {
+  try {
+    const result = await request('/api/business/settings', { signal:AbortSignal.timeout(8000) })
+    if (result?.settings) writeLocalJson(BUSINESS_SETTINGS_CACHE_KEY, result.settings)
+    return result
+  } catch (error) {
+    if (error?.status === 401) throw error
+    if (!isTransientBackendError(error)) throw error
+    const cached = readLocalJson(BUSINESS_SETTINGS_CACHE_KEY, null)
+    return { settings:cached, transientFallback:true }
+  }
 }
 
 async function downloadFile(path) {
@@ -67,8 +150,8 @@ export const authApi = {
 }
 
 export const wbApi = {
-  current: () => request('/api/wb/connection'),
-  connect: (token, label = '') => request('/api/wb/connect', { method: 'POST', body: JSON.stringify({ token, label }) }),
+  current: () => currentWbConnection(),
+  connect: (token, label = '') => connectWb(token, label),
   status: (connectionId) => request(`/api/wb/status/${encodeURIComponent(connectionId)}`),
   live: (connectionId) => request(`/api/wb/live/${encodeURIComponent(connectionId)}`),
   updateLive: (connectionId, settings = {}) => request(`/api/wb/live/${encodeURIComponent(connectionId)}`, { method:'PUT',body:JSON.stringify(settings) }),
@@ -147,16 +230,19 @@ export const wbApi = {
   syncHistory: (connectionId) => request(`/api/wb/sync-history/${encodeURIComponent(connectionId)}`),
   removeToken: (tokenId) => request(`/api/wb/tokens/${encodeURIComponent(tokenId)}`, { method: 'DELETE' }),
   setPrimaryToken: (tokenId) => request(`/api/wb/tokens/${encodeURIComponent(tokenId)}/primary`, { method: 'POST' }),
-  disconnect: (connectionId) => request('/api/wb/disconnect', { method: 'POST', body: JSON.stringify({ connectionId }) }),
+  disconnect: (connectionId) => disconnectWb(connectionId),
   configured: Boolean(API_BASE),
   baseUrl: API_BASE,
 }
 
 export const businessApi = {
-  settings: () => request('/api/business/settings'),
-  saveSettings: (settings) => request('/api/business/settings', { method: 'PUT', body: JSON.stringify(settings) }),
+  settings: () => currentBusinessSettings(),
+  saveSettings: async (settings) => {
+    const result = await request('/api/business/settings', { method: 'PUT', body: JSON.stringify(settings) })
+    writeLocalJson(BUSINESS_SETTINGS_CACHE_KEY, result?.settings || settings)
+    return result
+  },
 }
-
 
 export const elApi = {
   status: () => request('/api/el/status'),
