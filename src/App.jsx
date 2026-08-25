@@ -6,6 +6,22 @@ import RegisterPage from './pages/RegisterPage'
 import DashboardPage from './pages/DashboardPage'
 import { authApi, authStore } from './lib/api'
 
+const AUTH_USER_CACHE_KEY = 'elisei_auth_user_v1'
+
+function readCachedUser() {
+  try {
+    const raw = localStorage.getItem(AUTH_USER_CACHE_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch { return null }
+}
+
+function cacheUser(user) {
+  try {
+    if (user) localStorage.setItem(AUTH_USER_CACHE_KEY, JSON.stringify(user))
+    else localStorage.removeItem(AUTH_USER_CACHE_KEY)
+  } catch { /* local cache is best-effort */ }
+}
+
 function ScrollToTop() {
   const { pathname } = useLocation()
   useEffect(() => { window.scrollTo({ top: 0, behavior: 'auto' }) }, [pathname])
@@ -14,8 +30,11 @@ function ScrollToTop() {
 
 function AppRoutes() {
   const navigate = useNavigate()
-  const [authState, setAuthState] = useState(() => authStore.getToken() ? 'checking' : 'guest')
-  const [user, setUser] = useState(null)
+  const hasToken = Boolean(authStore.getToken())
+  // 5.15.9: a slow Render/backend wake must never blank the whole workspace.
+  // A stored token opens the shell immediately; /auth/me verifies in background.
+  const [authState, setAuthState] = useState(() => hasToken ? 'authenticated' : 'guest')
+  const [user, setUser] = useState(() => hasToken ? readCachedUser() : null)
 
   useEffect(() => {
     if (!authStore.getToken()) return
@@ -24,45 +43,54 @@ function AppRoutes() {
     const verifySession = () => {
       authApi.me().then(({ user: currentUser }) => {
         if (cancelled) return
-        setUser(currentUser)
+        setUser(currentUser || null)
+        cacheUser(currentUser || null)
         setAuthState('authenticated')
       }).catch((error) => {
         if (cancelled) return
         if (error?.status === 401) {
           authStore.clear()
+          cacheUser(null)
+          setUser(null)
           setAuthState('guest')
+          navigate('/login', { replace:true })
           return
         }
-        setAuthState('checking')
-        retryTimer = setTimeout(verifySession, 3000)
+        // Temporary backend/network errors do not lock the UI. Verify again quietly.
+        retryTimer = setTimeout(verifySession, 5000)
       })
     }
     verifySession()
     return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer) }
-  }, [])
+  }, [navigate])
+
+  const applyUser = currentUser => {
+    setUser(currentUser || null)
+    cacheUser(currentUser || null)
+  }
 
   const finishAuth = ({ token, user: currentUser }) => {
     authStore.setToken(token)
-    setUser(currentUser)
+    applyUser(currentUser)
     setAuthState('authenticated')
     navigate('/app', { replace: true })
   }
 
   const logout = () => {
     authApi.logout()
+    cacheUser(null)
     setUser(null)
     setAuthState('guest')
     navigate('/', { replace: true })
   }
 
-  if (authState === 'checking') return <div className="app-loading">Загружаем рабочее пространство…</div>
   const isAuthenticated = authState === 'authenticated'
 
   return <><ScrollToTop/><Routes>
     <Route path="/" element={<LandingPage onNavigate={navigate} isAuthenticated={isAuthenticated} />} />
     <Route path="/login" element={isAuthenticated ? <Navigate to="/app" replace /> : <LoginPage onNavigate={navigate} onLogin={finishAuth} />} />
     <Route path="/register" element={isAuthenticated ? <Navigate to="/app" replace /> : <RegisterPage onNavigate={navigate} onRegister={finishAuth} />} />
-    <Route path="/app/*" element={isAuthenticated ? <DashboardPage onNavigate={navigate} onLogout={logout} user={user} onUserUpdate={setUser} /> : <Navigate to="/login" replace />} />
+    <Route path="/app/*" element={isAuthenticated ? <DashboardPage onNavigate={navigate} onLogout={logout} user={user} onUserUpdate={applyUser} /> : <Navigate to="/login" replace />} />
     <Route path="*" element={<Navigate to="/" replace />} />
   </Routes></>
 }
