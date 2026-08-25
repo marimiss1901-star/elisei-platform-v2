@@ -1,25 +1,27 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import {
-  defaultLiveSyncSettings,normalizeLiveSyncSettings,dueLiveStages,eventStages,safeEqualSecret,
+  LIVE_SYNC_STAGES,defaultLiveSyncSettings,normalizeLiveSyncSettings,dueLiveStages,eventStages,safeEqualSecret,
   effectiveLiveIntervalSeconds,liveCadenceWindow,
 } from '../src/wb/live-sync.js'
 
 const defaults=defaultLiveSyncSettings()
 assert.equal(defaults.enabled,true)
+assert.deepEqual(LIVE_SYNC_STAGES,['orders','sales','stocks','sellerStocks'])
 assert.equal(defaults.intervals.orders,1800)
 assert.equal(defaults.intervals.sales,1800)
 assert.equal(defaults.intervals.stocks,3600)
 assert.equal(defaults.intervals.sellerStocks,1800)
-assert.equal(defaults.intervals.advertising,1800)
-assert.equal(defaults.intervals.reviews,3600)
-assert.equal(defaults.intervals.questions,3600)
-assert.equal(defaults.intervals.chats,900)
+assert.equal(defaults.intervals.advertising,undefined,'advertising belongs to nightly ready, not seller-day polling')
+assert.equal(defaults.intervals.reviews,undefined,'reviews belong to nightly ready')
+assert.equal(defaults.intervals.questions,undefined,'questions belong to nightly ready')
+assert.equal(defaults.intervals.chats,undefined,'chats belong to nightly ready')
+assert.equal(defaults.intervals.products,undefined,'products belong to nightly ready')
 
 const normalized=normalizeLiveSyncSettings({enabled:true,intervals:{orders:1,chats:10}})
 assert.equal(normalized.enabled,true)
 assert.equal(normalized.intervals.orders,1800,'orders must not poll faster than WB source freshness')
-assert.equal(normalized.intervals.chats,300,'chat lane may be configured as low as 5 minutes')
+assert.equal(normalized.intervals.chats,undefined,'legacy chat cadence must not re-enable daytime polling')
 
 const active=Date.parse('2026-08-04T12:00:00Z') // 15:00 Moscow
 const overnight=Date.parse('2026-08-04T01:00:00Z') // 04:00 Moscow
@@ -27,26 +29,30 @@ assert.equal(liveCadenceWindow(active,'Europe/Moscow'),'active')
 assert.equal(liveCadenceWindow(overnight,'Europe/Moscow'),'overnight')
 assert.equal(effectiveLiveIntervalSeconds('orders',{settings:{},now:active}),1800)
 assert.equal(effectiveLiveIntervalSeconds('orders',{settings:{},now:overnight}),3600)
-assert.equal(effectiveLiveIntervalSeconds('advertising',{settings:{intervals:{advertising:3600}},now:active}),1800,'legacy 1h ad cadence is migrated to 30m effectively')
-assert.equal(effectiveLiveIntervalSeconds('chats',{settings:{intervals:{chats:3600}},now:active}),900,'legacy 1h chat cadence is migrated to 15m effectively')
-assert.equal(effectiveLiveIntervalSeconds('reviews',{settings:{webhooksEnabled:true},now:active}),7200,'webhook-covered streams use slower polling fallback')
 
 const due=dueLiveStages({settings:{enabled:true},states:[
   {stage:'orders',status:'success',last_success_at:'2026-08-04T11:20:00Z'},
   {stage:'sales',status:'success',last_success_at:'2026-08-04T11:45:00Z'},
   {stage:'stocks',status:'rate_limited',next_allowed_at:'2026-08-04T13:00:00Z'},
+  {stage:'advertising',status:'success',last_success_at:'2026-08-01T11:00:00Z'},
+  {stage:'reviews',status:'success',last_success_at:'2026-08-01T11:00:00Z'},
 ],now:active,timeZone:'Europe/Moscow'})
 assert.ok(due.includes('orders'))
 assert.ok(!due.includes('sales'))
 assert.ok(!due.includes('stocks'))
+assert.ok(!due.includes('advertising'),'advertising must never enter recurring seller-day polling')
+assert.ok(!due.includes('reviews'),'reviews must never enter recurring seller-day polling')
 
 const fair=dueLiveStages({settings:{enabled:true},states:[
   {stage:'orders',status:'success',last_success_at:'2026-08-04T10:00:00Z'},
   {stage:'sales',status:'success',last_success_at:'2026-08-04T11:00:00Z'},
-  {stage:'chats',status:'success',last_success_at:'2026-08-04T11:00:00Z'},
+  {stage:'sellerStocks',status:'success',last_success_at:'2026-08-04T09:00:00Z'},
 ],now:active,timeZone:'Europe/Moscow'})
-assert.equal(fair[0],'chats','most overdue fast CRM stream must not be starved by fixed stage order')
+assert.equal(fair[0],'sellerStocks','most overdue operational stream must not be starved by fixed stage order')
 
+// Webhooks remain event-driven exceptions; the recurring poller is what is split
+// into seller-day vs nightly lanes. Report-complete events may also resume a task
+// created during the night without opening a fresh periodic daytime scan.
 assert.deepEqual(eventStages({type:'card_changed'}),['products'])
 assert.deepEqual(eventStages({type:'feedback_updated',payload:{entityType:'question'}}),['questions'])
 assert.deepEqual(eventStages({type:'feedback_updated',payload:{}}),['reviews'])
@@ -80,4 +86,4 @@ for(const marker of [
 const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')
 for(const marker of ['Автоматическое обновление','ELISEI готовит кабинет до вашего входа','setupLiveWebhooks','updateLiveSync','Снимок за вчера']) assert.ok(dashboard.includes(marker),`Dashboard must contain ${marker}`)
 
-console.log('WB adaptive live sync, daily-ready and stock-history recovery tests passed')
+console.log('WB seller-day operational polling and nightly background policy tests passed')

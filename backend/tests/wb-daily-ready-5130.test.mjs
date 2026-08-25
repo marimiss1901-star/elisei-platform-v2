@@ -11,9 +11,9 @@ assert.equal(yesterdayDateKey(new Date('2026-08-19T08:00:00Z'),moscow),'2026-08-
 assert.equal(dailyReadySlot(new Date('2026-08-19T02:30:00Z'),moscow),'preopen') // 05:30 MSK
 assert.equal(dailyReadySlot(new Date('2026-08-19T04:45:00Z'),moscow),'morning-ready') // 07:45 MSK
 
-// 5.15.8: heavy work is eligible before opening time, not during the workday.
-// Secondary stale streams are now part of the same overnight lane and are
-// deliberately scheduled after the core finance stages.
+// Heavy work is eligible before opening time, not during the workday.
+// Non-operational streams now share the same overnight lane and are deliberately
+// scheduled after the core finance stages.
 const now=Date.parse('2026-08-19T02:00:00Z') // 05:00 MSK
 const states=[
   {stage:'finance',status:'success',last_success_at:new Date(now-21*3600000).toISOString()},
@@ -24,6 +24,7 @@ const states=[
 ]
 assert.deepEqual(dailyHeavyStagePlan({states,now,timeZone:moscow}),[
   'finance','paidStorage',
+  'products','advertising','reviews','questions','chats','financeReports','acquiringReports','jamSubscription',
   'measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention',
   'goodsReturns','tariffs','funnel','searchQueries','stockHistory',
 ])
@@ -59,7 +60,7 @@ assert.equal(readiness.ready,3)
 assert.equal(readiness.partial,1)
 assert.equal(readiness.operationalReady,true)
 
-// 5.13.1: persisted coverage is the source of truth for a closed day.
+// Persisted coverage is the source of truth for a closed day.
 // A newly queued refresh must not make yesterday's confirmed figures disappear.
 const queuedButPersisted=buildDailyMetricStates({
   core,date:'2026-08-18',
