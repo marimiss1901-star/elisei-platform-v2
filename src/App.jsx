@@ -7,6 +7,7 @@ import DashboardPage from './pages/DashboardPage'
 import { authApi, authStore } from './lib/api'
 
 const AUTH_USER_CACHE_KEY = 'elisei_auth_user_v1'
+const AUTH_VERIFY_TIMEOUT_MS = 8000
 
 function readCachedUser() {
   try {
@@ -20,6 +21,18 @@ function cacheUser(user) {
     if (user) localStorage.setItem(AUTH_USER_CACHE_KEY, JSON.stringify(user))
     else localStorage.removeItem(AUTH_USER_CACHE_KEY)
   } catch { /* local cache is best-effort */ }
+}
+
+function authMeWithTimeout() {
+  let timeoutId
+  const timeout = new Promise((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      const error = new Error('Проверка сессии временно недоступна')
+      error.code = 'AUTH_VERIFY_TIMEOUT'
+      reject(error)
+    }, AUTH_VERIFY_TIMEOUT_MS)
+  })
+  return Promise.race([authApi.me(), timeout]).finally(() => window.clearTimeout(timeoutId))
 }
 
 function ScrollToTop() {
@@ -41,7 +54,7 @@ function AppRoutes() {
     let cancelled = false
     let retryTimer = null
     const verifySession = () => {
-      authApi.me().then(({ user: currentUser }) => {
+      authMeWithTimeout().then(({ user: currentUser }) => {
         if (cancelled) return
         setUser(currentUser || null)
         cacheUser(currentUser || null)
