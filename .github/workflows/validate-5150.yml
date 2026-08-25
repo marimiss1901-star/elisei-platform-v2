@@ -1,10 +1,11 @@
-name: Validate ELISEI 5.15.0
+name: Validate ELISEI main
 
 on:
   push:
-    branches: [feat/group-parallel-scheduler-5150]
+    branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
