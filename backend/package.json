@@ -1,12 +1,15 @@
 {
   "name": "elisei-wb-backend",
-  "version": "2.27.8",
+  "version": "2.27.9",
   "private": true,
   "type": "module",
   "scripts": {
+    "prestart": "node apply-period-coverage-fix.mjs",
     "start": "node --import ./src/callcheck-auth-preload.mjs --import ./src/bootstrap-business-preload.mjs --import ./src/db-resilience-preload.mjs src/server.js",
+    "predev": "node apply-period-coverage-fix.mjs",
     "dev": "node --watch --import ./src/callcheck-auth-preload.mjs --import ./src/bootstrap-business-preload.mjs --import ./src/db-resilience-preload.mjs src/server.js",
     "test:stocks": "node tests/wb-integration-core.test.mjs",
+    "pretest": "node apply-period-coverage-fix.mjs",
     "test": "node tests/run-all.mjs"
   },
   "dependencies": {
