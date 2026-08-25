@@ -5,8 +5,8 @@ const preload = fs.readFileSync(new URL('../src/db-resilience-preload.mjs', impo
 const backendPackage = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 const frontendPackage = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
 
-assert.equal(frontendPackage.version, '5.15.7')
-assert.equal(backendPackage.version, '2.27.7')
+assert.equal(frontendPackage.version, '5.15.8')
+assert.equal(backendPackage.version, '2.27.8')
 assert.match(backendPackage.scripts.start, /db-resilience-preload\.mjs/)
 assert.match(preload, /Express 4 does not automatically forward rejected async route promises/)
 assert.match(preload, /DATABASE_RECONNECTING/)

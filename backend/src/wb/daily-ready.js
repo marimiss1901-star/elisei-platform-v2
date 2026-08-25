@@ -1,6 +1,6 @@
 const DAY_MS = 86400000
 
-export const DAILY_READY_VERSION = 6
+export const DAILY_READY_VERSION = 7
 export const DEFAULT_DAILY_READY_TIMEZONE = 'Europe/Moscow'
 
 export const AUTOMATIC_REFRESH_INTERVALS_SECONDS = Object.freeze({
@@ -30,6 +30,20 @@ export const DAILY_READY_HEAVY_INTERVALS_SECONDS = Object.freeze({
   paidStorage: 24 * 60 * 60,
   acceptance: 24 * 60 * 60,
   documents: 24 * 60 * 60,
+
+  // Secondary nightly layer. These reports are valuable for morning analytics
+  // but do not need to compete with live orders/sales during the seller day.
+  // Finance remains first in object order, so P&L readiness is prioritized.
+  measurementPenalties: 24 * 60 * 60,
+  deductionsReport: 24 * 60 * 60,
+  warehouseMeasurements: 24 * 60 * 60,
+  antifraudRetention: 24 * 60 * 60,
+  labelingRetention: 24 * 60 * 60,
+  goodsReturns: 24 * 60 * 60,
+  tariffs: 24 * 60 * 60,
+  funnel: 24 * 60 * 60,
+  searchQueries: 24 * 60 * 60,
+  stockHistory: 24 * 60 * 60,
 })
 
 const formatterCache = new Map()
