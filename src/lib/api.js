@@ -2,6 +2,9 @@ const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 const TOKEN_KEY = 'elisei_auth_token'
 const WB_CONNECTION_CACHE_KEY = 'elisei_wb_connection_v1'
 const BUSINESS_SETTINGS_CACHE_KEY = 'elisei_business_settings_v1'
+const READ_CACHE_PREFIX = 'elisei_read_cache_v1:'
+const READ_CACHE_LIMIT = 18
+const DEFAULT_READ_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
 function readLocalJson(key, fallback = null) {
   try {
@@ -17,10 +20,53 @@ function writeLocalJson(key, value) {
   } catch { /* browser cache is best-effort */ }
 }
 
+function pruneReadCache() {
+  try {
+    const entries = []
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index)
+      if (!key?.startsWith(READ_CACHE_PREFIX)) continue
+      const value = readLocalJson(key, null)
+      entries.push({ key, savedAt:Number(value?.savedAt || 0) })
+    }
+    entries.sort((a,b) => b.savedAt-a.savedAt)
+    for (const entry of entries.slice(READ_CACHE_LIMIT)) localStorage.removeItem(entry.key)
+  } catch { /* ignore storage quota/browser restrictions */ }
+}
+
+function writeReadCache(key, payload) {
+  if (!key || payload == null) return
+  try {
+    localStorage.setItem(`${READ_CACHE_PREFIX}${key}`, JSON.stringify({ savedAt:Date.now(), payload }))
+    pruneReadCache()
+  } catch { /* cache is best-effort and must never break API calls */ }
+}
+
+function readReadCache(key, maxAgeMs = DEFAULT_READ_CACHE_MAX_AGE_MS) {
+  try {
+    const cached = readLocalJson(`${READ_CACHE_PREFIX}${key}`, null)
+    const savedAt = Number(cached?.savedAt || 0)
+    if (!cached?.payload || !savedAt || Date.now()-savedAt > maxAgeMs) return null
+    return cached
+  } catch { return null }
+}
+
+function clearReadCaches() {
+  try {
+    const keys = []
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index)
+      if (key?.startsWith(READ_CACHE_PREFIX)) keys.push(key)
+    }
+    keys.forEach(key => localStorage.removeItem(key))
+  } catch { /* ignore */ }
+}
+
 function clearSessionCaches() {
   try {
     localStorage.removeItem(WB_CONNECTION_CACHE_KEY)
     localStorage.removeItem(BUSINESS_SETTINGS_CACHE_KEY)
+    clearReadCaches()
   } catch { /* ignore */ }
 }
 
@@ -36,10 +82,13 @@ export const authStore = {
 async function request(path, options = {}) {
   if (!API_BASE) throw new Error('Backend не настроен: добавьте VITE_API_BASE_URL')
   const token = authStore.getToken()
+  const method = String(options.method || 'GET').toUpperCase()
+  const signal = options.signal || (method === 'GET' ? AbortSignal.timeout(15000) : undefined)
   let response
   try {
     response = await fetch(`${API_BASE}${path}`, {
       ...options,
+      ...(signal ? { signal } : {}),
       headers: {
         'Content-Type': 'application/json',
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -48,11 +97,11 @@ async function request(path, options = {}) {
     })
   } catch (error) {
     if (error?.name === 'AbortError' || error?.name === 'TimeoutError') {
-      const timeoutError = new Error('Синхронизация превысила безопасное время ожидания. Повторите позже — повторно нажимать кнопку несколько раз не нужно.')
+      const timeoutError = new Error('Backend отвечает дольше обычного. ELISEI сохранит последние подтверждённые данные и повторит чтение позже.')
       timeoutError.code = 'REQUEST_TIMEOUT'
       throw timeoutError
     }
-    const networkError = new Error(`Не удалось связаться с backend ELISEI (${API_BASE}). Проверьте, что сервис Render запущен и VITE_API_BASE_URL указан верно.`)
+    const networkError = new Error(`Не удалось связаться с backend ELISEI (${API_BASE}). Последние подтверждённые данные не удаляются.`)
     networkError.code = 'BACKEND_UNAVAILABLE'
     throw networkError
   }
@@ -72,6 +121,24 @@ function isTransientBackendError(error) {
   if (error.status >= 500) return true
   return ['DATABASE_RECONNECTING','REQUEST_TIMEOUT','BACKEND_UNAVAILABLE'].includes(String(error.code || ''))
     || /база данных.*переподключ|database.*reconnect|connection terminated|recovery mode/i.test(String(error.message || ''))
+}
+
+async function cachedRead(cacheKey, path, options = {}, maxAgeMs = DEFAULT_READ_CACHE_MAX_AGE_MS) {
+  try {
+    const result = await request(path, options)
+    writeReadCache(cacheKey, result)
+    return result
+  } catch (error) {
+    if (error?.status === 401 || !isTransientBackendError(error)) throw error
+    const cached = readReadCache(cacheKey, maxAgeMs)
+    if (!cached?.payload) throw error
+    return {
+      ...cached.payload,
+      transientFallback:true,
+      transientCachedAt:new Date(cached.savedAt).toISOString(),
+      transientErrorCode:String(error.code || 'BACKEND_RECONNECTING'),
+    }
+  }
 }
 
 async function currentWbConnection() {
@@ -104,6 +171,7 @@ async function connectWb(token, label = '') {
 async function disconnectWb(connectionId) {
   const result = await request('/api/wb/disconnect', { method:'POST', body:JSON.stringify({ connectionId }) })
   writeLocalJson(WB_CONNECTION_CACHE_KEY, null)
+  clearReadCaches()
   return result
 }
 
@@ -136,6 +204,15 @@ async function downloadFile(path) {
   return { blob:await response.blob(),filename }
 }
 
+const querySuffix = params => {
+  const query = new URLSearchParams()
+  for (const [key,value] of Object.entries(params || {})) {
+    if (value === undefined || value === null || value === '' || value === 'all') continue
+    query.set(key,String(value))
+  }
+  return query.toString() ? `?${query.toString()}` : ''
+}
+
 export const authApi = {
   register: (data) => request('/api/auth/register', { method: 'POST', body: JSON.stringify(data) }),
   requestRegisterPhoneCode: (data) => request('/api/auth/register/phone/request', { method: 'POST', body: JSON.stringify(data) }),
@@ -166,18 +243,19 @@ export const wbApi = {
     }),
     signal: AbortSignal.timeout(110000),
   }),
-  dashboard: (connectionId) => request(`/api/wb/dashboard/${encodeURIComponent(connectionId)}`),
+  dashboard: (connectionId) => cachedRead(`dashboard:${connectionId}`, `/api/wb/dashboard/${encodeURIComponent(connectionId)}`),
   dailyReady: (connectionId, date = '') => {
     const query = date ? `?date=${encodeURIComponent(String(date).slice(0,10))}` : ''
-    return request(`/api/wb/daily-ready/${encodeURIComponent(connectionId)}${query}`)
+    return cachedRead(`daily:${connectionId}:${date || 'latest'}`, `/api/wb/daily-ready/${encodeURIComponent(connectionId)}${query}`, {}, 3 * 24 * 60 * 60 * 1000)
   },
-  products: (connectionId) => request(`/api/wb/products/${encodeURIComponent(connectionId)}`),
+  products: (connectionId) => cachedRead(`products:${connectionId}`, `/api/wb/products/${encodeURIComponent(connectionId)}`),
   core: (connectionId, params = {}) => {
-    const query = new URLSearchParams()
-    if (params?.from) query.set('from', String(params.from).slice(0,10))
-    if (params?.to) query.set('to', String(params.to).slice(0,10))
-    const suffix = query.toString() ? `?${query.toString()}` : ''
-    return request(`/api/wb/core/${encodeURIComponent(connectionId)}${suffix}`)
+    const clean = {
+      ...(params?.from ? { from:String(params.from).slice(0,10) } : {}),
+      ...(params?.to ? { to:String(params.to).slice(0,10) } : {}),
+    }
+    const suffix = querySuffix(clean)
+    return cachedRead(`core:${connectionId}:${clean.from || 'all'}:${clean.to || 'all'}`, `/api/wb/core/${encodeURIComponent(connectionId)}${suffix}`)
   },
   product360: (connectionId, productKey, params = {}) => {
     const query = new URLSearchParams({ productKey:String(productKey || '') })
@@ -188,28 +266,24 @@ export const wbApi = {
     return request(`/api/wb/product-360/${encodeURIComponent(connectionId)}?${query.toString()}`, { signal:AbortSignal.timeout(timeoutMs) })
   },
   advertising: (connectionId, params = {}) => {
-    const query = new URLSearchParams()
-    if (params?.from) query.set('from',String(params.from).slice(0,10))
-    if (params?.to) query.set('to',String(params.to).slice(0,10))
-    const suffix = query.toString() ? `?${query.toString()}` : ''
-    return request(`/api/wb/advertising/${encodeURIComponent(connectionId)}${suffix}`)
+    const clean = {
+      ...(params?.from ? { from:String(params.from).slice(0,10) } : {}),
+      ...(params?.to ? { to:String(params.to).slice(0,10) } : {}),
+    }
+    const suffix = querySuffix(clean)
+    return cachedRead(`advertising:${connectionId}:${clean.from || 'all'}:${clean.to || 'all'}`, `/api/wb/advertising/${encodeURIComponent(connectionId)}${suffix}`)
   },
   diagnostics: (connectionId) => request(`/api/wb/diagnostics/${encodeURIComponent(connectionId)}`),
   dataQuality: (connectionId, params = {}) => {
-    const query = new URLSearchParams()
-    if (params?.from) query.set('from',String(params.from).slice(0,10))
-    if (params?.to) query.set('to',String(params.to).slice(0,10))
-    const suffix = query.toString() ? `?${query.toString()}` : ''
-    return request(`/api/wb/data-quality/${encodeURIComponent(connectionId)}${suffix}`)
+    const clean = {
+      ...(params?.from ? { from:String(params.from).slice(0,10) } : {}),
+      ...(params?.to ? { to:String(params.to).slice(0,10) } : {}),
+    }
+    return request(`/api/wb/data-quality/${encodeURIComponent(connectionId)}${querySuffix(clean)}`)
   },
   financeLedger: (connectionId, params = {}) => {
-    const query = new URLSearchParams()
-    for (const [key,value] of Object.entries(params || {})) {
-      if (value === undefined || value === null || value === '' || value === 'all') continue
-      query.set(key,String(value))
-    }
-    const suffix = query.toString() ? `?${query.toString()}` : ''
-    return request(`/api/wb/finance-ledger/${encodeURIComponent(connectionId)}${suffix}`)
+    const suffix = querySuffix(params)
+    return cachedRead(`finance:${connectionId}:${suffix || 'overview'}`, `/api/wb/finance-ledger/${encodeURIComponent(connectionId)}${suffix}`)
   },
   downloadDocument: async (connectionId, serviceName, extension) => {
     const cleanExtension=String(extension || '').replace(/^\./,'')
@@ -227,7 +301,7 @@ export const wbApi = {
     return request(`/api/wb/extended/${encodeURIComponent(stream)}?${query.toString()}`)
   },
   repairStocks: (connectionId, taskId = '') => request(`/api/wb/stocks/${encodeURIComponent(connectionId)}/repair`, { method: 'POST', body: JSON.stringify({ ...(taskId ? { taskId } : {}) }), signal: AbortSignal.timeout(75000) }),
-  syncHistory: (connectionId) => request(`/api/wb/sync-history/${encodeURIComponent(connectionId)}`),
+  syncHistory: (connectionId) => cachedRead(`sync-history:${connectionId}`, `/api/wb/sync-history/${encodeURIComponent(connectionId)}`, {}, 3 * 24 * 60 * 60 * 1000),
   removeToken: (tokenId) => request(`/api/wb/tokens/${encodeURIComponent(tokenId)}`, { method: 'DELETE' }),
   setPrimaryToken: (tokenId) => request(`/api/wb/tokens/${encodeURIComponent(tokenId)}/primary`, { method: 'POST' }),
   disconnect: (connectionId) => disconnectWb(connectionId),
