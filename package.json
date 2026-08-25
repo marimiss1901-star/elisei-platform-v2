@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node apply-daily-ready-fallback.mjs",
     "build": "vite build",
     "preview": "vite preview"
   },
