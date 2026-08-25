@@ -32,6 +32,8 @@ assert.doesNotMatch(register, /Подтвердить телефон кодом 
 assert.match(dashboard, /Безопасность аккаунта/)
 assert.match(dashboard, /Сменить телефон/)
 assert.match(dashboard, /confirmPhoneChange/)
-assert.match(app, /onUserUpdate=\{setUser\}/)
+// 5.15.9 wraps setUser so profile changes are also cached for instant shell reloads.
+assert.match(app, /onUserUpdate=\{applyUser\}/)
+assert.match(app, /const applyUser = currentUser =>/)
 
 console.log('auth-phone-verification-5137: legacy SMS security flow preserved; registration uses callcheck')

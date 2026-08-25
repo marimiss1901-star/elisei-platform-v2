@@ -5,7 +5,7 @@ const preload = fs.readFileSync(new URL('../src/db-resilience-preload.mjs', impo
 const backendPackage = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 const frontendPackage = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
 
-assert.equal(frontendPackage.version, '5.15.8')
+assert.equal(frontendPackage.version, '5.15.9')
 assert.equal(backendPackage.version, '2.27.8')
 assert.match(backendPackage.scripts.start, /db-resilience-preload\.mjs/)
 assert.match(preload, /Express 4 does not automatically forward rejected async route promises/)
@@ -16,4 +16,4 @@ assert.match(preload, /database system is in recovery mode/i)
 assert.match(preload, /result\.catch\(error => handleRejectedRoute/)
 assert.match(preload, /return next\(error\)/)
 
-console.log('ELISEI 5.15.4 DB reconnect resilience regression: OK')
+console.log('ELISEI 5.15.9 DB reconnect resilience regression: OK')
