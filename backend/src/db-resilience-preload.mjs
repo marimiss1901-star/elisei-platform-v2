@@ -12,7 +12,7 @@ function transientDatabaseError(error) {
   const code = String(error?.code || '').trim().toUpperCase()
   if (['57P01','57P02','57P03','08000','08003','08006','08001','08004','08P01','ECONNRESET','ECONNREFUSED','ETIMEDOUT'].includes(code)) return true
   const message = String(error?.message || error || '')
-  return /(?:connection terminated unexpectedly|server closed the connection unexpectedly|database system is in recovery mode|database system is not yet accepting connections|terminating connection due to administrator command|connection reset|econnreset|connection refused|econnrefused|connection timeout|etimedout)/i.test(message)
+  return /(?:connection terminated unexpectedly|server closed the connection unexpectedly|database system is in recovery mode|database system is not yet accepting connections|terminating connection due to administrator command|connection reset|econnreset|connection refused|econnrefused|connection timeout|timeout exceeded when trying to connect|timeout acquiring (?:a )?client|etimedout)/i.test(message)
 }
 
 function handleRejectedRoute(error, req, res, next) {
