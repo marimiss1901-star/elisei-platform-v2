@@ -4,7 +4,7 @@ import {
   DAILY_READY_VERSION, AUTOMATIC_REFRESH_INTERVALS_SECONDS, dailyHeavyStagePlan, dailyReadySlot,
 } from '../src/wb/daily-ready.js'
 
-assert.equal(DAILY_READY_VERSION,6)
+assert.equal(DAILY_READY_VERSION,7)
 assert.equal(AUTOMATIC_REFRESH_INTERVALS_SECONDS.orders,30*60)
 assert.equal(AUTOMATIC_REFRESH_INTERVALS_SECONDS.sales,30*60)
 assert.equal(AUTOMATIC_REFRESH_INTERVALS_SECONDS.sellerStocks,30*60)

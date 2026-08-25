@@ -11,7 +11,9 @@ assert.equal(yesterdayDateKey(new Date('2026-08-19T08:00:00Z'),moscow),'2026-08-
 assert.equal(dailyReadySlot(new Date('2026-08-19T02:30:00Z'),moscow),'preopen') // 05:30 MSK
 assert.equal(dailyReadySlot(new Date('2026-08-19T04:45:00Z'),moscow),'morning-ready') // 07:45 MSK
 
-// 5.15.3: heavy work is eligible before opening time, not during the workday.
+// 5.15.8: heavy work is eligible before opening time, not during the workday.
+// Secondary stale streams are now part of the same overnight lane and are
+// deliberately scheduled after the core finance stages.
 const now=Date.parse('2026-08-19T02:00:00Z') // 05:00 MSK
 const states=[
   {stage:'finance',status:'success',last_success_at:new Date(now-21*3600000).toISOString()},
@@ -20,7 +22,11 @@ const states=[
   {stage:'acquiring',status:'success',last_success_at:new Date(now-2*3600000).toISOString()},
   {stage:'documents',status:'success',last_success_at:new Date(now-2*3600000).toISOString()},
 ]
-assert.deepEqual(dailyHeavyStagePlan({states,now,timeZone:moscow}),['finance','paidStorage'])
+assert.deepEqual(dailyHeavyStagePlan({states,now,timeZone:moscow}),[
+  'finance','paidStorage',
+  'measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention',
+  'goodsReturns','tariffs','funnel','searchQueries','stockHistory',
+])
 assert.deepEqual(dailyHeavyStagePlan({states,now:Date.parse('2026-08-19T12:00:00Z'),timeZone:moscow}),[])
 
 const core={
