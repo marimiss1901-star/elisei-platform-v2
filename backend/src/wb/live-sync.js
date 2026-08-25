@@ -1,31 +1,19 @@
 const DEFAULT_TIME_ZONE = 'Europe/Moscow'
 
+// Seller-day automatic lane: only data that can change an operational decision
+// during the working day. Everything else is refreshed by Daily Ready overnight.
 const STAGE_DEFAULTS = Object.freeze({
-  // ELISEI follows the freshness of the underlying WB source instead of polling
-  // every stream equally often. Orders/sales do not need sub-30-minute polling;
-  // chats need a noticeably faster CRM lane; products are event-first + fallback.
   orders: 1800,
   sales: 1800,
   stocks: 3600,
   sellerStocks: 1800,
-  products: 21600,
-  advertising: 1800,
-  reviews: 3600,
-  questions: 3600,
-  chats: 900,
 })
 
 const MIN_INTERVALS = Object.freeze({
-  // Guardrails prevent a cabinet setting from polling faster than is useful.
   orders: 1800,
   sales: 1800,
   stocks: 1800,
   sellerStocks: 1800,
-  products: 3600,
-  advertising: 1800,
-  reviews: 3600,
-  questions: 3600,
-  chats: 300,
 })
 
 const OVERNIGHT_MULTIPLIERS = Object.freeze({
@@ -33,29 +21,15 @@ const OVERNIGHT_MULTIPLIERS = Object.freeze({
   sales: 2,
   stocks: 2,
   sellerStocks: 2,
-  products: 2,
-  advertising: 2,
-  reviews: 3,
-  questions: 3,
-  chats: 2,
 })
 
-const WEBHOOK_FALLBACK_MULTIPLIERS = Object.freeze({
-  products: 2,
-  reviews: 2,
-  questions: 2,
-})
+const WEBHOOK_FALLBACK_MULTIPLIERS = Object.freeze({})
 
 const LIVE_PRIORITY = Object.freeze({
-  chats: 5,
   orders: 10,
   sales: 20,
   sellerStocks: 30,
   stocks: 40,
-  advertising: 50,
-  reviews: 60,
-  questions: 70,
-  products: 90,
 })
 
 export const LIVE_SYNC_STAGES = Object.freeze(Object.keys(STAGE_DEFAULTS))
@@ -111,9 +85,6 @@ export function effectiveLiveIntervalSeconds(stage,{ settings = {}, now = Date.n
   const normalized = normalizeLiveSyncSettings(settings)
   const name = String(stage || '')
   const configured = Number(normalized.intervals[name] || STAGE_DEFAULTS[name] || 3600)
-  // Existing cabinets may still store the older 5.13 cadence in settings.
-  // The automatic 5.15.1 policy is authoritative, so legacy slower values are
-  // treated as a ceiling; we never poll orders/sales faster than their WB source.
   const base = Math.min(configured,Number(STAGE_DEFAULTS[name] || configured))
   let multiplier = liveCadenceWindow(now,timeZone) === 'overnight'
     ? Number(OVERNIGHT_MULTIPLIERS[name] || 1)
@@ -140,9 +111,6 @@ export function dueLiveStages({ settings = {}, states = [], now = Date.now(), ti
     const intervalSeconds = effectiveLiveIntervalSeconds(stage,{settings:normalized,now,timeZone})
     const intervalMs = intervalSeconds*1000
     if (!lastAt || now-lastAt >= intervalMs) {
-      // Bootstrap owns never-run streams for a new shop. In the recurring live
-      // queue a never-run stream is only one interval overdue, so a genuinely
-      // stale operational/CRM stream cannot be starved by missing background data.
       const elapsed = lastAt ? Math.max(0,now-lastAt) : intervalMs
       const overdueRatio = elapsed/intervalMs
       due.push({stage,overdueRatio,priority:Number(LIVE_PRIORITY[stage] || 100)})
@@ -166,8 +134,6 @@ export function eventStages(event = {}) {
     const entity = payloadItems.map(item=>String(item?.entityType || item?.type || item?.kind || '')).join(' ').toLowerCase()
     if (entity.includes('question')) return ['questions']
     if (entity.includes('feedback') || entity.includes('review')) return ['reviews']
-    // Текущий официальный feedback_updated относится к отзывам; questions
-    // оставляем как совместимый fallback для будущего расширения payload.
     return ['reviews']
   }
   if (type === 'report_generation_complete') {
@@ -175,8 +141,6 @@ export function eventStages(event = {}) {
     if (reportType.includes('STOCK_HISTORY')) return ['stockHistory']
     if (reportType.includes('SEARCH_QUER')) return ['searchQueries']
     if (reportType.includes('FUNNEL') || reportType.includes('DETAIL_HISTORY') || reportType.includes('GROUPED_HISTORY')) return ['funnel']
-    // Если WB не передал тип, receiver только будит processors уже созданных
-    // заданий и не ставит новый отчёт в очередь.
     return []
   }
   return []
