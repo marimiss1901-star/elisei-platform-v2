@@ -4,12 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "prestart": "node apply-period-coverage-fix.mjs",
+    "prestart": "node apply-period-coverage-fix.mjs && node apply-pool-resilience-fix.mjs",
     "start": "node --import ./src/callcheck-auth-preload.mjs --import ./src/bootstrap-business-preload.mjs --import ./src/db-resilience-preload.mjs src/server.js",
-    "predev": "node apply-period-coverage-fix.mjs",
+    "predev": "node apply-period-coverage-fix.mjs && node apply-pool-resilience-fix.mjs",
     "dev": "node --watch --import ./src/callcheck-auth-preload.mjs --import ./src/bootstrap-business-preload.mjs --import ./src/db-resilience-preload.mjs src/server.js",
     "test:stocks": "node tests/wb-integration-core.test.mjs",
-    "pretest": "node apply-period-coverage-fix.mjs",
+    "pretest": "node apply-period-coverage-fix.mjs && node apply-pool-resilience-fix.mjs",
     "test": "node tests/run-all.mjs"
   },
   "dependencies": {
