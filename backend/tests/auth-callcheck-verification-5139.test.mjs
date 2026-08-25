@@ -8,7 +8,7 @@ const registerPage = fs.readFileSync(new URL('../../src/pages/RegisterPage.jsx',
 const loginPage = fs.readFileSync(new URL('../../src/pages/LoginPage.jsx', import.meta.url), 'utf8')
 
 assert.equal(backendPackage.version, '2.27.8')
-assert.equal(frontendPackage.version, '5.15.8')
+assert.equal(frontendPackage.version, '5.15.9')
 assert.match(backendPackage.scripts.start, /callcheck-auth-preload\.mjs/)
 assert.match(preload, /\/callcheck\/add/)
 assert.match(preload, /\/callcheck\/status/)
@@ -21,4 +21,4 @@ assert.match(registerPage, /Я позвонила — проверить/)
 assert.doesNotMatch(loginPage, /Последние 4 цифры входящего номера/)
 assert.doesNotMatch(registerPage, /Последние 4 цифры входящего номера/)
 
-console.log('ELISEI 5.15.4 preserves user-initiated callcheck regression: OK')
+console.log('ELISEI 5.15.9 preserves user-initiated callcheck regression: OK')
