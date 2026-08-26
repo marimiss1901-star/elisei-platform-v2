@@ -31,6 +31,14 @@ for(const marker of [
 ]) assert.ok(server.includes(marker),`server must contain ${marker}`)
 
 assert.ok(!server.includes('loadCurrentSellerStocks'),'FBS must keep the Marketplace API reader and Marketplace token scope')
-assert.ok(!server.includes("stocks: { label: 'Остатки FBO'"),'legacy FBO label must not be exposed for current WB stock')
+assert.ok(!server.includes("stocks: { label: 'Остатки FBO'"),'legacy FBO backend label must not be exposed')
+
+const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')
+assert.ok(dashboard.includes("title:'Склад WB'"),'connections UI must call consolidated stock Склад WB')
+assert.ok(dashboard.includes("['stocks','Склад WB']"),'sync UI must call consolidated stock Склад WB')
+assert.ok(!dashboard.includes('Остатки FBO'),'frontend must not expose the obsolete FBO stock label')
+
+const frontendPackage=fs.readFileSync(new URL('../../package.json',import.meta.url),'utf8')
+assert.ok(frontendPackage.includes('apply-wb-stock-labels.mjs'),'frontend build must apply WB stock terminology patch')
 
 console.log('WB current stocks 2026 regression passed')
