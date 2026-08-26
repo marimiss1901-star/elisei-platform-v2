@@ -27,11 +27,13 @@ const blocked=dueLiveStages({
   states:[
     {stage:'orders',status:'rate_limited',next_allowed_at:'2026-08-26T12:00:00Z'},
     {stage:'sales',status:'success',last_success_at:'2026-08-26T04:00:00Z'},
+    {stage:'stocks',status:'success',last_success_at:'2026-08-26T10:30:00Z'},
+    {stage:'sellerStocks',status:'success',last_success_at:'2026-08-26T10:30:00Z'},
   ],
 })
 assert.ok(!blocked.includes('orders'),'first-success priority must never bypass WB rate-limit windows')
 
-// Once orders have a success, normal overdue fairness applies again.
+// Once every operational stream has a success, normal overdue fairness applies.
 const normal=dueLiveStages({
   settings:{enabled:true},
   now,
@@ -39,6 +41,8 @@ const normal=dueLiveStages({
   states:[
     {stage:'orders',status:'success',last_success_at:'2026-08-26T08:30:00Z'},
     {stage:'sales',status:'success',last_success_at:'2026-08-26T04:00:00Z'},
+    {stage:'stocks',status:'success',last_success_at:'2026-08-26T08:45:00Z'},
+    {stage:'sellerStocks',status:'success',last_success_at:'2026-08-26T08:45:00Z'},
   ],
 })
 assert.equal(normal[0],'sales','after first success the most overdue stream must win again')
