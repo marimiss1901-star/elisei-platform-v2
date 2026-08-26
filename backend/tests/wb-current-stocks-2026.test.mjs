@@ -29,6 +29,7 @@ assert.equal(CURRENT_STOCK_ENDPOINTS.seller,'https://seller-analytics-api.wildbe
 
 const server=fs.readFileSync(new URL('../src/server.js',import.meta.url),'utf8')
 for(const marker of [
+  "stocks: { label: 'Склад WB', scope: 'analytics' }",
   "sellerStocks: { label: 'Остатки FBS', scope: 'analytics' }",
   "return loadCurrentWbStocks(token, { request:wbFetch, deadlineAt })",
   "return loadCurrentSellerStocks(token, products, { request:wbFetch, deadlineAt })",
@@ -37,5 +38,6 @@ for(const marker of [
 ]) assert.ok(server.includes(marker),`server must contain ${marker}`)
 
 assert.ok(!server.includes("https://marketplace-api.wildberries.ru/api/v3/stocks/${warehouseId}"),'active FBS reader must not poll each seller warehouse')
+assert.ok(!server.includes("stocks: { label: 'Остатки FBO'"),'legacy FBO label must not be exposed for current WB stock')
 
 console.log('WB current stocks 2026 regression passed')
