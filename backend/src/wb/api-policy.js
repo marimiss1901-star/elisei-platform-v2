@@ -25,6 +25,17 @@ export const WB_API_POLICY = Object.freeze({
     management: 'seller-cabinet-only',
     readEndpoint: 'https://marketplace-api.wildberries.ru/api/v3/warehouses',
   }),
+  orderFeed: Object.freeze({
+    endpoint:'https://seller-analytics-api.wildberries.ru/api/analytics/v1/order-feed',
+    method:'POST',
+    scope:'analytics',
+    maxPeriodDays:31,
+    role:'primary-current-orders-and-sales',
+    legacyHistory:Object.freeze([
+      'GET /api/v1/supplier/orders',
+      'GET /api/v1/supplier/sales',
+    ]),
+  }),
 })
 
 function requestMethod(options = {}) {
