@@ -3,8 +3,8 @@ import fs from 'node:fs'
 import { WB_STREAMS } from '../src/wb/stream-store.js'
 import { normalizeFinanceLedgerRows } from '../src/wb/finance-ledger.js'
 
-assert.equal(WB_STREAMS.length,28)
-for (const stream of ['financeReports','acquiringReports','warehouseMeasurements','antifraudRetention','labelingRetention']) {
+assert.equal(WB_STREAMS.length,29)
+for (const stream of ['balance','financeReports','acquiringReports','warehouseMeasurements','antifraudRetention','labelingRetention']) {
   assert.ok(WB_STREAMS.includes(stream),`${stream} must be registered`)
 }
 
@@ -28,6 +28,8 @@ for (const marker of [
   '/api/analytics/v1/warehouse-measurements',
   '/api/v1/analytics/antifraud-details',
   '/api/v1/analytics/goods-labeling',
+  "balance: { label: 'Баланс WB', scope: 'finance' }",
+  '/api/v1/account/balance',
   'reports:{',
   'riskDetails:{',
 ]) assert.ok(server.includes(marker),`server.js must contain ${marker}`)
@@ -37,7 +39,7 @@ assert.ok(ledger.includes('timeline:timelineRows.rows'))
 assert.ok(ledger.includes("operation_group IN ('penalties','deductions')"))
 
 const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')
-for (const marker of ['Динамика','Причины удержаний','Отчёты реализации','Самовыкупы','Нарушения маркировки']) {
+for (const marker of ['Динамика','Причины удержаний','Отчёты реализации','Самовыкупы','Нарушения маркировки','Доступно к выводу']) {
   assert.ok(dashboard.includes(marker),`Dashboard must contain ${marker}`)
 }
 

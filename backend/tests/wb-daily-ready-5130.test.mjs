@@ -12,10 +12,12 @@ assert.equal(dailyReadySlot(new Date('2026-08-19T02:30:00Z'),moscow),'preopen') 
 assert.equal(dailyReadySlot(new Date('2026-08-19T04:45:00Z'),moscow),'morning-ready') // 07:45 MSK
 
 // Heavy work is eligible before opening time, not during the workday.
-// Non-operational streams now share the same overnight lane and are deliberately
-// scheduled after the core finance stages.
+// The light current-account balance is deliberately first in the nightly finance
+// lane so the morning UI can show withdrawable funds without waiting for the
+// detailed finance report to finish pagination.
 const now=Date.parse('2026-08-19T02:00:00Z') // 05:00 MSK
 const states=[
+  {stage:'balance',status:'success',last_success_at:new Date(now-21*3600000).toISOString()},
   {stage:'finance',status:'success',last_success_at:new Date(now-21*3600000).toISOString()},
   {stage:'paidStorage',status:'success',last_success_at:new Date(now-25*3600000).toISOString()},
   {stage:'acceptance',status:'queued',next_allowed_at:new Date(now+3600000).toISOString(),last_success_at:new Date(now-30*3600000).toISOString()},
@@ -23,7 +25,7 @@ const states=[
   {stage:'documents',status:'success',last_success_at:new Date(now-2*3600000).toISOString()},
 ]
 assert.deepEqual(dailyHeavyStagePlan({states,now,timeZone:moscow}),[
-  'finance','paidStorage',
+  'balance','finance','paidStorage',
   'products','advertising','reviews','questions','chats','financeReports','acquiringReports','jamSubscription',
   'measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention',
   'goodsReturns','tariffs','funnel','searchQueries','stockHistory',

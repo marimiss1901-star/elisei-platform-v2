@@ -4,7 +4,7 @@ import vm from 'node:vm'
 import { WB_STREAMS, normalizeStreamPayload, streamCount } from '../src/wb/stream-store.js'
 
 assert.deepEqual(WB_STREAMS, [
-  'products','orders','sales','stocks','sellerStocks','advertising','finance','paidStorage','acceptance','acquiring',
+  'products','orders','sales','stocks','sellerStocks','advertising','finance','balance','paidStorage','acceptance','acquiring',
   'financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','goodsReturns','tariffs','funnel','documents','jamSubscription',
   'searchQueries','stockHistory','reviews','questions','chats',
 ])
@@ -15,6 +15,11 @@ const finance = normalizeStreamPayload('finance', {
 })
 assert.equal(streamCount('finance', finance), 1)
 assert.equal(streamCount('sellerStocks', [{ chrtId:1, amount:7 }]), 1)
+const balance=normalizeStreamPayload('balance',{currency:'RUB',current:1200,for_withdraw:900})
+assert.equal(balance.current,1200)
+assert.equal(balance.for_withdraw,900)
+assert.equal(streamCount('balance',balance),1)
+assert.equal(streamCount('balance',normalizeStreamPayload('balance',null)),0,'missing balance must not become a confirmed zero')
 
 const source = fs.readFileSync(new URL('../src/server.js', import.meta.url), 'utf8')
 for (const marker of [
@@ -22,6 +27,7 @@ for (const marker of [
   '/api/finance/v1/acquiring/detailed',
   '/api/finance/v1/sales-reports/list',
   '/api/finance/v1/acquiring/list',
+  '/api/v1/account/balance',
   '/api/v1/paid_storage',
   '/api/v1/acceptance_report',
   "const warehouseEndpoint = 'https://marketplace-api.wildberries.ru/api/v3/warehouses'",
@@ -66,4 +72,4 @@ assert.equal(sandbox.result.penalties, 3)
 assert.equal(sandbox.result.deductions, 4)
 assert.equal(sandbox.result.additionalPayment, 2)
 
-console.log('WB finance + current FBS/WB-stock patch tests passed')
+console.log('WB finance + current balance + FBS/WB-stock patch tests passed')
