@@ -49,10 +49,13 @@ assert.ok(!due.includes('stocks'))
 assert.ok(!due.includes('advertising'),'advertising must never enter recurring seller-day polling')
 assert.ok(!due.includes('reviews'),'reviews must never enter recurring seller-day polling')
 
+// Normal overdue fairness is tested only after every operational stream has a
+// confirmed success; otherwise first-success protection intentionally wins.
 const fair=dueLiveStages({settings:{enabled:true},states:[
   {stage:'orders',status:'success',last_success_at:'2026-08-04T08:30:00Z'},
   {stage:'sales',status:'success',last_success_at:'2026-08-04T09:00:00Z'},
   {stage:'sellerStocks',status:'success',last_success_at:'2026-08-04T07:00:00Z'},
+  {stage:'stocks',status:'success',last_success_at:'2026-08-04T11:30:00Z'},
 ],now:active,timeZone:'Europe/Moscow'})
 assert.equal(fair[0],'sellerStocks','most overdue operational stream must not be starved by fixed stage order')
 
