@@ -1,7 +1,7 @@
 export const ORDER_FEED_ENDPOINT='https://seller-analytics-api.wildberries.ru/api/analytics/v1/order-feed'
 export const ORDER_FEED_MAX_PERIOD_DAYS=31
 export const ORDER_FEED_PAGE_LIMIT=10000
-export const ORDER_FEED_PRIMARY_VERSION=2
+export const ORDER_FEED_PRIMARY_VERSION=3
 
 function iso(value,fallback=Date.now()){
   const date=new Date(value ?? fallback)
@@ -30,6 +30,23 @@ export function buildOrderFeedRequest({start,end,offset=0,limit=ORDER_FEED_PAGE_
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({selectedPeriod:orderFeedWindow({start,end}),pagination}),
+  }
+}
+
+export function unwrapOrderFeedResponse(payload){
+  // Official WB response shape is { data: { snapshotTime, currency, orders } }.
+  // Keep a top-level fallback only for defensive compatibility, but never turn
+  // a malformed response into an apparently valid empty report.
+  const data=payload?.data&&typeof payload.data==='object'&&!Array.isArray(payload.data)?payload.data:payload
+  if(!data||typeof data!=='object'||!Array.isArray(data.orders)){
+    throw Object.assign(new Error('Лента заказов WB: ответ не содержит data.orders'),{
+      status:502,code:'WB_ORDER_FEED_INVALID_RESPONSE',
+    })
+  }
+  return {
+    orders:data.orders,
+    snapshotTime:data.snapshotTime||null,
+    currency:String(data.currency||'RUB'),
   }
 }
 
@@ -124,6 +141,6 @@ export function mergeOrderFeedSales(previousRows=[],derivedRows=[],feedOrders=[]
 }
 
 export function orderFeedRateLimitSeconds({typeId=0,serviceSecretReady=false}={}){
-  // WB's Basic token without client secret is intentionally conservative.
+  // WB Base token without client secret: one request per 3 hours.
   return Number(typeId)===1&&!serviceSecretReady?3*60*60:60
 }

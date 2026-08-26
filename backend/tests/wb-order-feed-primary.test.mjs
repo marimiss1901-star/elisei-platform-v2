@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import {
-  ORDER_FEED_ENDPOINT,ORDER_FEED_PAGE_LIMIT,buildOrderFeedRequest,normalizeOrderFeedOrder,
+  ORDER_FEED_ENDPOINT,ORDER_FEED_PAGE_LIMIT,ORDER_FEED_PRIMARY_VERSION,buildOrderFeedRequest,unwrapOrderFeedResponse,normalizeOrderFeedOrder,
   orderFeedSalesRows,mergeOrderFeedOrders,mergeOrderFeedSales,orderFeedRateLimitSeconds,
 } from '../src/wb/order-feed.js'
 import { LIVE_SYNC_STAGES, defaultLiveSyncSettings, normalizeLiveSyncSettings } from '../src/wb/live-sync.js'
@@ -17,6 +17,7 @@ assert.equal(body.pagination.limit,ORDER_FEED_PAGE_LIMIT)
 assert.equal(body.pagination.offset,0)
 assert.equal(body.pagination.snapshotTime,undefined)
 assert.throws(()=>buildOrderFeedRequest({start:'2026-07-01T00:00:00Z',end:'2026-08-26T00:00:00Z'}),/31/)
+assert.equal(ORDER_FEED_PRIMARY_VERSION,3,'response-envelope parser migration must requeue existing cabinets once')
 
 const raw={
   nmId:47254354,chrtId:91663228,srid:'7513432034713632943.1.0',
@@ -24,7 +25,19 @@ const raw={
   status:'buyout',warehouseName:'Склад WB',warehouseRegion:'',isMp:false,
   destinationCity:'Москва',destinationDistrict:'Центральный',sellerPrice:4328,isB2b:false,
 }
-const order=normalizeOrderFeedOrder(raw,{snapshotTime:'2026-08-26T12:00:00Z'})
+
+// Official WB Order Feed response is wrapped in data. This is the regression
+// that previously made a real 200 OK look like an empty orders response.
+const documentedResponse={data:{snapshotTime:'2026-08-26T12:00:00Z',currency:'RUB',orders:[raw]}}
+const unwrapped=unwrapOrderFeedResponse(documentedResponse)
+assert.equal(unwrapped.orders.length,1)
+assert.equal(unwrapped.orders[0].srid,raw.srid)
+assert.equal(unwrapped.snapshotTime,'2026-08-26T12:00:00Z')
+assert.equal(unwrapped.currency,'RUB')
+assert.deepEqual(unwrapOrderFeedResponse({data:{snapshotTime:'2026-08-26T12:00:00Z',currency:'RUB',orders:[]}}).orders,[],'a documented empty orders array is valid')
+assert.throws(()=>unwrapOrderFeedResponse({data:{snapshotTime:'2026-08-26T12:00:00Z'}}),/data\.orders/,'malformed response must never become a false empty report')
+
+const order=normalizeOrderFeedOrder(raw,{snapshotTime:unwrapped.snapshotTime})
 assert.equal(order.nmId,47254354)
 assert.equal(order.fulfillmentMode,'FBO')
 assert.equal(order.finishedPrice,4328)
@@ -69,6 +82,7 @@ for(const marker of [
   "sales: { label: 'Продажи', scope: 'analytics' }",
   'async function loadOrderFeedPrimary(',
   'buildOrderFeedRequest({start,end,offset,limit:ORDER_FEED_PAGE_LIMIT,snapshotTime})',
+  'const pageData=unwrapOrderFeedResponse(payload)',
   "stage === 'orders'",
   "stage === 'sales'",
   "stream:'sales',payload:siblingSalesValue",
@@ -82,4 +96,4 @@ const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',impo
 assert.ok(dashboard.includes('единой Ленты заказов WB примерно раз в 3 часа'))
 assert.ok(dashboard.includes('единый Order Feed'))
 
-console.log('WB Order Feed primary + single-source scheduling regression passed')
+console.log('WB Order Feed official response envelope + single-source scheduling regression passed')
