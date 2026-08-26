@@ -6,6 +6,7 @@ import { normalizeCatalogPage, validateCatalog } from '../src/wb/adapters/catalo
 import { normalizeWarehouseRemains, reconcileWarehouseRemains } from '../src/wb/adapters/warehouse-remains.js'
 import { normalizeCampaignList, normalizeFullStats, mergeAdvertisingSnapshot } from '../src/wb/adapters/promotion.js'
 import { buildProductMaster } from '../src/wb/product-master.js'
+import { CURRENT_STOCK_ENDPOINTS, aggregateWbWarehouseItems } from '../src/wb/current-stocks.js'
 
 const catalogPayload = {
   cards:[
@@ -34,6 +35,8 @@ assert.equal(catalogPage.products.length,2)
 assert.deepEqual(validateCatalog(catalogPage.products), { products:2, nmIDs:2, barcodes:3 })
 assert.equal(catalogPage.products[0].sizes[0].skus[0], '4600000000101')
 
+// Keep the legacy warehouse-remains adapter covered because historical snapshots
+// still use that shape. Live stock reads are asserted separately below.
 const warehousePayload = [
   {
     nmId:101,
@@ -129,10 +132,20 @@ assert.throws(
   /отсутствуют nmId, barcode и vendorCode/,
 )
 
+const liveWbStocks = aggregateWbWarehouseItems([
+  {nmId:101,chrtId:1001,warehouseId:-999999,warehouseName:'Склад WB',regionName:'Склад WB',quantity:5},
+  {nmId:101,chrtId:1001,warehouseId:42,warehouseName:'Переходный склад',quantity:7},
+])
+assert.equal(liveWbStocks.length,1)
+assert.equal(liveWbStocks[0].warehouseId,-999999)
+assert.equal(liveWbStocks[0].warehouseName,'Склад WB')
+assert.equal(liveWbStocks[0].quantity,12)
+assert.equal(CURRENT_STOCK_ENDPOINTS.wb,'https://seller-analytics-api.wildberries.ru/api/analytics/v1/stocks-report/wb-warehouses')
+assert.equal(CURRENT_STOCK_ENDPOINTS.seller,'https://seller-analytics-api.wildberries.ru/api/analytics/v1/stocks-report/seller-warehouses')
 
 const here = dirname(fileURLToPath(import.meta.url))
 const serverSource = readFileSync(resolve(here, '../src/server.js'), 'utf8')
-assert.match(serverSource, /groupBySa=true&groupByNm=true&groupByBarcode=true&groupBySize=true/)
-assert.match(serverSource, /STOCK_REPORT_PROFILE = 'article_barcode_size_v1'/)
+assert.match(serverSource, /loadCurrentWbStocks/)
+assert.match(serverSource, /loadCurrentSellerStocks/)
 
 console.log('WB integration core tests: OK')

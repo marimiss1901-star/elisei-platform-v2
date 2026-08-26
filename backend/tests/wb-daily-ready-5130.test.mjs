@@ -109,7 +109,7 @@ assert.equal(snapshotNeedsRefresh({source_revision:rev,generated_at:new Date(now
 assert.equal(snapshotNeedsRefresh({source_revision:'old',generated_at:new Date(now-1000).toISOString()},rev,{now,maxAgeMs:60000}),true)
 
 const workflow=fs.readFileSync(new URL('../../.github/workflows/elisei-daily-ready-wake.yml',import.meta.url),'utf8')
-for (const marker of ["'0 2 * * *'","'30 4 * * *'","'30 8 * * *'",'/health','ELISEI_BACKEND_URL']) {
+for (const marker of ["'30 22 * * *'","'30 1 * * *'","'30 3 * * *'",'/health?wake=daily-ready','sleep 75','ELISEI_BACKEND_URL']) {
   assert.ok(workflow.includes(marker),`Daily Ready wake workflow must contain ${marker}`)
 }
 

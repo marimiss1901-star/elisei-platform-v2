@@ -56,10 +56,13 @@ assert.equal(WB_API_POLICY.sellerWarehouses.apiWriteCutoff,'2026-08-05T00:00:00+
 
 const server=fs.readFileSync(new URL('../src/server.js',import.meta.url),'utf8')
 assert.ok(server.includes('assertWbApiRequestAllowed(url, options)'))
-assert.ok(server.includes('sellerWarehouseReadSummary(sellerWarehouses)'))
-assert.ok(server.includes("warehouseManagement:Number(warehouse?.cargoType) === WB_API_POLICY.sellerWarehouses.sgtCargoType ? 'seller-cabinet-only' : 'api-supported'"))
+assert.ok(server.includes("sellerStocks: { label: 'Остатки FBS', scope: 'analytics' }"))
+assert.ok(server.includes('loadCurrentSellerStocks'))
+assert.ok(server.includes('loadCurrentWbStocks'))
 assert.ok(!server.includes('/api/marketplace/v3/dbs/orders/meta/info'))
 assert.ok(!/\/api\/v3\/dbw\/orders\/\$\{[^}]+\}\/meta/.test(server))
 assert.ok(!server.includes("method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ cargoType:2"))
+assert.ok(!server.includes('sellerWarehouseReadSummary(sellerWarehouses)'),'current FBS stock read no longer enumerates seller warehouses')
+assert.ok(!server.includes("https://marketplace-api.wildberries.ru/api/v3/stocks/${warehouseId}"),'current FBS stock read no longer polls each warehouse')
 
-console.log('WB API migration and SGT warehouse policy tests passed')
+console.log('WB API migration, current stocks and SGT warehouse policy tests passed')
