@@ -1,10 +1,9 @@
-// Current WB inventory readers (2026 API).
-// WB warehouses and seller warehouses are now read through Seller Analytics.
-// The old warehouse-remains generation task and per-FBS-warehouse inventory loop
-// are intentionally not used here.
+// Current WB warehouse inventory reader (2026 API).
+// Only inventory physically held by WB is read through Seller Analytics here.
+// FBS inventory stays in server.js on the official Marketplace API flow:
+// GET /api/v3/warehouses + POST /api/v3/stocks/{warehouseId}.
 
 const WB_STOCKS_ENDPOINT = 'https://seller-analytics-api.wildberries.ru/api/analytics/v1/stocks-report/wb-warehouses'
-const SELLER_STOCKS_ENDPOINT = 'https://seller-analytics-api.wildberries.ru/api/analytics/v1/stocks-report/seller-warehouses'
 const MAX_ROWS = 250000
 
 function itemsFrom(payload) {
@@ -71,12 +70,6 @@ export function aggregateWbWarehouseItems(items = []) {
   }))
 }
 
-export function normalizeSellerWarehouseItems(items = []) {
-  return (Array.isArray(items) ? items : [])
-    .map(item => normalizeCurrentItem(item, 'Склад продавца'))
-    .filter(item => item.nmId)
-}
-
 async function requestCurrentInventory(request, endpoint, token, body, label, deadlineAt) {
   const payload = await request(endpoint, token, {
     method:'POST',
@@ -133,30 +126,6 @@ export async function loadCurrentWbStocks(token, { request, deadlineAt = 0 } = {
   }
 }
 
-export async function loadCurrentSellerStocks(token, _products = [], { request, deadlineAt = 0 } = {}) {
-  if (typeof request !== 'function') throw new Error('Seller stocks request transport is required')
-  const {payload,items}=await requestCurrentInventory(
-    request,SELLER_STOCKS_ENDPOINT,token,
-    {nmIds:[],chrtIds:[],limit:MAX_ROWS},
-    'Текущие остатки FBS · склады продавца',deadlineAt,
-  )
-  const rows=normalizeSellerWarehouseItems(items)
-  const totalQuantity=rows.reduce((sum,row)=>sum+positiveNumber(row.quantity),0)
-  return {
-    value:rows,
-    rawPayload:payload,
-    validation:{
-      source:'seller-warehouses-v1',
-      rows:rows.length,
-      warehouses:new Set(rows.map(row=>String(row.warehouseId ?? row.warehouseName))).size,
-      totalQuantity:Math.round(totalQuantity),
-      current:true,
-    },
-    endpoint:SELLER_STOCKS_ENDPOINT,
-  }
-}
-
 export const CURRENT_STOCK_ENDPOINTS = Object.freeze({
   wb:WB_STOCKS_ENDPOINT,
-  seller:SELLER_STOCKS_ENDPOINT,
 })
