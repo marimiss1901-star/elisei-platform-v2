@@ -24,7 +24,8 @@ for (const marker of [
   '/api/finance/v1/acquiring/list',
   '/api/v1/paid_storage',
   '/api/v1/acceptance_report',
-  '/api/v3/stocks/${warehouseId}',
+  'loadCurrentSellerStocks',
+  'loadCurrentWbStocks',
   "paidStorage','paid_storage'",
   "paidAcceptance','paid_acceptance'",
   "fulfillmentMode:'FBS'",
@@ -63,4 +64,4 @@ assert.equal(sandbox.result.penalties, 3)
 assert.equal(sandbox.result.deductions, 4)
 assert.equal(sandbox.result.additionalPayment, 2)
 
-console.log('WB finance + FBS/FBO patch tests passed')
+console.log('WB finance + current FBS/FBO patch tests passed')
