@@ -31,7 +31,10 @@ const PRIORITY = Object.freeze({
 
 const GROUP = Object.freeze({
   products:'content', tariffs:'content',
-  orders:'statistics', sales:'statistics',
+  // Orders and sales are two ELISEI read models produced from one WB Order
+  // Feed snapshot. Keeping them in their own group prevents unrelated Analytics
+  // reports from delaying the seller-day operational feed.
+  orders:'orderFeed', sales:'orderFeed',
   sellerStocks:'marketplace', fbsArchive:'marketplace',
   stocks:'analytics', paidStorage:'analytics', acceptance:'analytics', measurementPenalties:'analytics',
   deductionsReport:'analytics', warehouseMeasurements:'analytics', antifraudRetention:'analytics',
@@ -45,6 +48,7 @@ const GROUP = Object.freeze({
 // Dispatch spacing applies only INSIDE one WB API group. Independent groups
 // are intentionally allowed to progress in the same scheduler cycle.
 const GROUP_GAP_MS = Object.freeze({
+  orderFeed: 2500,
   statistics: 2500,
   analytics: 2500,
   finance: 2500,
@@ -103,8 +107,6 @@ export function compareSchedulerRows(a = {}, b = {}) {
   const explicitA = bootstrapPriority(a)
   const explicitB = bootstrapPriority(b)
 
-  // Inside a group, always finish an already-created WB task before opening a
-  // fresh lower-value call. Across groups there is no artificial serialization.
   const taskBoostA = a?.task_id || a?.taskId ? -20 : 0
   const taskBoostB = b?.task_id || b?.taskId ? -20 : 0
   const pendingBoostA = String(a?.status || '') === 'pending' ? -10 : 0

@@ -1,22 +1,21 @@
 const DEFAULT_TIME_ZONE = 'Europe/Moscow'
 
-// Calm seller-day policy: only operational data refreshes automatically during
-// the working day, and no operational stream is polled more often than every
-// two hours. This keeps WB/API and DB pressure low while preserving useful
-// intra-day visibility. Everything non-operational belongs to Nightly Ready.
+// Seller-day policy: orders and sales are one WB Order Feed source. Basic
+// tokens without a service secret may only call this feed once per three hours,
+// so ELISEI uses the universally safe three-hour cadence. Stocks remain useful
+// at the calmer two-hour cadence. Everything non-operational belongs to Nightly Ready.
 const STAGE_DEFAULTS = Object.freeze({
-  orders: 7200,
-  sales: 7200,
+  orders: 10800,
+  sales: 10800,
   stocks: 7200,
   sellerStocks: 7200,
 })
 
-// Important for already connected cabinets: old persisted 30/60 minute
-// settings are normalized up to the new two-hour floor instead of silently
-// keeping the old aggressive cadence forever.
+// Existing cabinets are migrated upward automatically: old 30/60/120-minute
+// settings cannot keep polling Order Feed faster than its safe Basic-token window.
 const MIN_INTERVALS = Object.freeze({
-  orders: 7200,
-  sales: 7200,
+  orders: 10800,
+  sales: 10800,
   stocks: 7200,
   sellerStocks: 7200,
 })
@@ -125,9 +124,6 @@ export function dueLiveStages({ settings = {}, states = [], now = Date.now(), ti
   }
   return due
     .sort((a,b) => {
-      // A stream without a single confirmed result gets one fair chance before
-      // already-working streams. It must still be due and outside WB cooldowns.
-      // After its first success normal overdue fairness takes over again.
       if (a.neverSucceeded !== b.neverSucceeded) return a.neverSucceeded ? -1 : 1
       if (a.overdueRatio !== b.overdueRatio) return b.overdueRatio-a.overdueRatio
       if (a.priority !== b.priority) return a.priority-b.priority

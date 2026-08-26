@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "prebuild": "node apply-daily-ready-fallback.mjs && node apply-data-quality-resilience.mjs && node apply-last-known-good-workspace.mjs && node apply-secondary-read-throttle.mjs && node apply-completed-week-period.mjs && node apply-wb-stock-labels.mjs && node apply-wb-reference-balance-ui.mjs && node apply-last-good-sync-status.mjs",
+    "prebuild": "node apply-daily-ready-fallback.mjs && node apply-data-quality-resilience.mjs && node apply-last-known-good-workspace.mjs && node apply-secondary-read-throttle.mjs && node apply-completed-week-period.mjs && node apply-wb-stock-labels.mjs && node apply-wb-reference-balance-ui.mjs && node apply-last-good-sync-status.mjs && node apply-order-feed-ui.mjs",
     "build": "vite build",
     "preview": "vite preview"
   },
