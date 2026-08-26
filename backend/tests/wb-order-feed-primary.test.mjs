@@ -4,7 +4,8 @@ import {
   ORDER_FEED_ENDPOINT,ORDER_FEED_PAGE_LIMIT,buildOrderFeedRequest,normalizeOrderFeedOrder,
   orderFeedSalesRows,mergeOrderFeedOrders,mergeOrderFeedSales,orderFeedRateLimitSeconds,
 } from '../src/wb/order-feed.js'
-import { defaultLiveSyncSettings, normalizeLiveSyncSettings } from '../src/wb/live-sync.js'
+import { LIVE_SYNC_STAGES, defaultLiveSyncSettings, normalizeLiveSyncSettings } from '../src/wb/live-sync.js'
+import { DAILY_READY_OPERATIONAL_RECOVERY_STAGES } from '../src/wb/daily-ready.js'
 import { schedulerGroup } from '../src/wb/smart-scheduler.js'
 import { WB_API_POLICY } from '../src/wb/api-policy.js'
 
@@ -54,10 +55,13 @@ assert.equal(schedulerGroup('orders'),'orderFeed')
 assert.equal(schedulerGroup('sales'),'orderFeed')
 
 const defaults=defaultLiveSyncSettings()
+assert.deepEqual(LIVE_SYNC_STAGES,['orders','stocks','sellerStocks'])
 assert.equal(defaults.intervals.orders,10800)
-assert.equal(defaults.intervals.sales,10800)
+assert.equal(defaults.intervals.sales,undefined,'sales is derived from orders and must not poll WB independently')
 assert.equal(defaults.intervals.stocks,7200)
-assert.equal(normalizeLiveSyncSettings({intervals:{orders:7200}}).intervals.orders,10800)
+assert.equal(normalizeLiveSyncSettings({intervals:{orders:7200,sales:1800}}).intervals.orders,10800)
+assert.equal(normalizeLiveSyncSettings({intervals:{orders:7200,sales:1800}}).intervals.sales,undefined)
+assert.deepEqual(DAILY_READY_OPERATIONAL_RECOVERY_STAGES,['orders','advertising'],'Daily Ready repairs sales through the orders Order Feed source')
 
 const server=fs.readFileSync(new URL('../src/server.js',import.meta.url),'utf8')
 for(const marker of [
@@ -69,6 +73,7 @@ for(const marker of [
   "stage === 'sales'",
   "stream:'sales',payload:siblingSalesValue",
   'recoverLegacyOrderFeedState({ connectionId:connection.id })',
+  'await recoverLegacyOrderFeedState()',
   'orderFeedPrimaryVersion:ORDER_FEED_PRIMARY_VERSION',
 ]) assert.ok(server.includes(marker),`server must contain ${marker}`)
 assert.ok(!server.includes("} else if (stage === 'orders' || stage === 'sales') {\n      const loaded = await loadStatisticsRows"),'orders/sales runner must no longer call legacy supplier statistics directly')
@@ -77,4 +82,4 @@ const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',impo
 assert.ok(dashboard.includes('единой Ленты заказов WB примерно раз в 3 часа'))
 assert.ok(dashboard.includes('единый Order Feed'))
 
-console.log('WB Order Feed primary + derived sales regression passed')
+console.log('WB Order Feed primary + single-source scheduling regression passed')
