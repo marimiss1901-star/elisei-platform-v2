@@ -108,8 +108,10 @@ export function dueLiveStages({ settings = {}, states = [], now = Date.now(), ti
     if (['running','pending','queued','rate_limited','retry_scheduled'].includes(String(state.status || ''))) continue
     const nextAllowedAt = toTimestamp(state.next_allowed_at || state.nextAllowedAt)
     if (nextAllowedAt > now) continue
+    const lastSuccessAt = toTimestamp(state.last_success_at || state.lastSuccessAt)
+    const neverSucceeded = !lastSuccessAt
     const lastAt = Math.max(
-      toTimestamp(state.last_success_at || state.lastSuccessAt),
+      lastSuccessAt,
       toTimestamp(state.last_attempt_at || state.lastAttemptAt),
       toTimestamp(state.updated_at || state.updatedAt),
     )
@@ -118,11 +120,15 @@ export function dueLiveStages({ settings = {}, states = [], now = Date.now(), ti
     if (!lastAt || now-lastAt >= intervalMs) {
       const elapsed = lastAt ? Math.max(0,now-lastAt) : intervalMs
       const overdueRatio = elapsed/intervalMs
-      due.push({stage,overdueRatio,priority:Number(LIVE_PRIORITY[stage] || 100)})
+      due.push({stage,neverSucceeded,overdueRatio,priority:Number(LIVE_PRIORITY[stage] || 100)})
     }
   }
   return due
     .sort((a,b) => {
+      // A stream without a single confirmed result gets one fair chance before
+      // already-working streams. It must still be due and outside WB cooldowns.
+      // After its first success normal overdue fairness takes over again.
+      if (a.neverSucceeded !== b.neverSucceeded) return a.neverSucceeded ? -1 : 1
       if (a.overdueRatio !== b.overdueRatio) return b.overdueRatio-a.overdueRatio
       if (a.priority !== b.priority) return a.priority-b.priority
       return a.stage.localeCompare(b.stage)
