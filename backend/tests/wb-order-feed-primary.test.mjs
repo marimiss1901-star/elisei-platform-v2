@@ -61,7 +61,7 @@ assert.equal(defaults.intervals.sales,undefined,'sales is derived from orders an
 assert.equal(defaults.intervals.stocks,7200)
 assert.equal(normalizeLiveSyncSettings({intervals:{orders:7200,sales:1800}}).intervals.orders,10800)
 assert.equal(normalizeLiveSyncSettings({intervals:{orders:7200,sales:1800}}).intervals.sales,undefined)
-assert.deepEqual(DAILY_READY_OPERATIONAL_RECOVERY_STAGES,['orders','advertising'],'Daily Ready repairs sales through the orders Order Feed source')
+assert.deepEqual(DAILY_READY_OPERATIONAL_RECOVERY_STAGES,['orders'],'Daily Ready repairs orders/sales through the single Order Feed source; advertising stays nightly')
 
 const server=fs.readFileSync(new URL('../src/server.js',import.meta.url),'utf8')
 for(const marker of [
