@@ -26,7 +26,7 @@ if(!source.includes(`async function ${functionName}()`)){
       AND COALESCE(last_attempt_at,updated_at) < TIMESTAMPTZ '2026-08-26T07:54:09Z'
     RETURNING connection_id,stage
   \`)
-  if(result.rows.length) console.log(\`[ELISEI] Requeued \\${result.rows.length} legacy FBS reader error(s) after Marketplace API migration.\`)
+  if(result.rows.length) console.log('[ELISEI] Requeued '+result.rows.length+' legacy FBS reader error(s) after Marketplace API migration.')
   return result.rows
 }
 
