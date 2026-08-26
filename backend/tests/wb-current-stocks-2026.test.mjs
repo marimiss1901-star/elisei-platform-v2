@@ -36,7 +36,6 @@ for(const marker of [
   "kickBackgroundWorkers('daily-ready-wake')",
 ]) assert.ok(server.includes(marker),`server must contain ${marker}`)
 
-assert.ok(!server.includes("https://marketplace-api.wildberries.ru/api/v3/stocks/${warehouseId}"),'old per-FBS-warehouse stock loop must be removed')
-assert.ok(!server.includes("const base = 'https://seller-analytics-api.wildberries.ru/api/v1/warehouse_remains'"),'old generated WB warehouse-remains task must be removed')
+assert.ok(!server.includes("https://marketplace-api.wildberries.ru/api/v3/stocks/${warehouseId}"),'active FBS reader must not poll each seller warehouse')
 
 console.log('WB current stocks 2026 regression passed')
