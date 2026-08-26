@@ -11,7 +11,7 @@ function replaceOnce(oldText,newText,label){
 
 replaceOnce(
 "import elDecisionEngine from './services/elDecisionEngine.cjs'",
-"import elDecisionEngine from './services/elDecisionEngine.cjs'\nimport { loadCurrentWbStocks, loadCurrentSellerStocks } from './wb/current-stocks.js'",
+"import elDecisionEngine from './services/elDecisionEngine.cjs'\nimport { loadCurrentWbStocks } from './wb/current-stocks.js'",
 'current stocks import')
 
 replaceOnce(
@@ -19,21 +19,10 @@ replaceOnce(
 "stocks: { label: 'Склад WB', scope: 'analytics' }",
 'WB consolidated stock label')
 
-replaceOnce(
-"sellerStocks: { label: 'Остатки FBS', scope: 'marketplace' }",
-"sellerStocks: { label: 'Остатки FBS', scope: 'analytics' }",
-'FBS analytics scope')
-
-const sellerPattern=/async function loadSellerStocks\(token, products = \[\], \{ deadlineAt = 0 \} = \{\}\) \{[\s\S]*?\n\}\n\n(?=function firstDefined)/
-if(!source.includes("return loadCurrentSellerStocks(token, products, { request:wbFetch, deadlineAt })")){
-  const match=source.match(sellerPattern)
-  if(!match) throw new Error('Current stocks/wake patch: loadSellerStocks function not found')
-  source=source.replace(sellerPattern,`async function loadSellerStocks(token, products = [], { deadlineAt = 0 } = {}) {
-  return loadCurrentSellerStocks(token, products, { request:wbFetch, deadlineAt })
-}
-
-`)
-}
+// FBS deliberately stays on the Marketplace API reader already present in
+// server.js: GET /api/v3/warehouses + POST /api/v3/stocks/{warehouseId}.
+// WB documents this stock family as Marketplace-token data. Do not replace it
+// with Seller Analytics seller-warehouses, which can require a different token.
 
 const wbPattern=/async function advanceWarehouseRemainsTask\(token, state, \{ deadlineAt = 0 \} = \{\}\) \{[\s\S]*?\n\}\n\n(?=async function|function|const )/
 if(!source.includes("return loadCurrentWbStocks(token, { request:wbFetch, deadlineAt })")){
