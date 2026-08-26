@@ -24,7 +24,8 @@ for (const marker of [
   '/api/finance/v1/acquiring/list',
   '/api/v1/paid_storage',
   '/api/v1/acceptance_report',
-  'loadCurrentSellerStocks',
+  "const warehouseEndpoint = 'https://marketplace-api.wildberries.ru/api/v3/warehouses'",
+  "https://marketplace-api.wildberries.ru/api/v3/stocks/${warehouseId}",
   'loadCurrentWbStocks',
   "paidStorage','paid_storage'",
   "paidAcceptance','paid_acceptance'",
@@ -32,6 +33,7 @@ for (const marker of [
   "fulfillmentMode:fulfillmentLabel",
   "row.deliveryMethod || row.delivery_method",
 ]) assert.ok(source.includes(marker), `server.js must contain ${marker}`)
+assert.ok(!source.includes('loadCurrentSellerStocks'),'FBS current stock must not depend on Seller Analytics token scope')
 
 function extractFunction(name) {
   const start = source.indexOf(`function ${name}(`)
@@ -64,4 +66,4 @@ assert.equal(sandbox.result.penalties, 3)
 assert.equal(sandbox.result.deductions, 4)
 assert.equal(sandbox.result.additionalPayment, 2)
 
-console.log('WB finance + current FBS/FBO patch tests passed')
+console.log('WB finance + current FBS/WB-stock patch tests passed')
