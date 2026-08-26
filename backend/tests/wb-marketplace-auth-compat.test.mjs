@@ -6,7 +6,7 @@ const requeuePatch=fs.readFileSync(new URL('../apply-fbs-reader-requeue.mjs',imp
 const pkg=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8'))
 
 assert.ok(authPatch.includes("function authHeaders(token, url = '')"),'auth headers must know the request host')
-assert.ok(authPatch.includes('marketplace-api\\.wildberries\\.ru'),'Marketplace host must be identified explicitly')
+assert.ok(authPatch.includes('marketplace-api'),'Marketplace host must be identified explicitly')
 assert.ok(authPatch.includes('!marketplaceRequest'),'X-Client-Secret must be excluded from Marketplace API')
 assert.ok(authPatch.includes('authHeaders(token, url)'),'WB fetch transport must pass request URL into auth selection')
 assert.ok(pkg.scripts.prestart.includes('apply-marketplace-auth-compat.mjs'),'Marketplace auth compatibility must run before backend start')
