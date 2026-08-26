@@ -24,6 +24,28 @@ replaceOnce(
 `app.use('/api', (req, res, next) => {\n  if (!pool) return res.status(503).json({ error:'DATABASE_URL не настроен', code:'DATABASE_NOT_CONFIGURED' })\n  // databaseState is observability only. Never reject every API request merely\n  // because one background probe is degraded. The route performs the real query;\n  // db-resilience-preload converts an actual transient PostgreSQL failure to 503.\n  next()\n})`,
 'global database gate')
 
+// The Data Quality route used to swallow PostgreSQL pool timeouts and return the
+// raw driver message to the browser. Re-throw only transient connection errors so
+// db-resilience-preload can convert them into the standard DATABASE_RECONNECTING
+// response. Real data-quality bugs still keep their route-local error response.
+replaceOnce(
+`  }catch(error){
+    console.warn('WB data quality failed:',error.message)
+    res.status(error.status||500).json({error:error.message})
+  }
+})`,
+`  }catch(error){
+    const code=String(error?.code || '').trim().toUpperCase()
+    const message=String(error?.message || error || '')
+    const transientDb=['57P01','57P02','57P03','08000','08003','08006','08001','08004','08P01','ECONNRESET','ECONNREFUSED','ETIMEDOUT'].includes(code)
+      || /connection terminated unexpectedly|server closed the connection unexpectedly|database system is in recovery mode|database system is not yet accepting connections|connection reset|connection refused|connection timeout|timeout exceeded when trying to connect|timeout acquiring (?:a )?client|etimedout/i.test(message)
+    if(transientDb) throw error
+    console.warn('WB data quality failed:',error.message)
+    res.status(error.status||500).json({error:error.message})
+  }
+})`,
+'data quality transient forwarding')
+
 // One browser entry used to fan out into dashboard/products/core/advertising/
 // diagnostics requests. Every route independently hydrated the same 20+ WB
 // streams. Share one canonical hydration between simultaneous/recent readers.
