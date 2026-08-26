@@ -1,7 +1,7 @@
 export const ORDER_FEED_ENDPOINT='https://seller-analytics-api.wildberries.ru/api/analytics/v1/order-feed'
 export const ORDER_FEED_MAX_PERIOD_DAYS=31
 export const ORDER_FEED_PAGE_LIMIT=10000
-export const ORDER_FEED_PRIMARY_VERSION=1
+export const ORDER_FEED_PRIMARY_VERSION=2
 
 function iso(value,fallback=Date.now()){
   const date=new Date(value ?? fallback)

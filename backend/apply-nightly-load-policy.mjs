@@ -11,12 +11,12 @@ function replaceOnce(oldText,newText,label){
 
 replaceOnce(
 "export const DAILY_READY_OPERATIONAL_RECOVERY_STAGES = Object.freeze(['orders','sales','advertising'])",
-"export const DAILY_READY_OPERATIONAL_RECOVERY_STAGES = Object.freeze(['orders','sales'])",
-'keep daytime recovery operational only')
+"export const DAILY_READY_OPERATIONAL_RECOVERY_STAGES = Object.freeze(['orders'])",
+'keep daytime recovery on the single Order Feed source only')
 
 replaceOnce(
 `  documents: 24 * 60 * 60,\n\n  // Secondary nightly layer. These reports are valuable for morning analytics`,
-`  documents: 24 * 60 * 60,\n\n  // Seller-day policy: these streams are useful by the next morning, but do not\n  // need to compete with orders, sales or stock refreshes during the day.\n  products: 24 * 60 * 60,\n  advertising: 24 * 60 * 60,\n  reviews: 24 * 60 * 60,\n  questions: 24 * 60 * 60,\n  chats: 24 * 60 * 60,\n  financeReports: 24 * 60 * 60,\n  acquiringReports: 24 * 60 * 60,\n  jamSubscription: 24 * 60 * 60,\n\n  // Secondary nightly layer. These reports are valuable for morning analytics`,
+`  documents: 24 * 60 * 60,\n\n  // Seller-day policy: these streams are useful by the next morning, but do not\n  // need to compete with Order Feed or stock refreshes during the day.\n  products: 24 * 60 * 60,\n  advertising: 24 * 60 * 60,\n  reviews: 24 * 60 * 60,\n  questions: 24 * 60 * 60,\n  chats: 24 * 60 * 60,\n  financeReports: 24 * 60 * 60,\n  acquiringReports: 24 * 60 * 60,\n  jamSubscription: 24 * 60 * 60,\n\n  // Secondary nightly layer. These reports are valuable for morning analytics`,
 'move non-operational streams to nightly')
 
 fs.writeFileSync(file,source)

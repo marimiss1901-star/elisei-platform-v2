@@ -1,28 +1,27 @@
 const DEFAULT_TIME_ZONE = 'Europe/Moscow'
 
-// Seller-day policy: orders and sales are one WB Order Feed source. Basic
-// tokens without a service secret may only call this feed once per three hours,
-// so ELISEI uses the universally safe three-hour cadence. Stocks remain useful
-// at the calmer two-hour cadence. Everything non-operational belongs to Nightly Ready.
+// Seller-day policy: one WB Order Feed request refreshes both ELISEI read models
+// (orders + sales). Only the source stage `orders` is polled. The derived `sales`
+// stage is saved by the same successful request and never spends its own daytime
+// scheduler slot. Basic tokens without a service secret use the universally safe
+// three-hour cadence. Stocks remain useful at the calmer two-hour cadence.
 const STAGE_DEFAULTS = Object.freeze({
   orders: 10800,
-  sales: 10800,
   stocks: 7200,
   sellerStocks: 7200,
 })
 
 // Existing cabinets are migrated upward automatically: old 30/60/120-minute
-// settings cannot keep polling Order Feed faster than its safe Basic-token window.
+// settings cannot keep polling Order Feed or stocks too aggressively. Legacy
+// `sales` interval values are intentionally dropped because sales is derived.
 const MIN_INTERVALS = Object.freeze({
   orders: 10800,
-  sales: 10800,
   stocks: 7200,
   sellerStocks: 7200,
 })
 
 const OVERNIGHT_MULTIPLIERS = Object.freeze({
   orders: 2,
-  sales: 2,
   stocks: 2,
   sellerStocks: 2,
 })
@@ -31,7 +30,6 @@ const WEBHOOK_FALLBACK_MULTIPLIERS = Object.freeze({})
 
 const LIVE_PRIORITY = Object.freeze({
   orders: 10,
-  sales: 20,
   sellerStocks: 30,
   stocks: 40,
 })
