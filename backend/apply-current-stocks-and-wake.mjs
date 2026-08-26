@@ -15,6 +15,11 @@ replaceOnce(
 'current stocks import')
 
 replaceOnce(
+"stocks: { label: 'Остатки FBO', scope: 'analytics' }",
+"stocks: { label: 'Склад WB', scope: 'analytics' }",
+'WB consolidated stock label')
+
+replaceOnce(
 "sellerStocks: { label: 'Остатки FBS', scope: 'marketplace' }",
 "sellerStocks: { label: 'Остатки FBS', scope: 'analytics' }",
 'FBS analytics scope')
