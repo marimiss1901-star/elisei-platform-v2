@@ -78,8 +78,8 @@ const replacements = [
   ["partial:statePartial(snapshotOrdersState,!analyticsAvailability.orders && Boolean(syncStateFor('orders')))", "partial:statePartial(snapshotOrdersState,!analyticsAvailability.orders && Boolean(syncStateFor('orders')),persistedAvailability.orders)"],
   ["partial:statePartial(snapshotAdvertisingState,!analyticsAvailability.advertising && Boolean(syncStateFor('advertising')))", "partial:statePartial(snapshotAdvertisingState,!analyticsAvailability.advertising && Boolean(syncStateFor('advertising')),persistedAvailability.advertising)"],
   ["partial:statePartial(snapshotFinanceState,financeHasAnyProgress)", "partial:statePartial(snapshotFinanceState,financeHasAnyProgress,persistedAvailability.finance)"],
-  ["partial:statePartial(snapshotFinanceState,financeHasAnyProgress || Boolean(syncStateFor('paidStorage')))", "partial:statePartial(snapshotFinanceState,financeHasAnyProgress || Boolean(syncStateFor('paidStorage')),persistedAvailability.finance || persistedAvailability.paidStorage)"],
-  ["partial:statePartial(snapshotFinanceState,financeHasAnyProgress || Boolean(syncStateFor('acquiring')))", "partial:statePartial(snapshotFinanceState,financeHasAnyProgress || Boolean(syncStateFor('acquiring')),persistedAvailability.finance || persistedAvailability.acquiring)"],
+  ["partial:statePartial(snapshotFinanceState,financeHasAnyProgress || Boolean(syncStateFor('paidStorage')))", "partial:statePartial(snapshotFinanceState,financeHasAnyProgress || Boolean(syncStateFor('paidStorage')),persistedAvailability.paidStorage)"],
+  ["partial:statePartial(snapshotFinanceState,financeHasAnyProgress || Boolean(syncStateFor('acquiring')))", "partial:statePartial(snapshotFinanceState,financeHasAnyProgress || Boolean(syncStateFor('acquiring')),persistedAvailability.acquiring)"],
 ]
 for (const [oldText,newText] of replacements) {
   if (source.includes(newText)) continue
