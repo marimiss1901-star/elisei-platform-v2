@@ -35,8 +35,11 @@ replaceOnce(
       setDataQuality(result?.quality || null)
       setDataQualityError('')
     } catch (error) {
+      const transient = ['DATABASE_RECONNECTING','REQUEST_TIMEOUT','BACKEND_UNAVAILABLE'].includes(String(error?.code || ''))
+        || Number(error?.status || 0) === 503
+        || /timeout exceeded when trying to connect|connection timeout|database.*reconnect/i.test(String(error?.message || ''))
       setDataQualityError(error?.message || 'Проверка качества временно недоступна.')
-      notify(error.message,8000)
+      if (!transient) notify(error.message,8000)
     } finally {
 `,
 'loader error state')
@@ -72,4 +75,26 @@ replaceOnce(
 'problem fallback')
 
 fs.writeFileSync(file, source)
+
+// Data Quality is a read model just like dashboard/core/finance. Keep the last
+// confirmed period-specific result in the shared read cache so a short Render/
+// PostgreSQL interruption cannot blank the entire Synchronizations quality card.
+const apiFile = 'src/lib/api.js'
+let apiSource = fs.readFileSync(apiFile, 'utf8')
+const oldApi = `    return request(\`/api/wb/data-quality/\${encodeURIComponent(connectionId)}\${querySuffix(clean)}\`)
+`
+const newApi = `    const suffix = querySuffix(clean)
+    return cachedRead(
+      \`quality:\${connectionId}:\${clean.from || 'all'}:\${clean.to || 'all'}\`,
+      \`/api/wb/data-quality/\${encodeURIComponent(connectionId)}\${suffix}\`,
+      {},
+      3 * 24 * 60 * 60 * 1000,
+    )
+`
+if (!apiSource.includes(newApi)) {
+  if (!apiSource.includes(oldApi)) throw new Error('Data Quality resilience patch: api cache target not found')
+  apiSource = apiSource.replace(oldApi,newApi)
+}
+fs.writeFileSync(apiFile, apiSource)
+
 console.log('Data Quality DB reconnect resilience applied')
