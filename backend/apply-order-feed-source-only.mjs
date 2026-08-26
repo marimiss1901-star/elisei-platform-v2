@@ -18,5 +18,33 @@ replaceOnce(
   'startup/background migration kick',
 )
 
+// The same successful Order Feed query confirms both read models. If Daily
+// Ready explicitly checked a closed date and there were legitimately zero
+// buyouts on that date, the derived sales stream must still remember that WB
+// confirmed the day. Otherwise the UI can fall back into an endless sales gap.
+replaceOnce(
+`      data.sales=siblingSalesValue
+      await updateSyncState(connection.id,'sales',{
+        status:'success',lastAttemptAt:new Date().toISOString(),lastSuccessAt:new Date().toISOString(),nextAllowedAt:null,lastError:null,
+        lastCount:stageCount('sales',siblingSalesValue),taskId:null,
+        metadata:{...(siblingSalesMeta||{}),tokenId:selected.row.id,tokenLabel:selected.row.label,primary:Boolean(selected.row.is_primary),orderFeedPrimaryVersion:ORDER_FEED_PRIMARY_VERSION,derivedFromOrders:true},
+      })`,
+`      data.sales=siblingSalesValue
+      const siblingDailyReadyDate=/^\\d{4}-\\d{2}-\\d{2}$/.test(String(state?.metadata?.dailyReadyDate || ''))
+        ? String(state.metadata.dailyReadyDate).slice(0,10)
+        : ''
+      const siblingDailyReadyConfirmation=siblingDailyReadyDate ? {
+        dailyReadyConfirmedFrom:siblingDailyReadyDate,
+        dailyReadyConfirmedThrough:siblingDailyReadyDate,
+        dailyReadyRecoveryAt:new Date().toISOString(),
+      } : {}
+      await updateSyncState(connection.id,'sales',{
+        status:'success',lastAttemptAt:new Date().toISOString(),lastSuccessAt:new Date().toISOString(),nextAllowedAt:null,lastError:null,
+        lastCount:stageCount('sales',siblingSalesValue),taskId:null,
+        metadata:{...(siblingSalesMeta||{}),...siblingDailyReadyConfirmation,tokenId:selected.row.id,tokenLabel:selected.row.label,primary:Boolean(selected.row.is_primary),orderFeedPrimaryVersion:ORDER_FEED_PRIMARY_VERSION,derivedFromOrders:true},
+      })`,
+  'derived sales closed-day confirmation',
+)
+
 fs.writeFileSync(file,source)
 console.log('WB Order Feed single-source scheduling applied')
