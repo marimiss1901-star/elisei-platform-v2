@@ -1,19 +1,24 @@
 const DEFAULT_TIME_ZONE = 'Europe/Moscow'
 
-// Seller-day automatic lane: only data that can change an operational decision
-// during the working day. Everything else is refreshed by Daily Ready overnight.
+// Calm seller-day policy: only operational data refreshes automatically during
+// the working day, and no operational stream is polled more often than every
+// two hours. This keeps WB/API and DB pressure low while preserving useful
+// intra-day visibility. Everything non-operational belongs to Nightly Ready.
 const STAGE_DEFAULTS = Object.freeze({
-  orders: 1800,
-  sales: 1800,
-  stocks: 3600,
-  sellerStocks: 1800,
+  orders: 7200,
+  sales: 7200,
+  stocks: 7200,
+  sellerStocks: 7200,
 })
 
+// Important for already connected cabinets: old persisted 30/60 minute
+// settings are normalized up to the new two-hour floor instead of silently
+// keeping the old aggressive cadence forever.
 const MIN_INTERVALS = Object.freeze({
-  orders: 1800,
-  sales: 1800,
-  stocks: 1800,
-  sellerStocks: 1800,
+  orders: 7200,
+  sales: 7200,
+  stocks: 7200,
+  sellerStocks: 7200,
 })
 
 const OVERNIGHT_MULTIPLIERS = Object.freeze({
@@ -84,7 +89,7 @@ export function liveCadenceWindow(now = Date.now(), timeZone = DEFAULT_TIME_ZONE
 export function effectiveLiveIntervalSeconds(stage,{ settings = {}, now = Date.now(), timeZone = DEFAULT_TIME_ZONE } = {}) {
   const normalized = normalizeLiveSyncSettings(settings)
   const name = String(stage || '')
-  const configured = Number(normalized.intervals[name] || STAGE_DEFAULTS[name] || 3600)
+  const configured = Number(normalized.intervals[name] || STAGE_DEFAULTS[name] || 7200)
   const base = Math.min(configured,Number(STAGE_DEFAULTS[name] || configured))
   let multiplier = liveCadenceWindow(now,timeZone) === 'overnight'
     ? Number(OVERNIGHT_MULTIPLIERS[name] || 1)
