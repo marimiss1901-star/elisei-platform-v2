@@ -7,9 +7,8 @@ import {
 const now=Date.parse('2026-08-19T10:00:00Z')
 const date='2026-08-18'
 
-// Closed-day recovery: orders and sales now share one authoritative WB Order
-// Feed. If the saved feed stops before yesterday, Daily Ready queues only the
-// source stage `orders`; the same response persists the derived sales model.
+// Closed-day recovery: until Order Feed is verified live, orders and sales are
+// independent proven Statistics API streams and both may repair a missing day.
 const plan=dailyOperationalRecoveryPlan({
   date,now,
   coverage:{
@@ -23,10 +22,8 @@ const plan=dailyOperationalRecoveryPlan({
     {stage:'advertising',status:'success',last_attempt_at:'2026-08-19T08:00:00Z'},
   ],
 })
-assert.deepEqual(plan,['orders'])
+assert.deepEqual(plan,['orders','sales'])
 
-// Never duplicate a source stage that is already queued or waiting for a real
-// WB window. Sales and advertising are not independent daytime recovery jobs.
 const blocked=dailyOperationalRecoveryPlan({
   date,now,coverage:{},
   states:[
@@ -37,14 +34,13 @@ const blocked=dailyOperationalRecoveryPlan({
 })
 assert.deepEqual(blocked,[])
 
-// A successful explicit Order Feed backfill confirms both business read models,
-// including a legitimate zero-sales day, so neither side enters a retry loop.
+// Explicit successful backfills can confirm a legitimate zero independently.
 const zeroConfirmed=buildDailyMetricStates({
   date,
   core:{periodCoverage:{orders:{from:null,to:null,selectedRows:0},sales:{from:null,to:null,selectedRows:0},advertising:{from:'2026-08-18',to:'2026-08-18',selectedRows:0}},finance:{complete:false}},
   states:[
     {stage:'orders',status:'success',metadata:{dailyReadyConfirmedFrom:date,dailyReadyConfirmedThrough:date}},
-    {stage:'sales',status:'success',metadata:{dailyReadyConfirmedFrom:date,dailyReadyConfirmedThrough:date,derivedFromOrders:true}},
+    {stage:'sales',status:'success',metadata:{dailyReadyConfirmedFrom:date,dailyReadyConfirmedThrough:date}},
     {stage:'advertising',status:'success'},
     {stage:'finance',status:'queued'},
   ],
@@ -59,9 +55,7 @@ const server=fs.readFileSync(new URL('../src/server.js',import.meta.url),'utf8')
 for (const marker of [
   "trigger:'daily_ready_recovery'",
   'dailyReadyConfirmedThrough',
-  'siblingDailyReadyConfirmation',
-  'derivedFromOrders:true',
   'missingCoverage:true',
 ]) assert.ok(server.includes(marker),`server must contain ${marker}`)
 
-console.log('wb-daily-ready-5132 single Order Feed recovery: ok')
+console.log('wb-daily-ready-5132 proven orders/sales recovery: ok')
