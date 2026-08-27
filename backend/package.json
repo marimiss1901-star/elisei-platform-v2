@@ -4,12 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "prestart": "node apply-period-coverage-fix.mjs && node apply-pool-resilience-fix.mjs && node apply-nightly-load-policy.mjs && node apply-current-stocks-and-wake.mjs && node apply-marketplace-auth-compat.mjs && node apply-fbs-reader-requeue.mjs && node apply-wb-reference-balance.mjs && node apply-order-feed-primary.mjs && node apply-order-feed-source-only.mjs",
+    "prestart": "node apply-period-coverage-fix.mjs && node apply-pool-resilience-fix.mjs && node apply-nightly-load-policy.mjs && node apply-current-stocks-and-wake.mjs && node apply-marketplace-auth-compat.mjs && node apply-fbs-reader-requeue.mjs && node apply-wb-reference-balance.mjs",
     "start": "node --import ./src/callcheck-auth-preload.mjs --import ./src/bootstrap-business-preload.mjs --import ./src/db-resilience-preload.mjs src/server.js",
-    "predev": "node apply-period-coverage-fix.mjs && node apply-pool-resilience-fix.mjs && node apply-nightly-load-policy.mjs && node apply-current-stocks-and-wake.mjs && node apply-marketplace-auth-compat.mjs && node apply-fbs-reader-requeue.mjs && node apply-wb-reference-balance.mjs && node apply-order-feed-primary.mjs && node apply-order-feed-source-only.mjs",
+    "predev": "node apply-period-coverage-fix.mjs && node apply-pool-resilience-fix.mjs && node apply-nightly-load-policy.mjs && node apply-current-stocks-and-wake.mjs && node apply-marketplace-auth-compat.mjs && node apply-fbs-reader-requeue.mjs && node apply-wb-reference-balance.mjs",
     "dev": "node --watch --import ./src/callcheck-auth-preload.mjs --import ./src/bootstrap-business-preload.mjs --import ./src/db-resilience-preload.mjs src/server.js",
     "test:stocks": "node tests/wb-integration-core.test.mjs",
-    "pretest": "node apply-period-coverage-fix.mjs && node apply-pool-resilience-fix.mjs && node apply-nightly-load-policy.mjs && node apply-current-stocks-and-wake.mjs && node apply-marketplace-auth-compat.mjs && node apply-fbs-reader-requeue.mjs && node apply-wb-reference-balance.mjs && node apply-order-feed-primary.mjs && node apply-order-feed-source-only.mjs",
+    "pretest": "node apply-period-coverage-fix.mjs && node apply-pool-resilience-fix.mjs && node apply-nightly-load-policy.mjs && node apply-current-stocks-and-wake.mjs && node apply-marketplace-auth-compat.mjs && node apply-fbs-reader-requeue.mjs && node apply-wb-reference-balance.mjs",
     "test": "node tests/run-all.mjs"
   },
   "dependencies": {
