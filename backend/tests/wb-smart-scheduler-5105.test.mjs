@@ -5,11 +5,11 @@ import {
 } from '../src/wb/smart-scheduler.js'
 
 assert.ok(stagePriority('products') < stagePriority('orders'),'catalog must be ready before operational stages')
-assert.ok(stagePriority('orders') < stagePriority('sales'),'orders are first Order Feed priority')
+assert.ok(stagePriority('orders') < stagePriority('sales'),'orders remain ahead of sales in the proven Statistics API lane')
 assert.ok(stagePriority('sales') < stagePriority('finance'),'sales priority remains ahead of finance inside the business ordering')
 assert.ok(stagePriority('finance') < stagePriority('fbsArchive'),'historical archive must never block current cabinet data')
-assert.equal(schedulerGroup('orders'),'orderFeed')
-assert.equal(schedulerGroup('sales'),'orderFeed')
+assert.equal(schedulerGroup('orders'),'statistics')
+assert.equal(schedulerGroup('sales'),'statistics')
 assert.equal(schedulerGroup('advertising'),'promotion')
 assert.equal(schedulerGroup('finance'),'finance')
 
@@ -21,7 +21,7 @@ assert.equal(Date.parse(byStage.products.nextAllowedAt),base)
 assert.equal(Date.parse(byStage.orders.nextAllowedAt),base)
 assert.equal(Date.parse(byStage.finance.nextAllowedAt),base)
 assert.equal(Date.parse(byStage.documents.nextAllowedAt),base)
-assert.ok(Date.parse(byStage.sales.nextAllowedAt)>Date.parse(byStage.orders.nextAllowedAt),'same Order Feed group must remain staggered')
+assert.ok(Date.parse(byStage.sales.nextAllowedAt)>Date.parse(byStage.orders.nextAllowedAt),'orders and sales share Statistics limits and must stay staggered')
 
 const winners=chooseCycleWinners([
   {connection_id:'a',stage:'orders',status:'queued'},
@@ -29,7 +29,7 @@ const winners=chooseCycleWinners([
   {connection_id:'b',stage:'advertising',status:'queued'},
   {connection_id:'b',stage:'finance',status:'queued'},
 ])
-assert.equal(winners.get(schedulerWinnerKey('a','orders')),'orders','Order Feed group should be allowed')
+assert.equal(winners.get(schedulerWinnerKey('a','orders')),'orders','Statistics group should be allowed')
 assert.equal(winners.get(schedulerWinnerKey('a','stocks')),'stocks','independent analytics group should run in the same cycle')
 assert.equal(winners.get(schedulerWinnerKey('b','advertising')),'advertising','promotion group should run independently')
 assert.equal(winners.get(schedulerWinnerKey('b','finance')),'finance','finance group should run independently')
@@ -68,4 +68,4 @@ for(const marker of [
   'Clock3',
 ]) assert.ok(dashboard.includes(marker),`Dashboard must contain ${marker}`)
 
-console.log('WB grouped Smart Scheduler + Order Feed lane regression tests passed')
+console.log('WB grouped Smart Scheduler + proven Statistics lane regression tests passed')

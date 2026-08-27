@@ -31,10 +31,10 @@ const PRIORITY = Object.freeze({
 
 const GROUP = Object.freeze({
   products:'content', tariffs:'content',
-  // Orders and sales are two ELISEI read models produced from one WB Order
-  // Feed snapshot. Keeping them in their own group prevents unrelated Analytics
-  // reports from delaying the seller-day operational feed.
-  orders:'orderFeed', sales:'orderFeed',
+  // Production rollback: until Order Feed is verified against a real cabinet,
+  // orders and sales use the proven Statistics API and stay serialized inside
+  // the statistics group.
+  orders:'statistics', sales:'statistics',
   sellerStocks:'marketplace', fbsArchive:'marketplace',
   stocks:'analytics', paidStorage:'analytics', acceptance:'analytics', measurementPenalties:'analytics',
   deductionsReport:'analytics', warehouseMeasurements:'analytics', antifraudRetention:'analytics',

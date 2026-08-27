@@ -7,9 +7,9 @@ import {
 
 const defaults=defaultLiveSyncSettings()
 assert.equal(defaults.enabled,true)
-assert.deepEqual(LIVE_SYNC_STAGES,['orders','stocks','sellerStocks'])
-assert.equal(defaults.intervals.orders,10800)
-assert.equal(defaults.intervals.sales,undefined,'sales is derived from the same Order Feed request and must not be scheduled independently')
+assert.deepEqual(LIVE_SYNC_STAGES,['orders','sales','stocks','sellerStocks'])
+assert.equal(defaults.intervals.orders,7200)
+assert.equal(defaults.intervals.sales,7200,'proven sales remain an independent Statistics API stream in production')
 assert.equal(defaults.intervals.stocks,7200)
 assert.equal(defaults.intervals.sellerStocks,7200)
 assert.equal(defaults.intervals.advertising,undefined,'advertising belongs to nightly ready, not seller-day polling')
@@ -18,13 +18,12 @@ assert.equal(defaults.intervals.questions,undefined,'questions belong to nightly
 assert.equal(defaults.intervals.chats,undefined,'chats belong to nightly ready')
 assert.equal(defaults.intervals.products,undefined,'products belong to nightly ready')
 
-// Existing cabinets migrate from old 30/60/120-minute settings. Order Feed uses
-// the universally safe 3-hour window, while current stocks stay at two hours.
-// A legacy sales interval is discarded instead of creating a second job.
-const normalized=normalizeLiveSyncSettings({enabled:true,intervals:{orders:7200,sales:1800,stocks:3600,sellerStocks:1800,chats:10}})
+// Existing cabinets migrate from old 30/60-minute settings to a calm two-hour
+// seller-day cadence for orders, sales and both stock contours.
+const normalized=normalizeLiveSyncSettings({enabled:true,intervals:{orders:1800,sales:1800,stocks:3600,sellerStocks:1800,chats:10}})
 assert.equal(normalized.enabled,true)
-assert.equal(normalized.intervals.orders,10800)
-assert.equal(normalized.intervals.sales,undefined)
+assert.equal(normalized.intervals.orders,7200)
+assert.equal(normalized.intervals.sales,7200)
 assert.equal(normalized.intervals.stocks,7200)
 assert.equal(normalized.intervals.sellerStocks,7200)
 assert.equal(normalized.intervals.chats,undefined,'legacy chat cadence must not re-enable daytime polling')
@@ -33,26 +32,30 @@ const active=Date.parse('2026-08-04T12:00:00Z') // 15:00 Moscow
 const overnight=Date.parse('2026-08-04T01:00:00Z') // 04:00 Moscow
 assert.equal(liveCadenceWindow(active,'Europe/Moscow'),'active')
 assert.equal(liveCadenceWindow(overnight,'Europe/Moscow'),'overnight')
-assert.equal(effectiveLiveIntervalSeconds('orders',{settings:{},now:active}),10800)
-assert.equal(effectiveLiveIntervalSeconds('orders',{settings:{},now:overnight}),21600)
+assert.equal(effectiveLiveIntervalSeconds('orders',{settings:{},now:active}),7200)
+assert.equal(effectiveLiveIntervalSeconds('orders',{settings:{},now:overnight}),14400)
+assert.equal(effectiveLiveIntervalSeconds('sales',{settings:{},now:active}),7200)
 assert.equal(effectiveLiveIntervalSeconds('stocks',{settings:{intervals:{stocks:3600}},now:active}),7200,'old one-hour stock cadence must migrate to two hours')
 
 const due=dueLiveStages({settings:{enabled:true},states:[
   {stage:'orders',status:'success',last_success_at:'2026-08-04T08:20:00Z'},
-  {stage:'sales',status:'success',last_success_at:'2026-08-01T08:00:00Z'},
+  {stage:'sales',status:'success',last_success_at:'2026-08-04T08:30:00Z'},
+  {stage:'sellerStocks',status:'success',last_success_at:'2026-08-04T11:30:00Z'},
   {stage:'stocks',status:'rate_limited',next_allowed_at:'2026-08-04T13:00:00Z'},
   {stage:'advertising',status:'success',last_success_at:'2026-08-01T11:00:00Z'},
   {stage:'reviews',status:'success',last_success_at:'2026-08-01T11:00:00Z'},
 ],now:active,timeZone:'Europe/Moscow'})
 assert.ok(due.includes('orders'))
-assert.ok(!due.includes('sales'),'sales must never consume its own seller-day scheduler slot')
+assert.ok(due.includes('sales'),'sales must receive its own calm seller-day refresh while Order Feed remains shadow-only')
+assert.ok(!due.includes('sellerStocks'),'fresh FBS stock must not be refreshed early')
 assert.ok(!due.includes('stocks'))
 assert.ok(!due.includes('advertising'),'advertising must never enter recurring seller-day polling')
 assert.ok(!due.includes('reviews'),'reviews must never enter recurring seller-day polling')
 
 const fair=dueLiveStages({settings:{enabled:true},states:[
-  {stage:'orders',status:'success',last_success_at:'2026-08-04T07:00:00Z'},
-  {stage:'sellerStocks',status:'success',last_success_at:'2026-08-04T07:00:00Z'},
+  {stage:'orders',status:'success',last_success_at:'2026-08-04T08:00:00Z'},
+  {stage:'sales',status:'success',last_success_at:'2026-08-04T08:00:00Z'},
+  {stage:'sellerStocks',status:'success',last_success_at:'2026-08-04T06:00:00Z'},
   {stage:'stocks',status:'success',last_success_at:'2026-08-04T11:30:00Z'},
 ],now:active,timeZone:'Europe/Moscow'})
 assert.equal(fair[0],'sellerStocks','most overdue operational stream must not be starved by fixed stage order')
@@ -90,4 +93,4 @@ for(const marker of [
 const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')
 for(const marker of ['Автоматическое обновление','ELISEI готовит кабинет до вашего входа','setupLiveWebhooks','updateLiveSync','Снимок за вчера']) assert.ok(dashboard.includes(marker),`Dashboard must contain ${marker}`)
 
-console.log('WB single-source Order Feed seller-day policy tests passed')
+console.log('WB proven orders/sales seller-day policy tests passed')
