@@ -2,10 +2,10 @@ import assert from 'node:assert/strict'
 import { LIVE_SYNC_STAGES, dueLiveStages } from '../src/wb/live-sync.js'
 import { DAILY_READY_OPERATIONAL_RECOVERY_STAGES, dailyHeavyStagePlan } from '../src/wb/daily-ready.js'
 
-assert.deepEqual(LIVE_SYNC_STAGES,['orders','stocks','sellerStocks'],
-  'seller-day recurring lane must contain one Order Feed source plus WB/FBS stocks')
-assert.deepEqual(DAILY_READY_OPERATIONAL_RECOVERY_STAGES,['orders'],
-  'closed-day orders/sales recovery must use one Order Feed source; advertising stays nightly')
+assert.deepEqual(LIVE_SYNC_STAGES,['orders','sales','stocks','sellerStocks'],
+  'seller-day recurring lane must contain proven orders/sales plus WB/FBS stocks')
+assert.deepEqual(DAILY_READY_OPERATIONAL_RECOVERY_STAGES,['orders','sales'],
+  'closed-day orders and sales recover independently; advertising stays nightly')
 
 const timezone='Europe/Moscow'
 const day=Date.parse('2026-08-25T12:00:00Z') // 15:00 Moscow
@@ -29,8 +29,7 @@ const states=[
 ]
 
 const dayDue=dueLiveStages({settings:{enabled:true},states,now:day,timeZone:timezone})
-assert.deepEqual(new Set(dayDue),new Set(['orders','stocks','sellerStocks']))
-assert.ok(!dayDue.includes('sales'),'derived sales must not produce a second WB seller-day call')
+assert.deepEqual(new Set(dayDue),new Set(['orders','sales','stocks','sellerStocks']))
 
 const dayHeavy=dailyHeavyStagePlan({states,now:day,timeZone:timezone})
 assert.deepEqual(dayHeavy,[],'non-operational refreshes must not start during seller day')
@@ -40,4 +39,4 @@ for(const stage of ['products','advertising','finance','paidStorage','acceptance
   assert.ok(nightHeavy.includes(stage),`stale ${stage} must be eligible for the next nightly pass`)
 }
 
-console.log('Single-source seller-day/night load policy regression passed')
+console.log('Proven orders/sales seller-day/night load policy regression passed')
