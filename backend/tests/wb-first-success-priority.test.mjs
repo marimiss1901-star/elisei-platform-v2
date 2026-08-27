@@ -3,9 +3,9 @@ import { dueLiveStages } from '../src/wb/live-sync.js'
 
 const now=Date.parse('2026-08-26T11:00:00Z') // 14:00 Moscow
 
-// A source stream that has never completed successfully must get one fair chance
-// before already-working stock streams that are merely more overdue. `sales` is
-// intentionally absent: it is persisted from the same successful Order Feed call.
+// Until Order Feed is verified live, orders and sales are independent proven
+// Statistics API streams. A never-successful operational stream gets one fair
+// chance before already-working streams that are merely more overdue.
 const due=dueLiveStages({
   settings:{enabled:true},
   now,
@@ -17,10 +17,11 @@ const due=dueLiveStages({
     {stage:'sellerStocks',status:'success',last_success_at:'2026-08-26T05:00:00Z'},
   ],
 })
-assert.equal(due[0],'orders','never-successful Order Feed must receive first-run priority once its interval is due')
-assert.ok(!due.includes('sales'),'derived sales must never become an independent live-sync candidate')
+assert.equal(due[0],'orders','never-successful orders must receive first-run priority once their interval is due')
+assert.ok(due.includes('sales'),'proven sales must remain an independent seller-day candidate')
 
-// A never-successful source must still respect its retry/cooldown window.
+// A never-successful stream must still respect its retry/cooldown window. Other
+// operational streams may continue when they are due.
 const blocked=dueLiveStages({
   settings:{enabled:true},
   now,
@@ -33,11 +34,9 @@ const blocked=dueLiveStages({
   ],
 })
 assert.ok(!blocked.includes('orders'),'first-success priority must never bypass WB rate-limit windows')
-assert.ok(!blocked.includes('sales'))
+assert.ok(blocked.includes('sales'),'sales must not be blocked by the orders cooldown')
 
-// Once the source has succeeded, normal overdue fairness applies only among the
-// three real seller-day sources. Here Order Feed is not yet due (3h cadence), so
-// the equally overdue 2h stock streams are ordered by their operational priority.
+// Once every operational stream has a success, normal overdue fairness applies.
 const normal=dueLiveStages({
   settings:{enabled:true},
   now,
@@ -49,7 +48,6 @@ const normal=dueLiveStages({
     {stage:'sellerStocks',status:'success',last_success_at:'2026-08-26T08:45:00Z'},
   ],
 })
-assert.equal(normal[0],'sellerStocks','after first success normal fairness must apply to real source streams')
-assert.ok(!normal.includes('sales'))
+assert.equal(normal[0],'sales','after first success the most overdue proven stream must win again')
 
-console.log('WB first-success single-source operational priority regression passed')
+console.log('WB first-success proven orders/sales operational priority regression passed')
