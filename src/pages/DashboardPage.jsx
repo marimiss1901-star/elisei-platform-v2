@@ -1866,7 +1866,12 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
             : (Array.isArray(coreData?.dailyTrend) ? coreData.dailyTrend : [])).slice(-366),
           periodCoverage:analyticsCore?.periodCoverage || coreData?.periodCoverage || null,
           fulfillment:analyticsCore?.fulfillment || coreData?.fulfillment || null,
-          advertising:advertisingSnapshot?.totals || advertisingSnapshot || null,
+          advertising:advertisingSnapshot ? {
+            totals:advertisingSnapshot.totals || advertisingSnapshot,
+            statsAvailable:Boolean(advertisingSnapshot.statsAvailable),
+            campaigns:Array.isArray(advertisingSnapshot.campaigns) ? advertisingSnapshot.campaigns.slice(0,80) : [],
+            productRows:Array.isArray(advertisingSnapshot.productRows) ? advertisingSnapshot.productRows.slice(0,120) : [],
+          } : null,
           lastSync:connection.lastSync || null,
         },
       })

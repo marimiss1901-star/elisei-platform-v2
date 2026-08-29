@@ -45,6 +45,11 @@ const ads = await ask('Какие рекламные кампании съеда
 assert.match(ads.text,/Реклама за/);
 assert.match(ads.text,/Поиск 2505/);
 
+const moneyAds = await ask('Какие рекламы тащат бабки?');
+assert.match(moneyAds.text,/Кампании, которые сейчас тащат деньги/);
+assert.match(moneyAds.text,/Поиск 2505/);
+assert.match(moneyAds.text,/ДРР|ROMI/);
+
 const decision = await ask('Что изменилось за выбранный период, почему и что мне сделать первым?');
 assert.match(decision.text,/Сравнил/);
 assert.match(decision.text,/Одно главное действие/);

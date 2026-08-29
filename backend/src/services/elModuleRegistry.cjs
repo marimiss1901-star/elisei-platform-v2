@@ -19,7 +19,7 @@ const MODULES = Object.freeze({
   },
   advertising: {
     title: 'Реклама и продвижение',
-    keywords: ['реклам', 'кампан', 'ддр', 'дрр', 'roas', 'romi', 'cpc', 'ctr', 'ставк', 'бюджет', 'продвижен'],
+    keywords: ['реклам', 'кампан', 'ддр', 'дрр', 'roas', 'romi', 'cpc', 'ctr', 'ставк', 'бюджет', 'продвижен', 'бабк', 'деньг', 'тащ', 'принос'],
     paths: ['/api/ads/el-insights', '/api/ads/overview', '/api/ads/campaigns', '/api/advertising/overview', '/api/promotion/analytics'],
   },
   stocks: {
