@@ -424,6 +424,38 @@ async function recoverLegacySearchQueryBindings({ connectionId = null } = {}) {
   return result.rows
 }
 
+async function recoverInvalidStockHistoryRetention({ connectionId = null } = {}) {
+  if (!pool) return []
+  const params = []
+  let connectionFilter = ''
+  if (connectionId) {
+    params.push(connectionId)
+    connectionFilter = ' AND connection_id=$1'
+  }
+  const result = await pool.query(`
+    UPDATE wb_sync_states
+    SET status='queued',next_allowed_at=NOW(),task_id=NULL,
+        last_error='ELISEI автоматически ограничил историю остатков актуальным окном WB и запускает отчёт повторно.',
+        metadata=(COALESCE(metadata,'{}'::jsonb) - 'createAttempted' - 'pollAttempts' - 'reportStatus')
+          || jsonb_build_object(
+            'phase','create',
+            'createAttempted',false,
+            'retentionRecovery',true,
+            'retentionRecoveredAt',NOW()
+          ),
+        updated_at=NOW()
+    WHERE stage='stockHistory'
+      AND status='error'
+      AND COALESCE(last_error,'') ILIKE '%invalid start day%'
+      AND COALESCE(last_error,'') ILIKE '%earliest available date%'
+      AND COALESCE(metadata->>'retentionRecovery','false') <> 'true'
+      ${connectionFilter}
+    RETURNING connection_id,stage
+  `,params)
+  if (result.rows.length) console.warn(`Stock history retention recovery queued ${result.rows.length} stage(s).`)
+  return result.rows
+}
+
 
 
 let smartSchedulerWinners = new Map()
@@ -788,6 +820,7 @@ async function initDatabase() {
   await recoverLegacyFinanceCooldowns()
   await recoverLegacyRuntimeRateWindows()
   await recoverLegacySearchQueryBindings()
+  await recoverInvalidStockHistoryRetention()
 }
 
 let financeLedgerBackfillTimer = null
@@ -6148,6 +6181,7 @@ app.get('/api/wb/connection', authRequired, async (req, res) => {
   await recoverExcessiveOperationalBackoffs({ connectionId:connection.id })
   await recoverLegacyRuntimeRateWindows({ connectionId:connection.id })
   await recoverLegacySearchQueryBindings({ connectionId:connection.id })
+  await recoverInvalidStockHistoryRetention({ connectionId:connection.id })
   let [tokens, states] = await Promise.all([getWbTokens(req.auth.sub, connection.id), getSyncStates(connection.id)])
   // 5.10.1 migration: уже подключённому кабинету не нужно перевыпускать ключ
   // после обновления ELISEI. Первый просмотр сам поставит в очередь новые
