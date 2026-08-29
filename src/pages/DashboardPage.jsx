@@ -3172,8 +3172,9 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
         </div>
 
         <div className="chat-stream" aria-live="polite">
-          {messages.map((message,index) => (
-            <div key={`${message.createdAt || index}-${index}`} className={`chat-message ${message.role} ${message.error ? 'error' : ''}`}>
+          {messages.map((rawMessage,index) => {
+            const message = normalizeElChatMessage(rawMessage)
+            return <div key={`${message.createdAt || index}-${index}`} className={`chat-message ${message.role} ${message.error ? 'error' : ''}`}>
               {message.role === 'el' && <div className="el-message-head"><b>ЭЛ</b>{message.reaction?.label && <span className={`el-reaction-chip ${message.reaction.mood || ''}`}>{message.reaction.label}</span>}</div>}
               <p>{message.text}</p>
               {message.role === 'el' && message.mode && <div className="el-response-mode">
@@ -3191,7 +3192,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
                 {message.sources.map((source,sourceIndex) => <a key={`${source.url}-${sourceIndex}`} href={source.url} target="_blank" rel="noreferrer">{source.title || source.url}</a>)}
               </div>}
             </div>
-          ))}
+          })}
           {chatBusy && <div className="chat-message el el-thinking-message"><b>ЭЛ</b><p><RefreshCw size={16} className="spin"/> {elMode === 'analyst' ? 'Считаю по данным кабинета…' : 'Думаю и проверяю источники…'}</p></div>}
         </div>
 
