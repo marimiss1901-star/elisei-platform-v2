@@ -44,8 +44,9 @@ function combinedStockReadiness(coverage = {}) {
 
 const usable = state => state === 'ready' || state === 'partial'
 const safeMetric = (value,state,{ zeroUnsafe = false } = {}) => {
-  if (!usable(state) || value === undefined || value === null || !Number.isFinite(Number(value))) return null
+  if (value === undefined || value === null || !Number.isFinite(Number(value))) return null
   const number = Number(value)
+  if (!usable(state)) return number === 0 ? null : number
   if (state === 'partial' && zeroUnsafe && number === 0) return null
   return number
 }
@@ -547,7 +548,21 @@ export function buildProduct360({
   coverage = {},
   sources = {},
 } = {}) {
-  const readiness = product360Readiness(coverage)
+  const baseReadiness = product360Readiness(coverage)
+  const hasSavedMetric = keys => keys.some(key => {
+    const value = product?.[key]
+    return value !== undefined && value !== null && Number.isFinite(Number(value)) && Number(value) !== 0
+  })
+  const readiness = {
+    ...baseReadiness,
+    orders:usable(baseReadiness.orders) || hasSavedMetric(['ordersCount']) ? (usable(baseReadiness.orders) ? baseReadiness.orders : 'partial') : baseReadiness.orders,
+    sales:usable(baseReadiness.sales) || hasSavedMetric(['revenue','salesCount','returnsCount','returnRate','averagePrice']) ? (usable(baseReadiness.sales) ? baseReadiness.sales : 'partial') : baseReadiness.sales,
+    finance:usable(baseReadiness.finance) || hasSavedMetric(['sellerPayable','commission','logistics','storage','acceptance','acquiring','penalties','deductions','additionalPayment','expenses','profit','margin']) ? (usable(baseReadiness.finance) ? baseReadiness.finance : 'partial') : baseReadiness.finance,
+    advertising:usable(baseReadiness.advertising) || hasSavedMetric(['advertising','adSpend']) ? (usable(baseReadiness.advertising) ? baseReadiness.advertising : 'partial') : baseReadiness.advertising,
+    stocks:usable(baseReadiness.stocks) || hasSavedMetric(['stock','fbsStock','fboStock','stockCoverDays']) ? (usable(baseReadiness.stocks) ? baseReadiness.stocks : 'partial') : baseReadiness.stocks,
+    fbsStocks:usable(baseReadiness.fbsStocks) || hasSavedMetric(['fbsStock']) ? (usable(baseReadiness.fbsStocks) ? baseReadiness.fbsStocks : 'partial') : baseReadiness.fbsStocks,
+    fboStocks:usable(baseReadiness.fboStocks) || hasSavedMetric(['fboStock']) ? (usable(baseReadiness.fboStocks) ? baseReadiness.fboStocks : 'partial') : baseReadiness.fboStocks,
+  }
   const reviews = reviewRows.filter(row=>product360Matches(row,product).matched).map(normalizeReview)
   const questions = questionRows.filter(row=>product360Matches(row,product).matched).map(normalizeQuestion)
   const searches = searchRows
@@ -564,7 +579,13 @@ export function buildProduct360({
     // Do not use vendor/barcode fallbacks for campaign money.
     return match.matched && match.method === 'nmID'
   })
-  const adSummary = summarizeAdvertising(ads,readiness.advertising)
+  const rawAdSummary = summarizeAdvertising(ads,readiness.advertising)
+  const savedProductAdSpend = nullable(product?.advertising)
+  const adSummary = {
+    ...rawAdSummary,
+    spend:rawAdSummary.spend ?? (savedProductAdSpend != null && savedProductAdSpend > 0 ? savedProductAdSpend : null),
+    source:rawAdSummary.spend != null ? 'campaign_nm_stats' : (savedProductAdSpend != null && savedProductAdSpend > 0 ? 'product_analytics_saved' : 'none'),
+  }
   const reviewRatings = reviews.map(row=>row.rating).filter(value=>value != null)
   const reviewReady = usable(readiness.reviews)
   const reviewSummary = {
