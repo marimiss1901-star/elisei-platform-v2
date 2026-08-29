@@ -316,6 +316,14 @@ function asksProductPnlDetail(message = '') {
   return /по\s+(?:каждому\s+)?артикул|артикул|товар|nmid|расшифров|детализац|по\s+каждому|эквайринг|комисси|логистик|хранен|штраф|удержан|затрат/i.test(String(message || ''));
 }
 
+function asksProfitRevenueGap(message = '') {
+  return /почему\s+прибыл[ьи]?\s+(?:ниже|меньше)\s+выручк|прибыл[ьи]?\s+(?:ниже|меньше)\s+выручк|куда\s+делась\s+выручк/i.test(String(message || ''));
+}
+
+function asksBusinessPraise(message = '') {
+  return /похвал[иь].*(?:делу|кабинет|хорош)|что\s+(?:в\s+кабинете\s+)?(?:уже\s+)?хорош/i.test(String(message || ''));
+}
+
 function formatProductPnlDetail(data, tone, options = {}) {
   const rows = Array.isArray(data?.productPnlRows) ? data.productPnlRows : [];
   const message = String(options.message || '');
@@ -346,7 +354,36 @@ function formatProductPnlDetail(data, tone, options = {}) {
   return lines.filter(Boolean).join('\n');
 }
 
+function formatProfitRevenueGap(data, tone, options = {}) {
+  const s = data?.summary || {};
+  const period = periodLabel(data, options.context);
+  const expenses = [
+    ['себестоимость', s.cogs],
+    ['комиссия WB', s.commission],
+    ['логистика', s.logistics],
+    ['реклама', s.advertising],
+    ['эквайринг', s.acquiring],
+    ['хранение', s.storage],
+    ['штрафы/удержания', Number(s.penalties || 0) + Number(s.deductions || 0)],
+    ['налог', s.tax],
+    ['постоянные расходы', s.fixed],
+  ].filter(([,value]) => Number(value || 0) !== 0);
+  const lines = [
+    `Прибыль ниже выручки за ${period}, потому что выручка — это деньги до расходов, а прибыль остаётся после WB-комиссии, логистики, рекламы, себестоимости и прочих списаний.`,
+    `Сейчас: выручка ${money(s.revenue)}, операционная прибыль ${money(s.operatingProfit)}, маржа ${percent(s.margin)}.`,
+  ];
+  if (expenses.length) {
+    lines.push(`Что съело разницу: ${expenses.map(([label,value]) => `${label} ${money(value)}`).join('; ')}.`);
+  } else {
+    lines.push('Расходная детализация за период пока неполная, поэтому я не буду раскладывать разницу выдуманными нулями.');
+  }
+  const biggest = [...expenses].sort((a,b) => Math.abs(Number(b[1] || 0))-Math.abs(Number(a[1] || 0)))[0];
+  if (biggest) lines.push(`Первым проверь: ${biggest[0]} — это самый заметный подтверждённый расход в этом ответе.`);
+  return lines.filter(Boolean).join('\n');
+}
+
 function formatFinance(data, tone, options = {}) {
+  if (asksProfitRevenueGap(options.message)) return formatProfitRevenueGap(data, tone, options);
   if (asksProductPnlDetail(options.message)) return formatProductPnlDetail(data, tone, options);
   const s = data?.summary || {};
   const missing = Array.isArray(data?.missingCostProducts) ? data.missingCostProducts : [];
@@ -397,6 +434,27 @@ function formatOneActionFromFinance(data, tone, options = {}) {
   const warnings = coverageWarnings(data).slice(0, 1);
   if (warnings.length) lines.push(`Ограничение: ${warnings[0]}`);
   return lines.filter(Boolean).join('\n');
+}
+
+function formatBusinessPraise({ overviewData, financeData, stocksData, advertisingData, context = {}, identity = {} } = {}) {
+  const name = String(identity?.userName || '').trim().split(/\s+/)[0];
+  const prefix = name ? `${name}, ` : '';
+  const summary = overviewData?.summary || financeData?.summary || context?.screen?.summary || {};
+  const facts = [];
+  if (summary.revenue != null && Number(summary.revenue) > 0) facts.push(`есть подтверждённая выручка ${money(summary.revenue)}`);
+  if (summary.sales != null && Number(summary.sales) > 0) facts.push(`продажи уже читаются: ${number(summary.sales)} шт.`);
+  if (summary.operatingProfit != null && Number(summary.operatingProfit) > 0) facts.push(`операционная прибыль положительная: ${money(summary.operatingProfit)}`);
+  if (summary.stockUnits != null) facts.push(`остатки собраны в единый снимок: ${number(summary.stockUnits)} шт.`);
+  const adsSpend = advertisingData?.summary?.spend ?? advertisingData?.advertising?.totals?.spend ?? summary.advertising;
+  if (adsSpend != null && Number(adsSpend) > 0) facts.push(`реклама уже связана с кабинетом: расход ${money(adsSpend)}`);
+  const lines = [`${prefix}по делу: уже хорошо то, что кабинет не пустой и ELISEI опирается на факты, а не на красивую заглушку.`];
+  if (facts.length) {
+    lines.push(`Что подтверждено: ${facts.slice(0,4).join('; ')}.`);
+  } else {
+    lines.push('Даже если часть потоков ещё догружается, хорошо уже то, что система честно отделяет подтверждённые данные от ожидающих и не рисует ложные нули.');
+  }
+  lines.push('Самое ценное: ты довела кабинет до состояния, где уже можно принимать решения по периодам, товарам, рекламе, финансам и закупкам.');
+  return lines.join('\n');
 }
 
 function formatProducts(data, tone) {
@@ -805,12 +863,29 @@ async function runElAnalyst(options = {}) {
 
   let modules = options.classification?.modules?.length ? options.classification.modules.slice(0, 3) : inferModules(message, options.history, 3);
   const decisionRequest = isDecisionRequest(message);
+  const businessPraiseRequest = asksBusinessPraise(message);
   // Эл 2.0: диагностический запрос сам агрегирует сравнение периодов и причины,
   // поэтому не дублируем его обычными сводками finance/sales/overview.
   if (modules.includes('diagnostics') && decisionRequest) modules = ['diagnostics', 'finance'];
+  if (businessPraiseRequest) modules = ['overview', 'finance', 'stocks', 'advertising'];
   const results = await options.dataBridge.getMany(modules, message);
   const sections = [];
   const warnings = [];
+  if (businessPraiseRequest) {
+    const overviewData = moduleData(results.overview);
+    const financeData = moduleData(results.finance);
+    const stocksData = moduleData(results.stocks);
+    const advertisingData = moduleData(results.advertising);
+    sections.push(formatBusinessPraise({
+      overviewData:results.overview?.ok ? overviewData : null,
+      financeData:results.finance?.ok ? financeData : null,
+      stocksData:results.stocks?.ok ? stocksData : null,
+      advertisingData:results.advertising?.ok ? advertisingData : null,
+      context:options.context,
+      identity:options.identity,
+    }));
+    warnings.push(...coverageWarnings(overviewData),...coverageWarnings(financeData),...coverageWarnings(stocksData),...coverageWarnings(advertisingData));
+  }
   const relationRequest = asksReviewReturnLink(message) && modules.includes('reviews') && modules.includes('returns');
   const relationHandled = new Set();
   if (relationRequest) {
@@ -824,6 +899,7 @@ async function runElAnalyst(options = {}) {
     warnings.push(...coverageWarnings(returnsData),...coverageWarnings(reviewsData));
   }
   for (const moduleName of modules) {
+    if (businessPraiseRequest) continue;
     if (relationHandled.has(moduleName)) continue;
     const result = results[moduleName];
     let data = moduleData(result);
