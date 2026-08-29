@@ -24,7 +24,7 @@ const MODULES = Object.freeze({
   },
   stocks: {
     title: 'Остатки и склады',
-    keywords: ['остат', 'склад', 'заканчива', 'дефицит', 'оборачиваем', 'хранен', 'поставк', 'stock'],
+    keywords: ['остат', 'склад', 'заканчива', 'закончат', 'скоро закончатся', 'дефицит', 'оборачиваем', 'хранен', 'поставк', 'stock'],
     paths: ['/api/stocks/analytics', '/api/stocks', '/api/wb/stocks', '/api/inventory', '/api/warehouses/stocks'],
   },
   finance: {
@@ -59,7 +59,7 @@ const MODULES = Object.freeze({
   },
   procurement: {
     title: 'Закупки и пополнение',
-    keywords: ['закуп', 'дозаказ', 'пополн', 'поставить', 'поставка', 'план закуп', 'сколько заказать'],
+    keywords: ['закуп', 'дозаказ', 'дозаказывать', 'стоит ли дозаказывать', 'пополн', 'поставить', 'поставка', 'план закуп', 'сколько заказать'],
     paths: ['/api/procurement/recommendations', '/api/procurement', '/api/purchase-plan', '/api/supplies/recommendations', '/api/replenishment'],
   },
   sync: {

@@ -1,0 +1,73 @@
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { detectModules } = require('../src/services/elModuleRegistry.cjs');
+const { runElAnalyst } = require('../src/services/elAnalystEngine.cjs');
+
+const period = { from:'2026-08-28',to:'2026-08-28',days:1 };
+const summary = {
+  revenue:109257,orders:117,sales:164,returns:4,returnRate:2.4,
+  cogs:29138,commission:21851,logistics:0,advertising:8907,storage:0,acquiring:0,
+  penalties:0,deductions:0,tax:8924,fixed:0,operatingProfit:44139,margin:40.4,
+};
+const financeRows = [
+  {nmID:2505,vendorCode:'2505',title:'Удлинитель 3м',revenue:109257,sales:164,returns:4,advertising:8907,commission:21851,logistics:0,acquiring:0,storage:0,expenses:65118,profit:44139,margin:40.4,financeSource:'wb_finance_api'},
+];
+const baseData = {
+  overview:{ok:true,data:{available:true,period,summary,criticalProducts:[],topRecommendations:[{title:'Проверить рекламу 2505'}]}},
+  finance:{ok:true,data:{available:true,period,summary,productPnlRows:financeRows,lossMakingProducts:[],missingCostProducts:[]}},
+  advertising:{ok:true,data:{available:true,period,summary:{spend:8907,operatingProfit:44139,margin:40.4},advertising:{period,statsAvailable:true,totals:{spend:8907,revenue:109257,orders:164},campaigns:[{advertId:77,name:'Поиск 2505',spend:8907,revenue:109257,orders:164,clicks:420}]},productsWithAds:financeRows}},
+  stocks:{ok:true,data:{available:true,period,summary:{stockUnits:12,zeroStock:1,lowStock:2,slowStock:0,stockCoverDays:6},lowStockProducts:[{nmID:2505,vendorCode:'2505',title:'Удлинитель 3м',stock:3,stockCoverDays:4,profit:44139}],slowStockProducts:[]}},
+  procurement:{ok:true,data:{available:true,period,candidates:[{nmID:2505,vendorCode:'2505',title:'Удлинитель 3м',stock:3,stockCoverDays:4,profit:44139}],exclusions:[]}},
+  returns:{ok:true,data:{available:true,period,summary:{returns:4,sales:164,returnRate:2.4},highestReturnRate:[{nmID:2505,vendorCode:'2505',title:'Удлинитель 3м',returns:4,returnRate:2.4}]}},
+  reviews:{ok:true,data:{available:true,period,summary:{reviews:{total:12,averageRating:4.6,lowRated:1,unanswered:0},questions:{total:2,unanswered:0},chats:{total:0}},productSignals:[{nmID:2505,vendorCode:'2505',title:'Удлинитель 3м',totalReviews:12,lowRatedReviews:1,unansweredReviews:0,unansweredQuestions:0,averageRating:4.6}],lowRatedReviews:[{nmID:2505,vendorCode:'2505',title:'Удлинитель 3м',rating:2,text:'Короткий провод'}],relatedReturns:[{nmID:2505,vendorCode:'2505',title:'Удлинитель 3м',returns:4,returnRate:2.4}]}},
+  products:{ok:true,data:{available:true,period,summary:{activeProducts:1},products:[financeRows[0]]}},
+  diagnostics:{ok:true,data:{available:true,period,comparePeriod:{from:'2026-08-27',to:'2026-08-27',days:1},state:'down',headlineMetric:'operatingProfit',headlineChange:{value:-1200,pct:-2.7},metrics:{revenue:{available:true,value:900},orders:{available:true,value:3},sales:{available:true,value:4},operatingProfit:{available:true,value:-1200}},causes:[{title:'Реклама стала дороже',evidence:'Расход вырос относительно прошлого периода.',impact:8907,impactKind:'direct_expense'}],action:{text:'Проверь кампанию Поиск 2505 и её вклад в прибыль.',reason:'это самый заметный расход'},confidence:'high'}},
+};
+
+async function ask(message) {
+  const modules = detectModules(message, 4);
+  return runElAnalyst({
+    message,
+    history:[],
+    context:{ period,screen:{ period,summary } },
+    identity:{userId:'u1',userName:'Мария'},
+    personality:{character:'insider',humor:'off',support:true,celebrations:true,address:'informal'},
+    classification:{modules,reason:'cabinet-question'},
+    dataBridge:{ async getMany(requested) {
+      return Object.fromEntries(requested.map(module => [module, baseData[module] || {ok:false,warning:`Нет тестовых данных ${module}`}]));
+    }},
+  });
+}
+
+const ads = await ask('Какие рекламные кампании съедают прибыль?');
+assert.match(ads.text,/Реклама за/);
+assert.match(ads.text,/Поиск 2505/);
+
+const decision = await ask('Что изменилось за выбранный период, почему и что мне сделать первым?');
+assert.match(decision.text,/Сравнил/);
+assert.match(decision.text,/Одно главное действие/);
+
+const procurement = await ask('Какие товары скоро закончатся и стоит ли их дозаказывать?');
+assert.match(procurement.text,/Кандидаты на пополнение|Риск дефицита/);
+assert.match(procurement.text,/2505/);
+
+const relation = await ask('Свяжи возвраты с отзывами и карточками');
+assert.match(relation.text,/Связал отзывы с возвратами/);
+assert.match(relation.text,/2505/);
+
+const profitGap = await ask('Почему прибыль ниже выручки?');
+assert.match(profitGap.text,/выручка — это деньги до расходов/);
+assert.match(profitGap.text,/Что съело разницу/);
+
+const tired = await ask('Эл, я устала. Помоги выбрать одно главное действие.');
+assert.match(tired.text,/Понимаю, что сейчас тяжело/);
+assert.match(tired.text,/Одно главное действие/);
+
+const praise = await ask('Похвали меня по делу: что в кабинете уже хорошо?');
+assert.match(praise.text,/по делу/);
+assert.match(praise.text,/подтвержд/);
+assert.match(praise.text,/выручка|продажи|остатки|реклама/);
+
+console.log('ELISEI El chat suggestion regression tests passed');
