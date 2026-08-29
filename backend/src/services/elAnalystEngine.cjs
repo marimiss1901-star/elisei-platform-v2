@@ -177,6 +177,29 @@ function screenFallback(moduleName, context = {}) {
   if (moduleName === 'finance' && has('revenue','operatingProfit','margin')) {
     return { available:true, summary, period, missingCostProducts:[], lossMakingProducts:[], warning:'Использованы подтверждённые финансовые показатели текущего экрана ELISEI; построчная детализация временно недоступна.' };
   }
+  if (moduleName === 'advertising') {
+    const advertising = screen.advertising && typeof screen.advertising === 'object' ? screen.advertising : null;
+    if (advertising) {
+      const campaigns = Array.isArray(advertising.campaigns) ? advertising.campaigns : [];
+      const productRows = Array.isArray(advertising.productRows) ? advertising.productRows : [];
+      const totals = advertising.totals && typeof advertising.totals === 'object' ? advertising.totals : advertising;
+      if (campaigns.length || productRows.length || ['spend','revenue','orders'].some(key => totals[key] != null && Number.isFinite(Number(totals[key])))) {
+        return {
+          available:true,
+          summary:{ spend:totals.spend, operatingProfit:summary?.operatingProfit, margin:summary?.margin },
+          advertising:{
+            totals,
+            period,
+            statsAvailable:Boolean(advertising.statsAvailable || campaigns.some(item => item?.statsStatus === 'loaded') || Number(totals.revenue || totals.orders || 0) > 0),
+            campaigns,
+            productRows,
+          },
+          productsWithAds:[],
+          warning:'Использован текущий рекламный снимок экрана ELISEI; если WB ещё не отдал всю статистику, часть кампаний может быть без выручки/заказов.',
+        };
+      }
+    }
+  }
   return null;
 }
 
@@ -261,16 +284,25 @@ function campaignMetrics(campaign = {}) {
     revenue,
     drr: revenue > 0 ? spend / revenue * 100 : null,
     roas: spend > 0 ? revenue / spend : null,
+    romi: spend > 0 ? (revenue - spend) / spend * 100 : campaign.romi ?? null,
     cpo: orders > 0 ? spend / orders : null,
     cpc: clicks > 0 ? spend / clicks : campaign.cpc ?? null,
   };
 }
 
-function formatAdvertising(data, tone) {
+function formatAdvertising(data, tone, options = {}) {
   const s = data?.summary || {};
   const ads = data?.advertising || {};
   const totals = ads.totals || {};
   const campaigns = (Array.isArray(ads.campaigns) ? ads.campaigns : []).map(campaignMetrics).filter((item) => item.spend > 0 || item.statsStatus === 'loaded');
+  const message = String(options.message || tone?.message || '');
+  const asksWinners = /тащ|принос|бабк|деньг|какие.*(?:дают|делают)|окуп/i.test(message) && !/съеда|жр|слива|минус|убыт/i.test(message);
+  const winners = [...campaigns].filter(item => Number(item.revenue || 0) > 0 || Number(item.orders || 0) > 0).sort((a,b) => {
+    const aScore = Number(a.revenue || 0) - Number(a.spend || 0);
+    const bScore = Number(b.revenue || 0) - Number(b.spend || 0);
+    if (bScore !== aScore) return bScore - aScore;
+    return Number(b.roas || 0) - Number(a.roas || 0);
+  }).slice(0,5);
   const risky = [...campaigns].sort((a, b) => {
     const aScore = a.revenue <= 0 && a.spend > 0 ? 100000 + a.spend : Number(a.drr || 0);
     const bScore = b.revenue <= 0 && b.spend > 0 ? 100000 + b.spend : Number(b.drr || 0);
@@ -285,7 +317,16 @@ function formatAdvertising(data, tone) {
     `Реклама за ${ads.period?.from && ads.period?.to ? `${ads.period.from} — ${ads.period.to}` : periodLabel(data)}: расходы ${money(totals.spend ?? s.spend)}, рекламная выручка ${money(totals.revenue)}, заказы ${number(totals.orders)}, ДРР ${percent(totalDrr)}.`,
   ];
   if (!ads.statsAvailable) lines.push('Статистика кампаний WB ещё не загружена полностью — выводы по эффективности ограничены.');
-  if (risky.length) {
+  if (asksWinners) {
+    if (winners.length) {
+      lines.push('Кампании, которые сейчас тащат деньги по подтверждённой рекламной статистике:');
+      winners.forEach((item) => lines.push(`• ${item.name || `Кампания ${item.advertId || ''}`}: выручка ${money(item.revenue)}, расход ${money(item.spend)}, заказов ${number(item.orders)}, ДРР ${percent(item.drr)}, ROMI ${percent(item.romi)}.`));
+      lines.push(`Вывод: держи фокус на ${winners[0].name || `кампании ${winners[0].advertId}`}; масштабировать можно только после проверки прибыли товара, комиссии, логистики и себестоимости.`);
+    } else if (campaigns.length) {
+      lines.push('По кампаниям вижу расходы, но подтверждённых заказов/рекламной выручки пока нет. Нулём прибыль не считаю: WB мог ещё не отдать статистику.');
+      lines.push('Вывод: сейчас нельзя честно назвать “тащит бабки”. Сначала обновить статистику рекламы, потом ранжировать по выручке, ДРР и прибыли товара.');
+    }
+  } else if (risky.length) {
     lines.push('Кампании, которые нужно проверить первыми:');
     risky.forEach((item) => lines.push(`• ${item.name || `Кампания ${item.advertId || ''}`}: расход ${money(item.spend)}, выручка ${money(item.revenue)}, ДРР ${percent(item.drr)}, заказов ${number(item.orders)}.`));
   }
@@ -295,7 +336,7 @@ function formatAdvertising(data, tone) {
   } else if ((data?.productsWithAds || []).length && (data?.productsWithAds || []).every((item) => item.profit == null)) {
     lines.push('Прибыль после рекламы нельзя подтвердить: у рекламируемых товаров не заполнена себестоимость. ДРР и расходы я показываю, но минус не выдумываю.');
   }
-  lines.push(`Вывод: ${risky[0] ? `начни с ${risky[0].name || `кампании ${risky[0].advertId}`}` : 'сначала дождись полной статистики кампаний'}.${mildHumor(tone, 'ads')}`);
+  if (!asksWinners) lines.push(`Вывод: ${risky[0] ? `начни с ${risky[0].name || `кампании ${risky[0].advertId}`}` : 'сначала дождись полной статистики кампаний'}.${mildHumor(tone, 'ads')}`);
   return lines.filter(Boolean).join('\n');
 }
 
