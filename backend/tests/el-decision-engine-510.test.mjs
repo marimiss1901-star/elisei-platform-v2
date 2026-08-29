@@ -65,15 +65,50 @@ const answer = await runElAnalyst({
   dataBridge:{
     async getMany(modules) {
       requestedModules = modules;
-      return { diagnostics:{ok:true,data:analysis} };
+      return {
+        diagnostics:{ok:true,data:analysis},
+        finance:{ok:true,data:{ available:true,period:current.period,summary:current.summary,productPnlRows:[],lossMakingProducts:[] }},
+      };
     },
   },
 });
-assert.deepEqual(requestedModules,['diagnostics']);
-assert.deepEqual(answer.modulesUsed,['diagnostics']);
+assert.deepEqual(requestedModules,['diagnostics','finance']);
+assert.deepEqual(answer.modulesUsed,['diagnostics','finance']);
 assert.match(answer.text,/Сравнил/);
 assert.match(answer.text,/Почему это произошло:/);
 assert.match(answer.text,/Одно главное действие сейчас:/);
 assert.match(answer.text,/Уверенность вывода: высокая/);
+assert.doesNotMatch(answer.text,/P&L за/);
+
+let tiredModules = null;
+const tiredAnswer = await runElAnalyst({
+  message:'Эл, я устала. Помоги выбрать одно главное действие.',
+  history:[],
+  context:{ period:current.period },
+  identity:{userId:'u1',userName:'Мария'},
+  personality:{character:'insider',humor:'off',support:true,celebrations:false,address:'informal'},
+  classification:{modules:['diagnostics'],reason:'cabinet-question'},
+  dataBridge:{
+    async getMany(modules) {
+      tiredModules = modules;
+      return {
+        diagnostics:{ok:false,warning:'Для анализа изменений нужен предыдущий сопоставимый период.'},
+        finance:{ok:true,data:{
+          available:true,
+          period:current.period,
+          summary:{...current.summary,operatingProfit:-120550,margin:-16.3},
+          productPnlRows:[{nmID:2505,vendorCode:'2505',title:'Удлинитель 3м',revenue:311647,advertising:34818,commission:52000,logistics:12000,expenses:180000,profit:-45000,margin:-14.4}],
+          lossMakingProducts:[{nmID:2505,vendorCode:'2505',title:'Удлинитель 3м',revenue:311647,advertising:34818,expenses:180000,profit:-45000,margin:-14.4}],
+        }},
+      };
+    },
+  },
+});
+assert.deepEqual(tiredModules,['diagnostics','finance']);
+assert.match(tiredAnswer.text,/Понимаю, что сейчас тяжело/);
+assert.match(tiredAnswer.text,/Одно главное действие/);
+assert.match(tiredAnswer.text,/2505/);
+assert.match(tiredAnswer.text,/SKU 360/);
+assert.doesNotMatch(tiredAnswer.text,/P&L за/);
 
 console.log('ELISEI 5.10.0 decision engine tests passed');
