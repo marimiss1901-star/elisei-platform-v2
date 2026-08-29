@@ -56,7 +56,8 @@ function coverageWarnings(data) {
   if (data?.warning) warnings.push(data.warning);
   if (Array.isArray(data?.syncWarnings)) warnings.push(...data.syncWarnings.slice(0, 2));
   if (data?.coverage?.note) warnings.push(data.coverage.note);
-  return [...new Set(warnings.filter(Boolean))];
+  return [...new Set(warnings.filter(Boolean))]
+    .filter(item => !/timeout exceeded when trying to connect|connection timeout|database.*reconnect/i.test(String(item)));
 }
 
 function fulfillmentOrders(data = {}) {
@@ -361,8 +362,52 @@ function asksProfitRevenueGap(message = '') {
   return /почему\s+прибыл[ьи]?\s+(?:ниже|меньше)\s+выручк|прибыл[ьи]?\s+(?:ниже|меньше)\s+выручк|куда\s+делась\s+выручк/i.test(String(message || ''));
 }
 
+function asksTurnaroundPlan(message = '') {
+  return /(?:кабинет|бизнес|p&l|pnl|прибыл|марж).*(?:минус|убыт|просел|плохо)|(?:вытян|вывест|вытащ).*(?:плюс|прибыл)|(?:решени|план|что\s+делать).*(?:плюс|минус|убыт)|ж[её]стк\w*\s+конкур/i.test(String(message || ''));
+}
+
 function asksBusinessPraise(message = '') {
   return /похвал[иь].*(?:делу|кабинет|хорош)|что\s+(?:в\s+кабинете\s+)?(?:уже\s+)?хорош/i.test(String(message || ''));
+}
+
+function formatTurnaroundPlan({ financeData, advertisingData, pricingData, procurementData, context = {}, identity = {} } = {}) {
+  const name = String(identity?.userName || '').trim().split(/\s+/)[0];
+  const prefix = name ? `${name}, ` : '';
+  const summary = financeData?.summary || context?.screen?.summary || {};
+  const period = periodLabel(financeData || { period:context?.period }, context);
+  const revenue = Number(summary.revenue);
+  const profit = Number(summary.operatingProfit);
+  const gap = Number.isFinite(profit) && profit < 0 ? Math.abs(profit) : 0;
+  const expenses = [
+    ['логистика', summary.logistics],
+    ['комиссия WB', summary.commission],
+    ['реклама', summary.advertising],
+    ['налог', summary.tax],
+    ['себестоимость', summary.cogs],
+    ['хранение', summary.storage],
+  ].filter(([,value]) => Number(value || 0) > 0).sort((a,b) => Number(b[1] || 0)-Number(a[1] || 0));
+  const campaigns = (Array.isArray(advertisingData?.advertising?.campaigns) ? advertisingData.advertising.campaigns : []).map(campaignMetrics);
+  const winners = campaigns.filter(item => Number(item.revenue || 0) > 0 || Number(item.orders || 0) > 0)
+    .sort((a,b) => (Number(b.revenue || 0)-Number(b.spend || 0)) - (Number(a.revenue || 0)-Number(a.spend || 0))).slice(0,3);
+  const burners = campaigns.filter(item => Number(item.spend || 0) > 0 && Number(item.revenue || 0) <= 0)
+    .sort((a,b) => Number(b.spend || 0)-Number(a.spend || 0)).slice(0,3);
+  const lossProducts = Array.isArray(financeData?.lossMakingProducts) ? financeData.lossMakingProducts.slice(0,4) : [];
+  const stockCandidates = Array.isArray(procurementData?.candidates) ? procurementData.candidates.slice(0,4) : [];
+  const priceRisks = Array.isArray(pricingData?.lossMakingProducts) ? pricingData.lossMakingProducts.slice(0,4) : lossProducts;
+  const lines = [
+    `${prefix}по ${period} кабинет в минусе: выручка ${money(revenue)}, операционная прибыль ${money(profit)}, маржа ${percent(summary.margin)}. Чтобы выйти хотя бы в ноль, нужно вернуть примерно ${money(gap)} прибыли без потери продаж.`,
+    'План выхода в плюс с учетом жесткой конкуренции:',
+  ];
+  if (expenses.length) lines.push(`1. Сначала бить по самым большим подтверждённым расходам: ${expenses.slice(0,4).map(([label,value]) => `${label} ${money(value)}`).join('; ')}. Это быстрее, чем просто поднимать цену.`);
+  if (burners.length) lines.push(`2. Рекламу не выключать всю: урезать/ставить на паузу кампании без подтверждённой отдачи: ${burners.map(item => `${item.name || `кампания ${item.advertId}`} — расход ${money(item.spend)}, выручка ${money(item.revenue)}`).join('; ')}.`);
+  else lines.push('2. Рекламу делить на две корзины: оставить кампании с заказами и приемлемым ДРР, а кампании без выручки держать на минимальном тестовом бюджете до подтверждения статистики.');
+  if (winners.length) lines.push(`3. Масштабировать только то, что уже тащит деньги: ${winners.map(item => `${item.name || `кампания ${item.advertId}`} — выручка ${money(item.revenue)}, ДРР ${percent(item.drr)}`).join('; ')}. Перед ростом бюджета проверить прибыль товара, а не только заказы.`);
+  if (priceRisks.length) lines.push(`4. Цены трогать точечно: не общий рост по кабинету, а товары с минусом/низкой маржой: ${priceRisks.map(item => `${titleOf(item)} — прибыль ${money(item.profit)}, маржа ${percent(item.margin)}`).join('; ')}. При жесткой конкуренции безопаснее сначала поднять цену на 1-3% или убрать лишнюю скидку, чем резко улететь выше рынка.`);
+  else lines.push('4. Цены поднимать осторожно: при высокой конкуренции сначала проверить карточки с отрицательной маржой, затем тестировать +1-3% или снижение скидки, отслеживая заказы 1-2 дня.');
+  if (stockCandidates.length) lines.push(`5. Закупки только по товарам с продажами и нормальной экономикой: ${stockCandidates.map(item => `${titleOf(item)} — остаток ${number(item.stock)} шт.`).join('; ')}. Минусовые или без доказанной маржи не дозаказывать.`);
+  else lines.push('5. Закупки заморозить для спорных товаров: дозаказывать только то, где есть продажи, остаток заканчивается и после комиссии/логистики/рекламы остается маржа.');
+  lines.push('Главное сейчас: не лечить минус выручкой любой ценой. Вытаскиваем прибыль через связку “товарная прибыль -> рекламная отдача -> конкурентная цена -> закупка”, иначе можно просто купить оборот и углубить минус.');
+  return lines.filter(Boolean).join('\n');
 }
 
 function formatProductPnlDetail(data, tone, options = {}) {
@@ -905,13 +950,30 @@ async function runElAnalyst(options = {}) {
   let modules = options.classification?.modules?.length ? options.classification.modules.slice(0, 3) : inferModules(message, options.history, 3);
   const decisionRequest = isDecisionRequest(message);
   const businessPraiseRequest = asksBusinessPraise(message);
+  const turnaroundRequest = asksTurnaroundPlan(message);
   // Эл 2.0: диагностический запрос сам агрегирует сравнение периодов и причины,
   // поэтому не дублируем его обычными сводками finance/sales/overview.
   if (modules.includes('diagnostics') && decisionRequest) modules = ['diagnostics', 'finance'];
   if (businessPraiseRequest) modules = ['overview', 'finance', 'stocks', 'advertising'];
+  if (turnaroundRequest) modules = ['finance', 'advertising', 'pricing', 'procurement'];
   const results = await options.dataBridge.getMany(modules, message);
   const sections = [];
   const warnings = [];
+  if (turnaroundRequest) {
+    const financeData = moduleData(results.finance);
+    const advertisingData = moduleData(results.advertising);
+    const pricingData = moduleData(results.pricing);
+    const procurementData = moduleData(results.procurement);
+    sections.push(formatTurnaroundPlan({
+      financeData:results.finance?.ok ? financeData : null,
+      advertisingData:results.advertising?.ok ? advertisingData : null,
+      pricingData:results.pricing?.ok ? pricingData : null,
+      procurementData:results.procurement?.ok ? procurementData : null,
+      context:options.context,
+      identity:options.identity,
+    }));
+    warnings.push(...coverageWarnings(financeData),...coverageWarnings(advertisingData),...coverageWarnings(pricingData),...coverageWarnings(procurementData));
+  }
   if (businessPraiseRequest) {
     const overviewData = moduleData(results.overview);
     const financeData = moduleData(results.finance);
@@ -940,6 +1002,7 @@ async function runElAnalyst(options = {}) {
     warnings.push(...coverageWarnings(returnsData),...coverageWarnings(reviewsData));
   }
   for (const moduleName of modules) {
+    if (turnaroundRequest) continue;
     if (businessPraiseRequest) continue;
     if (relationHandled.has(moduleName)) continue;
     const result = results[moduleName];
