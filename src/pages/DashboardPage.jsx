@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle, BarChart3, Bell, Boxes, Calculator, CalendarDays, CheckCircle2, ChevronDown, Clock3,
   ChevronRight, ChevronUp, CircleDollarSign, CreditCard, Download, Eye, EyeOff, FileText, Home, LogOut,
-  Info, Megaphone, MessageCircle, PackageSearch, Percent, PlugZap, RefreshCw, Save, Search, Send,
+  Info, Megaphone, MessageCircle, Moon, PackageSearch, Percent, PlugZap, RefreshCw, Save, Search, Send,
   Settings, ShieldCheck, SlidersHorizontal, Sparkles, Star, Tag, TrendingUp, UsersRound, Phone, KeyRound,
-  Upload, WalletCards, Warehouse, X
+  Sun, Upload, WalletCards, Warehouse, X
 } from 'lucide-react'
 import ElMascot from '../components/ElMascot'
 import MetricCard from '../components/MetricCard'
@@ -38,6 +38,7 @@ const EL_CHAT_CONVERSATION_KEY = 'elisei.el.embedded.conversation.v2'
 const EL_CHAT_SETTINGS_KEY = 'elisei.el.embedded.settings.v2'
 const EL_CHAT_MODE_KEY = 'elisei.el.mode.v1'
 const EL_PERIOD_KEYS = ['elisei.globalPeriod.v3','elisei.globalPeriod','elisei.period.v4']
+const UI_THEME_KEY = 'elisei.ui.theme.v1'
 
 const scopedElStorageKey = (key, user = {}) => {
   const identity = String(user?.id || user?.email || 'guest').trim().toLowerCase()
@@ -103,6 +104,13 @@ function readStoredJson(key, fallback) {
     const raw = localStorage.getItem(key)
     return raw ? JSON.parse(raw) : fallback
   } catch { return fallback }
+}
+
+function readStoredTheme() {
+  try {
+    const value = localStorage.getItem(UI_THEME_KEY)
+    return value === 'light' ? 'light' : 'dark'
+  } catch { return 'dark' }
 }
 
 function createElConversationId() {
@@ -496,6 +504,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const [active, setActive] = useState('Главная')
   const [query, setQuery] = useState('')
   const [toast, setToast] = useState('')
+  const [uiTheme, setUiTheme] = useState(readStoredTheme)
   const [chat, setChat] = useState('')
   const [chatBusy, setChatBusy] = useState(false)
   const [elConversationId, setElConversationId] = useState(() => localStorage.getItem(elConversationStorageKey) || createElConversationId())
@@ -518,6 +527,11 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     }]
   })
   const [connection, setConnection] = useState(emptyConnection)
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = uiTheme
+    try { localStorage.setItem(UI_THEME_KEY, uiTheme) } catch { /* theme preference is best-effort */ }
+  }, [uiTheme])
   const [tokenDraft, setTokenDraft] = useState('')
   const [tokenLabel, setTokenLabel] = useState('')
   const [showToken, setShowToken] = useState(false)
@@ -3080,5 +3094,5 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   }
   const content = (renderers[active] || renderHome)()
 
-  return <div className="shell"><aside className="sidebar glass-panel"><button className="brand brand-button" onClick={() => onNavigate('/')}><div className="brand-mark">E</div><div><strong>ELISEI</strong><span>AI Operating System</span></div></button><nav>{nav.map(([label,Icon]) => <button key={label} className={active===label?'nav-item active':'nav-item'} onClick={() => setActive(label)}><Icon size={18}/><span>{label}</span></button>)}</nav><div className="sidebar-foot"><div className="status-dot"/><span>{connection.connected?'Wildberries подключён':'Демо-режим'}</span></div></aside><main className="main"><header className="topbar"><div className="search"><Search size={17}/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Найти товар, артикул или модель"/></div><div className="top-actions"><button className="icon-btn" onClick={() => notify(recommendations[0]?.title || 'Новых уведомлений нет')}><Bell size={18}/><span className="ping"/></button><button className="icon-btn" title="Подключения" onClick={() => setActive('Подключения')}><PlugZap size={18}/></button><button className="icon-btn" title="Выйти" onClick={onLogout}><LogOut size={18}/></button><button className="profile" title={preferredElName || rawName || 'Профиль'}>{preferredProfileInitial}</button></div></header>{content}</main>{selectedProduct&&<Product360Drawer product={selectedProduct} data={product360Data} loading={product360Loading} error={product360Error} period={analyticsPeriod} onClose={()=>setSelectedProduct(null)}/>} {toast&&<div className="app-toast"><CheckCircle2 size={18}/>{toast}</div>}</div>
+  return <div className="shell"><aside className="sidebar glass-panel"><button className="brand brand-button" onClick={() => onNavigate('/')}><div className="brand-mark">E</div><div><strong>ELISEI</strong><span>AI Operating System</span></div></button><nav>{nav.map(([label,Icon]) => <button key={label} className={active===label?'nav-item active':'nav-item'} onClick={() => setActive(label)}><Icon size={18}/><span>{label}</span></button>)}</nav><div className="sidebar-foot"><div className="status-dot"/><span>{connection.connected?'Wildberries подключён':'Демо-режим'}</span></div></aside><main className="main"><header className="topbar"><div className="search"><Search size={17}/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Найти товар, артикул или модель"/></div><div className="top-actions"><div className="theme-toggle" role="group" aria-label="Тема интерфейса"><button type="button" className={uiTheme==='light'?'active':''} title="Светлая тема" onClick={() => setUiTheme('light')}><Sun size={15}/><span>Светлая</span></button><button type="button" className={uiTheme==='dark'?'active':''} title="Тёмная тема" onClick={() => setUiTheme('dark')}><Moon size={15}/><span>Тёмная</span></button></div><button className="icon-btn" onClick={() => notify(recommendations[0]?.title || 'Новых уведомлений нет')}><Bell size={18}/><span className="ping"/></button><button className="icon-btn" title="Подключения" onClick={() => setActive('Подключения')}><PlugZap size={18}/></button><button className="icon-btn" title="Выйти" onClick={onLogout}><LogOut size={18}/></button><button className="profile" title={preferredElName || rawName || 'Профиль'}>{preferredProfileInitial}</button></div></header>{content}</main>{selectedProduct&&<Product360Drawer product={selectedProduct} data={product360Data} loading={product360Loading} error={product360Error} period={analyticsPeriod} onClose={()=>setSelectedProduct(null)}/>} {toast&&<div className="app-toast"><CheckCircle2 size={18}/>{toast}</div>}</div>
 }

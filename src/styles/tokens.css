@@ -4,3 +4,11 @@
  --blue:#5ad7ff; --green:#57e6ae; --amber:#ffc96b; --danger:#ff6b88;
  --radius-lg:24px; --radius-md:18px; --shadow:0 24px 80px rgba(0,0,0,.36); --ease:220ms cubic-bezier(.2,.8,.2,1);
 }
+
+html[data-theme="light"] {
+ --bg:#f6f7fb; --bg-soft:#eef1f8; --panel:rgba(255,255,255,.84); --panel-strong:rgba(255,255,255,.94);
+ --text:#1c2133; --muted:#68728a; --line:rgba(38,48,84,.12); --violet:#6d4aff; --violet-2:#6b55d8;
+ --blue:#1684d8; --green:#0f9f72; --amber:#b7791f; --danger:#d03b5b;
+ --shadow:0 20px 60px rgba(33,43,76,.13);
+ color-scheme:light;
+}
