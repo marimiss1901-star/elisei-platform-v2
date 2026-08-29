@@ -14,6 +14,10 @@ for (const marker of [
   'const renderAnnualAnalytics',
   'const renderProcurement',
   'Склад WB подтверждённо пустой',
+  'Деньги по каждому артикулу',
+  'Себестоимость',
+  'Комиссия WB',
+  'Доплаты/компенсации',
   'purchaseCost:recommended != null',
   "wbApi.sync(connectionId,['orders','sales'],{ period })",
 ]) assert.ok(dashboard.includes(marker),`DashboardPage must contain ${marker}`)
@@ -28,5 +32,6 @@ for (const marker of [
 
 assert.ok(api.includes('dashboard: (connectionId, params = {})'),'dashboard reader must accept the selected period')
 assert.ok(styles.includes('ELISEI 5.17.0 — годовая аналитика и план закупок'),'annual and procurement styles must be canonical')
+assert.ok(styles.includes('.data-row.product-pnl-row'),'product P&L table must have a stable wide grid')
 
 console.log('ELISEI 5.17.0 annual analytics and procurement regression: OK')
