@@ -29,7 +29,7 @@ const MODULES = Object.freeze({
   },
   finance: {
     title: 'Финансы и P&L',
-    keywords: ['прибыл', 'марж', 'финанс', 'p&l', 'pnl', 'себестоим', 'комисси', 'логистик', 'расход', 'удержан', 'налог'],
+    keywords: ['прибыл', 'марж', 'финанс', 'p&l', 'pnl', 'себестоим', 'комисси', 'эквайринг', 'логистик', 'расход', 'затрат', 'удержан', 'налог', 'по каждому артикулу', 'по артикулам'],
     paths: ['/api/finance/overview', '/api/finance', '/api/pnl', '/api/analytics/finance', '/api/profit/analytics'],
   },
   products: {

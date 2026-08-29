@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
+const { detectModules } = require('../src/services/elModuleRegistry.cjs')
 const {
   normalizeElProfile, mergeElProfiles, createVoiceContext, humorLine, socialResponse,
 } = require('../src/services/elPersonality.cjs')
@@ -143,3 +144,22 @@ assert.match(screenFallbackAnalyst.text, /9[\s\u00a0]?573|9573/)
 assert.match(screenFallbackAnalyst.text, /9[\s\u00a0]?022|9022/)
 assert.doesNotMatch(screenFallbackAnalyst.text, /Продажи и заказы.*недоступны/i)
 assert.match(screenFallbackAnalyst.text, /текущего экрана ELISEI/i)
+
+assert.equal(detectModules('Покажи по каждому артикулу рекламу эквайринг комиссию и прибыль')[0], 'finance')
+
+const productPnlAnswer = await runElAnalyst({
+  message:'Покажи по каждому артикулу рекламу, эквайринг, комиссию и прибыль',
+  history:[],context:{ period:{from:'2026-08-28',to:'2026-08-28',days:1} },
+  identity:{userId:'u',cabinetId:'c',userName:'Мария'},
+  personality:{character:'professional',humor:'off',support:false,address:'informal'},
+  classification:{reason:'cabinet-question',modules:['finance']},
+  dataBridge:{ async getMany(){ return { finance:{ok:true,data:{ available:true,period:{from:'2026-08-28',to:'2026-08-28',days:1},summary:{revenue:109257,operatingProfit:44139,margin:40.4},productPnlRows:[
+    {nmID:2505,vendorCode:'2505',title:'Удлинитель 3м',revenue:109257,sales:164,returns:4,advertising:8907,commission:21851,logistics:0,acquiring:0,storage:0,penalties:0,deductions:0,expenses:65118,profit:44139,margin:40.4,financeSource:'wb_finance_api'},
+  ],missingCostProducts:[]} } } } },
+})
+assert.match(productPnlAnswer.text,/Товарный P&L/)
+assert.match(productPnlAnswer.text,/2505/)
+assert.match(productPnlAnswer.text,/эквайринг/)
+assert.match(productPnlAnswer.text,/комиссия/)
+assert.match(productPnlAnswer.text,/Источник: WB финансы/)
+assert.doesNotMatch(productPnlAnswer.text,/P&L за 28\.08\.2026:/)
