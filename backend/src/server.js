@@ -28,6 +28,7 @@ import {
 import elRouter from './routes/el.js'
 import {
   ensureFinanceLedgerSchema, persistFinanceLedgerBatch, backfillFinanceLedgerFromStreamItems, queryFinanceLedger,
+  queryFinanceCoreRows, summarizeFinanceCoreRows,
 } from './wb/finance-ledger.js'
 import {
   WB_API_POLICY, assertWbApiRequestAllowed, sellerWarehouseReadSummary,
@@ -3760,7 +3761,14 @@ function compactAggregateKey(stream, row = {}) {
   const mode = id.fulfillmentMode.includes('FBS') || id.fulfillmentMode.includes('ПРОДАВ') ? 'FBS'
     : id.fulfillmentMode.includes('FBO') || id.fulfillmentMode.includes('FBW') || id.fulfillmentMode.includes('WB') ? 'FBO'
     : ''
-  return [stream,id.nmId || '',id.vendorCode,id.barcode,mode].join('|')
+  // A selected-period read needs the date to survive compacting. Without it,
+  // the 30-day finance snapshot is filtered out after every fresh login.
+  const operationDate = analyticsDateForRow(row,[
+    'operationDate','rrDate','rr_dt','saleDt','sale_dt','saleDate','acqDate',
+    'orderDt','order_dt','orderDate','date','dateFrom','date_from','dtBonus',
+    'originalDate','shkCreateDate','giCreateDate','createDate',
+  ])
+  return [stream,operationDate,id.nmId || '',id.vendorCode,id.barcode,mode].join('|')
 }
 
 async function aggregatePersistedHeavyRows(connectionId, stream, syncId) {
@@ -3775,8 +3783,14 @@ async function aggregatePersistedHeavyRows(connectionId, stream, syncId) {
       const id = compactIdentity(row)
       let target = aggregates.get(key)
       if (!target) {
+        const operationDate = analyticsDateForRow(row,[
+          'operationDate','rrDate','rr_dt','saleDt','sale_dt','saleDate','acqDate',
+          'orderDt','order_dt','orderDate','date','dateFrom','date_from','dtBonus',
+          'originalDate','shkCreateDate','giCreateDate','createDate',
+        ])
         target = {
           __aggregated:true,
+          operationDate:operationDate || null,
           nmId:id.nmId,
           vendorCode:id.vendorCode,
           barcode:id.barcode,
@@ -6555,10 +6569,40 @@ app.get('/api/wb/core/:id', authRequired, async (req, res) => {
     getBusinessSettings(req.auth.sub),
   ])
   const range = analyticsPeriodRange(req.query)
-  const selectedData = analyticsFilterConnectionData(data, range)
+  const ledgerFinanceRows = range
+    ? await queryFinanceCoreRows(pool,{ connectionId:connection.id,from:range.from,to:range.to })
+    : []
+  const ledgerFinanceSummary = summarizeFinanceCoreRows(ledgerFinanceRows)
+  const periodData = ledgerFinanceRows.length
+    ? {
+        ...data,
+        finance:{
+          ...(data?.finance && typeof data.finance === 'object' && !Array.isArray(data.finance) ? data.finance : {}),
+          rows:ledgerFinanceRows,
+          totalRows:ledgerFinanceSummary.movements,
+          totals:summarizeFinanceRows(ledgerFinanceRows),
+          period:{from:range.from,to:range.to},
+          durableSource:'wb_finance_ledger',
+        },
+      }
+    : data
+  const selectedData = analyticsFilterConnectionData(periodData, range)
+  const core = buildCoreAnalytics(selectedData, settings)
+  if (ledgerFinanceRows.length) {
+    const reportFrom=dateKey(data?.finance?.period?.dateFrom || data?.finance?.period?.from)
+    const reportTo=dateKey(data?.finance?.period?.dateTo || data?.finance?.period?.to)
+    const periodCovered=Boolean(data?.finance?.complete !== false && reportFrom && reportTo && reportFrom <= range.from && reportTo >= range.to)
+    core.finance={
+      ...(core.finance || {}),
+      summary:ledgerFinanceSummary,
+      durable:true,
+      selectedPeriod:{from:range.from,to:range.to,covered:periodCovered},
+    }
+  }
   res.json({
-    core: buildCoreAnalytics(selectedData, settings),
+    core,
     period:range ? { from:range.from, to:range.to, days:range.days } : null,
+    financeSource:ledgerFinanceRows.length ? { source:'wb_finance_ledger',rows:ledgerFinanceRows.length } : { source:'stream_snapshot',rows:0 },
     dataSources:sources, recovered, recoveryQueued, lastSync: connection.last_sync_at || null,
   })
 })
@@ -7013,7 +7057,12 @@ app.get('/api/wb/finance-ledger/:id', authRequired, async (req, res) => {
     const streamRows = await pool.query(`SELECT stream,payload,row_count,updated_at FROM wb_stream_data WHERE connection_id=$1 AND stream=ANY($2::text[])`,[connection.id,supportingStreams])
     const payloadByStream = Object.fromEntries(streamRows.rows.map(row => [row.stream,{payload:row.payload||{},rowCount:Number(row.row_count||0),updatedAt:row.updated_at||null}]))
     const financePayload = payloadByStream.finance?.payload || {}
-    const financeReady = Boolean(Number(stateMap.finance?.lastCount || 0) > 0 || Number(payloadByStream.finance?.rowCount || 0) > 0 || Number(financePayload.rawRowCount || 0) > 0)
+    const financeEverReady = Boolean(Number(stateMap.finance?.lastCount || 0) > 0 || Number(payloadByStream.finance?.rowCount || 0) > 0 || Number(financePayload.rawRowCount || 0) > 0)
+    const reportFrom=dateKey(financePayload?.period?.dateFrom || financePayload?.period?.from)
+    const reportTo=dateKey(financePayload?.period?.dateTo || financePayload?.period?.to)
+    const selectedMovements=Number(result?.summary?.movements || 0)
+    const selectedPeriodCovered=Boolean(financePayload.complete === true && reportFrom && reportTo && reportFrom <= selectedFrom && reportTo >= selectedTo)
+    const financeReady=Boolean(selectedMovements > 0 || selectedPeriodCovered)
     const rowOverlapsPeriod = row => {
       const rowFrom=dateKey(row?.dateFrom || row?.from || row?.periodFrom || row?.operationDate || row?.rrDate || row?.rr_dt || row?.dtBonus || row?.dt || row?.date || row?.createdAt || row?.createDate)
       const rowTo=dateKey(row?.dateTo || row?.to || row?.periodTo || rowFrom)
@@ -7076,6 +7125,12 @@ app.get('/api/wb/finance-ledger/:id', authRequired, async (req, res) => {
       },
       coverage:{
         financeReady,
+        financeEverReady,
+        selectedPeriod:{
+          from:selectedFrom,to:selectedTo,movements:selectedMovements,
+          confirmedFrom:result?.summary?.dateFrom || null,confirmedTo:result?.summary?.dateTo || null,
+          covered:selectedPeriodCovered,available:financeReady,
+        },
         finance:stateMap.finance || null,
         acquiring:stateMap.acquiring || null,
         paidStorage:stateMap.paidStorage || null,
@@ -7084,7 +7139,7 @@ app.get('/api/wb/finance-ledger/:id', authRequired, async (req, res) => {
         acquiringReports:stateMap.acquiringReports || null,
         documents:stateMap.documents || null,
         jamSubscription:stateMap.jamSubscription || null,
-        financePartial:financePayload.complete === false,
+        financePartial:Boolean(financePayload.complete === false || (selectedMovements > 0 && !selectedPeriodCovered)),
         measurementPenalties:stateMap.measurementPenalties || null,
         deductionsReport:stateMap.deductionsReport || null,
         warehouseMeasurements:stateMap.warehouseMeasurements || null,

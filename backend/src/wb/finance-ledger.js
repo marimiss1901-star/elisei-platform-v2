@@ -501,3 +501,89 @@ export async function queryFinanceLedger(db,{ connectionId,from,to,group,mode,ro
     timeline:timelineRows.rows,
   }
 }
+
+// The compact stream snapshot is optimized for recovery, while the ledger is
+// the durable, date-addressable source of truth for user-selected periods.
+// Return the same aggregate shape buildCoreAnalytics already understands so a
+// login can render confirmed finance directly from PostgreSQL without waiting
+// for another WB request or for the background worker to rebuild JSON.
+export async function queryFinanceCoreRows(db,{ connectionId,from,to }) {
+  if (!connectionId || !from || !to) return []
+  const result = await db.query(`
+    SELECT operation_date AS "operationDate",
+      COALESCE(nm_id,'') AS "nmId",COALESCE(vendor_code,'') AS "vendorCode",
+      COALESCE(barcode,'') AS barcode,COALESCE(fulfillment_mode,'') AS "fulfillmentMode",
+      COUNT(DISTINCT source_row_key)::int AS "rowCount",
+      COALESCE(SUM(CASE WHEN operation_code='gross_sale' THEN amount ELSE 0 END),0)::float8 AS "grossRevenueAmount",
+      COALESCE(SUM(CASE WHEN metric_role='settlement' THEN amount ELSE 0 END),0)::float8 AS "sellerPayableAmount",
+      COALESCE(SUM(CASE WHEN operation_group='commission' AND included_in_pnl=TRUE THEN ABS(amount) ELSE 0 END),0)::float8 AS "commissionAmount",
+      COALESCE(SUM(CASE WHEN operation_group='logistics' AND operation_code<>'transport_reimbursement' AND included_in_pnl=TRUE THEN ABS(amount) ELSE 0 END),0)::float8 AS "logisticsAmount",
+      COALESCE(SUM(CASE WHEN operation_code='transport_reimbursement' AND included_in_pnl=TRUE THEN ABS(amount) ELSE 0 END),0)::float8 AS "logisticsRebillAmount",
+      COALESCE(SUM(CASE WHEN operation_group='storage' AND included_in_pnl=TRUE THEN ABS(amount) ELSE 0 END),0)::float8 AS "storageAmount",
+      COALESCE(SUM(CASE WHEN operation_group='acceptance' AND included_in_pnl=TRUE THEN ABS(amount) ELSE 0 END),0)::float8 AS "acceptanceAmount",
+      COALESCE(SUM(CASE WHEN operation_group='acquiring' AND included_in_pnl=TRUE THEN ABS(amount) ELSE 0 END),0)::float8 AS "acquiringAmount",
+      COALESCE(SUM(CASE WHEN operation_group='penalties' AND included_in_pnl=TRUE THEN ABS(amount) ELSE 0 END),0)::float8 AS "penaltiesAmount",
+      COALESCE(SUM(CASE WHEN operation_group IN ('deductions','subscriptions') AND included_in_pnl=TRUE THEN ABS(amount) ELSE 0 END),0)::float8 AS "deductionsAmount",
+      COALESCE(SUM(CASE WHEN source_field='additionalPayment' AND operation_group NOT IN ('advertising','subscriptions') AND included_in_pnl=TRUE THEN amount ELSE 0 END),0)::float8 AS "additionalPaymentAmount",
+      COALESCE(SUM(CASE WHEN included_in_pnl=TRUE AND amount<0 THEN ABS(amount) ELSE 0 END),0)::float8 AS "expenseAmount",
+      COALESCE(SUM(CASE WHEN metric_role='adjustment' AND included_in_pnl=TRUE AND amount>0 THEN amount ELSE 0 END),0)::float8 AS "compensationsAmount",
+      COALESCE(SUM(CASE WHEN operation_group='deductions' AND included_in_pnl=TRUE THEN ABS(amount) ELSE 0 END),0)::float8 AS "ledgerDeductionsAmount",
+      COALESCE(SUM(CASE WHEN operation_group='subscriptions' AND included_in_pnl=TRUE THEN ABS(amount) ELSE 0 END),0)::float8 AS "subscriptionsAmount",
+      COALESCE(SUM(CASE WHEN operation_group='advertising' AND included_in_pnl=TRUE THEN ABS(amount) ELSE 0 END),0)::float8 AS "advertisingChargesAmount"
+    FROM wb_finance_ledger
+    WHERE connection_id=$1 AND source_stream='finance' AND detail_only=FALSE
+      AND operation_date >= $2::date AND operation_date <= $3::date
+    GROUP BY operation_date,nm_id,vendor_code,barcode,fulfillment_mode
+    ORDER BY operation_date,nm_id,vendor_code,barcode,fulfillment_mode
+  `,[connectionId,from,to])
+  return result.rows.map(row=>({
+    __aggregated:true,
+    operationDate:row.operationDate || null,
+    nmId:row.nmId || null,
+    vendorCode:row.vendorCode || '',
+    barcode:row.barcode || '',
+    fulfillmentMode:row.fulfillmentMode || '',
+    rowCount:Number(row.rowCount || 0),
+    grossRevenueAmount:Number(row.grossRevenueAmount || 0),
+    sellerPayableAmount:Number(row.sellerPayableAmount || 0),
+    commissionAmount:Number(row.commissionAmount || 0),
+    logisticsAmount:Number(row.logisticsAmount || 0),
+    logisticsRebillAmount:Number(row.logisticsRebillAmount || 0),
+    storageAmount:Number(row.storageAmount || 0),
+    acceptanceAmount:Number(row.acceptanceAmount || 0),
+    acquiringAmount:Number(row.acquiringAmount || 0),
+    penaltiesAmount:Number(row.penaltiesAmount || 0),
+    deductionsAmount:Number(row.deductionsAmount || 0),
+    additionalPaymentAmount:Number(row.additionalPaymentAmount || 0),
+    expenseAmount:Number(row.expenseAmount || 0),
+    compensationsAmount:Number(row.compensationsAmount || 0),
+    ledgerDeductionsAmount:Number(row.ledgerDeductionsAmount || 0),
+    subscriptionsAmount:Number(row.subscriptionsAmount || 0),
+    advertisingChargesAmount:Number(row.advertisingChargesAmount || 0),
+  }))
+}
+
+export function summarizeFinanceCoreRows(rows = []) {
+  const summary={
+    movements:0,sellerPayable:0,grossRevenue:0,expenses:0,compensations:0,
+    commission:0,logistics:0,storage:0,acceptance:0,acquiring:0,
+    penalties:0,deductions:0,subscriptions:0,advertisingCharges:0,
+  }
+  for(const row of Array.isArray(rows) ? rows : []){
+    summary.movements += Number(row.rowCount || 0)
+    summary.sellerPayable += Number(row.sellerPayableAmount || 0)
+    summary.grossRevenue += Number(row.grossRevenueAmount || 0)
+    summary.expenses += Number(row.expenseAmount || 0)
+    summary.compensations += Number(row.compensationsAmount || 0)
+    summary.commission += Number(row.commissionAmount || 0)
+    summary.logistics += Number(row.logisticsAmount || 0)+Number(row.logisticsRebillAmount || 0)
+    summary.storage += Number(row.storageAmount || 0)
+    summary.acceptance += Number(row.acceptanceAmount || 0)
+    summary.acquiring += Number(row.acquiringAmount || 0)
+    summary.penalties += Number(row.penaltiesAmount || 0)
+    summary.deductions += Number(row.ledgerDeductionsAmount || 0)
+    summary.subscriptions += Number(row.subscriptionsAmount || 0)
+    summary.advertisingCharges += Number(row.advertisingChargesAmount || 0)
+  }
+  return Object.fromEntries(Object.entries(summary).map(([key,value])=>[key,Math.round(Number(value || 0)*100)/100]))
+}

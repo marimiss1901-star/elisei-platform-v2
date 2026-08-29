@@ -1447,7 +1447,11 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const previousSummary = readySnapshot?.previous?.core?.summary || analyticsCompareCore?.summary || {}
     const compareReady = Boolean(readySnapshot?.previous?.core || analyticsCompareCore)
     const snapshotFinance = readyCore?.finance?.summary || {}
-    const ledgerSummary = Number(snapshotFinance?.movements || 0) > 0 ? snapshotFinance : (financeLedger?.summary || {})
+    const loadedLedgerSummary = financeLedger?.summary || {}
+    const coreFinanceSummary = analyticsCore?.finance?.summary || {}
+    const ledgerSummary = Number(snapshotFinance?.movements || 0) > 0
+      ? snapshotFinance
+      : Number(loadedLedgerSummary?.movements || 0) > 0 ? loadedLedgerSummary : coreFinanceSummary
     const periodLabel = `${formatDate(analyticsPeriod.from)} — ${formatDate(analyticsPeriod.to)}`
     const periodDays = periodDaysBetween(analyticsPeriod)
     const analyticsAvailability = readyCore?.availability || analyticsCore?.availability || {}
@@ -1459,10 +1463,35 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const snapshotSalesState = String(snapshotStates?.sales?.state || '')
     const snapshotOrdersState = String(snapshotStates?.orders?.state || '')
     const snapshotAdvertisingState = String(snapshotStates?.advertising?.state || '')
+    const selectedFinancePeriodCovered = Boolean(financeLedger?.coverage?.selectedPeriod?.covered || analyticsCore?.finance?.selectedPeriod?.covered)
     const financePartial = snapshotMode
-      ? snapshotFinanceState === 'partial'
-      : Boolean(financeLedger?.coverage?.financePartial || (financePersistedRows > 0 && ['queued','running','rate_limited','retry_scheduled'].includes(String(financeState?.status || ''))))
+      ? snapshotFinanceState === 'partial' && !selectedFinancePeriodCovered
+      : Boolean(!selectedFinancePeriodCovered && (financeLedger?.coverage?.financePartial || (financePersistedRows > 0 && ['queued','running','rate_limited','retry_scheduled'].includes(String(financeState?.status || '')))))
     const financeMovementsInPeriod = Number(ledgerSummary.movements || financeLedger?.pagination?.total || 0)
+    const ledgerHasMovements = financeMovementsInPeriod > 0
+    const confirmedFinanceSummary = ledgerHasMovements ? {
+      ...businessSummary,
+      commission:Number(ledgerSummary.commission || 0),
+      logistics:Number(ledgerSummary.logistics || 0),
+      storage:Number(ledgerSummary.storage || 0),
+      acceptance:Number(ledgerSummary.acceptance || 0),
+      acquiring:Number(ledgerSummary.acquiring || 0),
+      penalties:Number(ledgerSummary.penalties || 0),
+      deductions:Number(ledgerSummary.deductions || 0),
+      sellerPayable:Number(ledgerSummary.sellerPayable || 0),
+    } : businessSummary
+    const homeAdvertising = businessSummary.advertising == null
+      ? (ledgerHasMovements ? Number(ledgerSummary.advertisingCharges || 0) : null)
+      : Number(businessSummary.advertising || 0)
+    const homeWbExpenses = ledgerHasMovements
+      ? Math.max(0,Number(ledgerSummary.expenses || 0)-Number(ledgerSummary.advertisingCharges || 0))
+      : null
+    const homeOperatingProfit = businessSummary.revenue != null && businessSummary.cogs != null && homeWbExpenses != null && homeAdvertising != null
+      ? Number(businessSummary.revenue || 0)-Number(businessSummary.cogs || 0)-homeWbExpenses-homeAdvertising-Number(businessSummary.fixed || 0)-Number(businessSummary.tax || 0)+Number(ledgerSummary.compensations || 0)
+      : businessSummary.operatingProfit
+    const homeMargin = homeOperatingProfit != null && Number(businessSummary.revenue || 0) > 0
+      ? homeOperatingProfit/Number(businessSummary.revenue)*100
+      : businessSummary.margin
     const stateAvailable = (name, fallback) => snapshotMode ? ['ready','partial'].includes(name) : Boolean(fallback)
     const statePartial = (name, fallback) => snapshotMode ? name === 'partial' : Boolean(fallback)
     const metric = (label,value,current,previous,{ money=true,lowerIsBetter=false,note='',onClick='Аналитика',available=true,partial=false }={}) => {
@@ -1475,8 +1504,11 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
         tone:available && !partial ? comparisonToneDirectional(current,previous,compareReady,lowerIsBetter) : '',onClick,
       }
     }
-    const financeAvailableForPeriod = stateAvailable(snapshotFinanceState,analyticsAvailability.finance)
+    const financeAvailableForPeriod = Boolean(stateAvailable(snapshotFinanceState,analyticsAvailability.finance) || ledgerHasMovements || selectedFinancePeriodCovered)
     const financeHasAnyProgress = statePartial(snapshotFinanceState,financePartial) || financePersistedRows > 0 || financeMovementsInPeriod > 0
+    const financeMetricPartial = statePartial(snapshotFinanceState,financePartial)
+    const storageMetricPartial = financeMetricPartial && !Boolean(analyticsAvailability.paidStorage)
+    const acquiringMetricPartial = financeMetricPartial && !Boolean(analyticsAvailability.acquiring)
     const storageAvailableForPeriod = financeAvailableForPeriod || (!snapshotMode && Boolean(analyticsAvailability.paidStorage))
     const acquiringAvailableForPeriod = financeAvailableForPeriod || (!snapshotMode && Boolean(analyticsAvailability.acquiring))
     const advertisingAvailableForPeriod = stateAvailable(snapshotAdvertisingState,analyticsAvailability.advertising)
@@ -1486,16 +1518,16 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const digitizationMetrics = [
       metric('Выручка',businessSummary.revenue,businessSummary.revenue,previousSummary.revenue,{ note:salesAvailableForPeriod ? `${formatNumber(businessSummary.sales)} продаж` : 'продажи ещё подтверждаются WB',available:salesAvailableForPeriod,partial:statePartial(snapshotSalesState,!analyticsAvailability.sales && Boolean(syncStateFor('sales'))) }),
       { label:'К перечислению',value:sellerPayableAvailable && !(financePartial && Number(ledgerSummary.sellerPayable || 0) === 0) ? formatMoney(ledgerSummary.sellerPayable || 0) : financeHasAnyProgress ? 'Уточняется…' : 'Ожидается',delta:sellerPayableAvailable ? (financePartial ? 'предварительно · финансы догружаются' : 'подтверждено финансовым реестром WB') : financeHasAnyProgress ? 'часть финансов уже сохранена' : 'ожидаем финансовые данные',tone:'',onClick:'Финансы' },
-      { label:'Опер. прибыль',value:businessSummary.cogs == null ? 'Не рассчитано' : (businessSummary.operatingProfit != null && salesAvailableForPeriod && financeAvailableForPeriod && !(financePartial && Number(businessSummary.operatingProfit || 0) === 0) ? formatMoney(businessSummary.operatingProfit) : financeHasAnyProgress ? 'Уточняется…' : 'Ожидается'),delta:businessSummary.cogs == null ? 'нужна себестоимость' : (businessSummary.operatingProfit != null && salesAvailableForPeriod && financeAvailableForPeriod ? (financePartial ? 'предварительно · финансы догружаются' : `маржа ${formatPercent(businessSummary.margin)}`) : 'ждём продажи и финансовую детализацию'),tone:'',onClick:'Финансы' },
+      { label:'Опер. прибыль',value:businessSummary.cogs == null ? 'Не рассчитано' : (homeOperatingProfit != null && salesAvailableForPeriod && financeAvailableForPeriod && !(financePartial && Number(homeOperatingProfit || 0) === 0) ? formatMoney(homeOperatingProfit) : financeHasAnyProgress ? 'Уточняется…' : 'Ожидается'),delta:businessSummary.cogs == null ? 'нужна себестоимость' : (homeOperatingProfit != null && salesAvailableForPeriod && financeAvailableForPeriod ? (financePartial ? 'предварительно · финансы догружаются' : `маржа ${formatPercent(homeMargin)}`) : 'ждём продажи и финансовую детализацию'),tone:'',onClick:'Финансы' },
       metric('Заказы',businessSummary.orders,businessSummary.orders,previousSummary.orders,{ money:false,note:ordersAvailableForPeriod ? `${formatNumber(businessSummary.sales)} продаж` : 'заказы ещё подтверждаются WB',available:ordersAvailableForPeriod,partial:statePartial(snapshotOrdersState,!analyticsAvailability.orders && Boolean(syncStateFor('orders'))) }),
       metric('Продажи',businessSummary.sales,businessSummary.sales,previousSummary.sales,{ money:false,note:salesAvailableForPeriod ? `выкуп ${businessSummary.orders ? formatPercent(Number(businessSummary.sales || 0)/Number(businessSummary.orders || 1)*100) : '—'}` : 'продажи ещё подтверждаются WB',available:salesAvailableForPeriod,partial:statePartial(snapshotSalesState,!analyticsAvailability.sales && Boolean(syncStateFor('sales'))) }),
       metric('Возвраты',businessSummary.returns,businessSummary.returns,previousSummary.returns,{ money:false,lowerIsBetter:true,note:salesAvailableForPeriod ? `${formatPercent(businessSummary.returnRate)} от продаж` : 'возвраты считаются из подтверждённых продаж',available:salesAvailableForPeriod,partial:statePartial(snapshotSalesState,!analyticsAvailability.sales && Boolean(syncStateFor('sales'))) }),
-      metric('Комиссия WB',businessSummary.commission,businessSummary.commission,previousSummary.commission,{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:statePartial(snapshotFinanceState,financeHasAnyProgress),note:'финансовая детализация WB' }),
-      metric('Логистика',businessSummary.logistics,businessSummary.logistics,previousSummary.logistics,{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:statePartial(snapshotFinanceState,financeHasAnyProgress),note:'финансовая детализация WB' }),
+      metric('Комиссия WB',confirmedFinanceSummary.commission,confirmedFinanceSummary.commission,previousSummary.commission,{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:financeMetricPartial,note:'финансовая детализация WB' }),
+      metric('Логистика',confirmedFinanceSummary.logistics,confirmedFinanceSummary.logistics,previousSummary.logistics,{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:financeMetricPartial,note:'финансовая детализация WB' }),
       metric('Реклама',businessSummary.advertising,businessSummary.advertising,previousSummary.advertising,{ lowerIsBetter:true,onClick:'Реклама',available:advertisingAvailableForPeriod,partial:statePartial(snapshotAdvertisingState,!analyticsAvailability.advertising && Boolean(syncStateFor('advertising'))),note:advertisingAvailableForPeriod ? '' : 'статистика рекламы ещё подтверждается' }),
-      metric('Хранение',businessSummary.storage,businessSummary.storage,previousSummary.storage,{ lowerIsBetter:true,onClick:'Финансы',available:storageAvailableForPeriod,partial:statePartial(snapshotFinanceState,financeHasAnyProgress || Boolean(syncStateFor('paidStorage'))),note:'подтверждается финансами/отчётом хранения' }),
-      metric('Эквайринг',businessSummary.acquiring,businessSummary.acquiring,previousSummary.acquiring,{ lowerIsBetter:true,onClick:'Финансы',available:acquiringAvailableForPeriod,partial:statePartial(snapshotFinanceState,financeHasAnyProgress || Boolean(syncStateFor('acquiring'))),note:'подтверждается финансовой детализацией' }),
-      metric('Штрафы + удержания',Number(businessSummary.penalties || 0)+Number(businessSummary.deductions || 0),Number(businessSummary.penalties || 0)+Number(businessSummary.deductions || 0),Number(previousSummary.penalties || 0)+Number(previousSummary.deductions || 0),{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:statePartial(snapshotFinanceState,financeHasAnyProgress),note:'финансовая детализация WB' }),
+      metric('Хранение',confirmedFinanceSummary.storage,confirmedFinanceSummary.storage,previousSummary.storage,{ lowerIsBetter:true,onClick:'Финансы',available:storageAvailableForPeriod,partial:storageMetricPartial,note:'подтверждается финансами/отчётом хранения' }),
+      metric('Эквайринг',confirmedFinanceSummary.acquiring,confirmedFinanceSummary.acquiring,previousSummary.acquiring,{ lowerIsBetter:true,onClick:'Финансы',available:acquiringAvailableForPeriod,partial:acquiringMetricPartial,note:'подтверждается финансовой детализацией' }),
+      metric('Штрафы + удержания',Number(confirmedFinanceSummary.penalties || 0)+Number(confirmedFinanceSummary.deductions || 0),Number(confirmedFinanceSummary.penalties || 0)+Number(confirmedFinanceSummary.deductions || 0),Number(previousSummary.penalties || 0)+Number(previousSummary.deductions || 0),{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:financeMetricPartial,note:'финансовая детализация WB' }),
     ]
     const topProducts = snapshotMode
       ? (salesAvailableForPeriod ? (readyCore?.topProducts || []) : [])
@@ -1770,9 +1802,10 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const ledger = financeLedger || { rows:[],summary:{},products:[],groups:[],sources:[],timeline:[],reports:{sales:{rows:[]},acquiring:{rows:[]}},riskDetails:{},coverage:{} }
     const ledgerRows = Array.isArray(ledger.rows) ? ledger.rows : []
     const ledgerSummary = ledger.summary || {}
-    const financeReady = Boolean(ledger.coverage?.financeReady || coreData?.availability?.finance)
-    const financePartial = Boolean(ledger.coverage?.financePartial)
     const ledgerHasMovements = Number(ledgerSummary.movements || 0) > 0
+    const selectedPeriodCovered = Boolean(ledger.coverage?.selectedPeriod?.covered)
+    const financeReady = Boolean(ledgerHasMovements || selectedPeriodCovered || (!ledger.coverage?.selectedPeriod && (ledger.coverage?.financeReady || coreData?.availability?.finance)))
+    const financePartial = Boolean(ledger.coverage?.financePartial)
     const financeEvidenceMissing = Number(basePeriodFinanceSummary?.revenue || 0) > 0 && !ledgerHasMovements
     const financeComplete = financeReady && !financePartial && !financeEvidenceMissing
     const ledgerAmount = (key, fallbackKey = key) => {
@@ -1855,7 +1888,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
       : financeReady
         ? `Финансовая детализация загружается частями. Уже подтверждено ${formatNumber(ledgerSummary.movements || 0)} движений; отсутствующие суммы до завершения не считаются нулём.`
         : 'Финансовый отчёт WB ещё не начат или не сохранил первую страницу. Нули не считаются подтверждёнными.'
-    const financeValue = value => financeReady || Number(value || 0) !== 0 ? formatMoney(value) : 'Ожидает WB'
+    const financeValue = value => financeComplete || ledgerHasMovements || Number(value || 0) !== 0 ? formatMoney(value) : 'Ожидает WB'
     const reportNumber = (row, aliases = []) => {
       for (const key of aliases) {
         const value = Number(String(row?.[key] ?? '').replace(',','.'))
