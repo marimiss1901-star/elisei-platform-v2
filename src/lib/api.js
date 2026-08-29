@@ -72,9 +72,14 @@ function clearSessionCaches() {
 
 export const authStore = {
   getToken: () => localStorage.getItem(TOKEN_KEY) || '',
-  setToken: (token) => token ? localStorage.setItem(TOKEN_KEY, token) : localStorage.removeItem(TOKEN_KEY),
+  setToken: (token) => {
+    try {
+      if (token) localStorage.setItem(TOKEN_KEY, token)
+      else localStorage.removeItem(TOKEN_KEY)
+    } catch { /* auth persistence is best-effort when browser storage is full */ }
+  },
   clear: () => {
-    localStorage.removeItem(TOKEN_KEY)
+    try { localStorage.removeItem(TOKEN_KEY) } catch { /* ignore */ }
     clearSessionCaches()
   },
 }
