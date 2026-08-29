@@ -364,6 +364,41 @@ function formatFinance(data, tone, options = {}) {
   return lines.filter(Boolean).join('\n');
 }
 
+function formatOneActionFromFinance(data, tone, options = {}) {
+  const s = data?.summary || {};
+  const period = periodLabel(data, options.context);
+  const losses = Array.isArray(data?.lossMakingProducts) ? data.lossMakingProducts : [];
+  const rows = Array.isArray(data?.productPnlRows) ? data.productPnlRows : [];
+  const costly = [...rows]
+    .filter(item => Number(item.expenses || 0) > 0 || Number(item.advertising || 0) > 0 || Number(item.logistics || 0) > 0)
+    .sort((a,b) => Number(b.expenses || 0) - Number(a.expenses || 0));
+  const operatingProfit = Number(s.operatingProfit);
+  const margin = Number(s.margin);
+  const advertising = Number(s.advertising || 0);
+  const logistics = Number(s.logistics || 0);
+  const commission = Number(s.commission || 0);
+  const lines = [];
+  lines.push(`Одно главное действие за ${period}: ${operatingProfit < 0 ? 'сначала остановить лишний денежный слив, а не гнаться за ростом выручки.' : 'сначала проверить самый дорогой расход, который сильнее всего давит на прибыль.'}`);
+  lines.push(`Почему: операционная прибыль ${money(s.operatingProfit)}, маржа ${percent(s.margin)}${Number.isFinite(advertising) || Number.isFinite(logistics) || Number.isFinite(commission) ? `; реклама ${money(s.advertising)}, логистика ${money(s.logistics)}, комиссия WB ${money(s.commission)}.` : '.'}`);
+  if (losses.length) {
+    const item = losses[0];
+    lines.push(`Куда смотреть первым: ${titleOf(item)} — прибыль ${money(item.profit)}, выручка ${money(item.revenue)}, расходы ${money(item.expenses)}, реклама ${money(item.advertising)}.`);
+  } else if (costly.length) {
+    const item = costly[0];
+    lines.push(`Куда смотреть первым: ${titleOf(item)} — расходы ${money(item.expenses)}, реклама ${money(item.advertising)}, логистика ${money(item.logistics)}, комиссия ${money(item.commission)}.`);
+  } else if (advertising > 0) {
+    lines.push('Куда смотреть первым: реклама. Открой кампании и отключи/урежь то, что тратит деньги без понятного вклада в продажи и прибыль.');
+  } else if (logistics > 0 || commission > 0) {
+    lines.push('Куда смотреть первым: финансовый реестр по логистике и комиссии WB. Проверь, какие операции съели прибыль.');
+  } else {
+    lines.push('Куда смотреть первым: таблица «Деньги по каждому артикулу». Отсортируй по прибыли снизу вверх и открой первый минусовой товар.');
+  }
+  lines.push('Не делай сейчас десять задач сразу: выбери один самый дорогой артикул или расход и проверь его в SKU 360.');
+  const warnings = coverageWarnings(data).slice(0, 1);
+  if (warnings.length) lines.push(`Ограничение: ${warnings[0]}`);
+  return lines.filter(Boolean).join('\n');
+}
+
 function formatProducts(data, tone) {
   const products = Array.isArray(data?.products) ? data.products : [];
   const top = topItems(products, (item) => item.revenue, 6);
@@ -674,7 +709,7 @@ function formatDiagnostics(data, tone) {
 }
 
 function isDecisionRequest(message = '') {
-  return /(что\s+(?:изменилось|поменялось)|почему\s+(?:упал|упала|упали|просел|просела|просели|снизил|снизилась|снизились|стало\s+хуже)|важнее\s+всего|главн(?:ое|ый)\s+действи|одно\s+главн(?:ое|ый)\s+действи|разбери\s+причин|найди\s+причин|что\s+делать\s+по\s+кабинету)/i.test(String(message || ''));
+  return /(что\s+(?:изменилось|поменялось)|почему\s+(?:упал|упала|упали|просел|просела|просели|снизил|снизилась|снизились|стало\s+хуже)|важнее\s+всего|главн(?:ое|ый)\s+действи|одно\s+главн(?:ое|ый)\s+действи|выбер(?:и|ать)\s+одно|помоги\s+выбрать|разбери\s+причин|найди\s+причин|что\s+делать(?:\s+по\s+кабинету)?)/i.test(String(message || ''));
 }
 
 function formatSync(data) {
@@ -769,9 +804,10 @@ async function runElAnalyst(options = {}) {
   }
 
   let modules = options.classification?.modules?.length ? options.classification.modules.slice(0, 3) : inferModules(message, options.history, 3);
+  const decisionRequest = isDecisionRequest(message);
   // Эл 2.0: диагностический запрос сам агрегирует сравнение периодов и причины,
   // поэтому не дублируем его обычными сводками finance/sales/overview.
-  if (modules.includes('diagnostics') && isDecisionRequest(message)) modules = ['diagnostics'];
+  if (modules.includes('diagnostics') && decisionRequest) modules = ['diagnostics', 'finance'];
   const results = await options.dataBridge.getMany(modules, message);
   const sections = [];
   const warnings = [];
@@ -801,7 +837,11 @@ async function runElAnalyst(options = {}) {
       }
     }
     const formatter = FORMATTERS[moduleName] || formatOverview;
-    sections.push(formatter(data, voice, { message,context:options.context,identity:options.identity }));
+    if (moduleName === 'finance' && decisionRequest && modules.includes('diagnostics') && !sections.length) {
+      sections.push(formatOneActionFromFinance(data, voice, { message,context:options.context,identity:options.identity }));
+    } else if (moduleName !== 'finance' || !decisionRequest || !modules.includes('diagnostics')) {
+      sections.push(formatter(data, voice, { message,context:options.context,identity:options.identity }));
+    }
     warnings.push(...coverageWarnings(data));
   }
 
