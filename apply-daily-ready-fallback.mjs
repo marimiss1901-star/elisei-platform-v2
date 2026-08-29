@@ -15,7 +15,11 @@ replaceOnce(
     const previousSummary = readySnapshot?.previous?.core?.summary || analyticsCompareCore?.summary || {}
     const compareReady = Boolean(readySnapshot?.previous?.core || analyticsCompareCore)
     const snapshotFinance = readyCore?.finance?.summary || {}
-    const ledgerSummary = Number(snapshotFinance?.movements || 0) > 0 ? snapshotFinance : (financeLedger?.summary || {})
+    const loadedLedgerSummary = financeLedger?.summary || {}
+    const coreFinanceSummary = analyticsCore?.finance?.summary || {}
+    const ledgerSummary = Number(snapshotFinance?.movements || 0) > 0
+      ? snapshotFinance
+      : Number(loadedLedgerSummary?.movements || 0) > 0 ? loadedLedgerSummary : coreFinanceSummary
     const periodLabel = \`${'${formatDate(analyticsPeriod.from)}'} — ${'${formatDate(analyticsPeriod.to)}'}\`
     const periodDays = periodDaysBetween(analyticsPeriod)
     const analyticsAvailability = readyCore?.availability || analyticsCore?.availability || {}
@@ -50,7 +54,11 @@ replaceOnce(
     const previousSummary = readySnapshot?.previous?.core?.summary || analyticsCompareCore?.summary || {}
     const compareReady = Boolean(readySnapshot?.previous?.core || analyticsCompareCore)
     const snapshotFinance = readyCore?.finance?.summary || {}
-    const ledgerSummary = Number(snapshotFinance?.movements || 0) > 0 ? snapshotFinance : (financeLedger?.summary || {})
+    const loadedLedgerSummary = financeLedger?.summary || {}
+    const coreFinanceSummary = analyticsCore?.finance?.summary || {}
+    const ledgerSummary = Number(snapshotFinance?.movements || 0) > 0
+      ? snapshotFinance
+      : Number(loadedLedgerSummary?.movements || 0) > 0 ? loadedLedgerSummary : coreFinanceSummary
     const periodLabel = \`${'${formatDate(analyticsPeriod.from)}'} — ${'${formatDate(analyticsPeriod.to)}'}\`
     const periodDays = periodDaysBetween(analyticsPeriod)
 `,
@@ -58,28 +66,29 @@ replaceOnce(
 
 replaceOnce(
 `    const financePartial = snapshotMode
-      ? snapshotFinanceState === 'partial'
-      : Boolean(financeLedger?.coverage?.financePartial || (financePersistedRows > 0 && ['queued','running','rate_limited','retry_scheduled'].includes(String(financeState?.status || ''))))
-    const financeMovementsInPeriod = Number(ledgerSummary.movements || financeLedger?.pagination?.total || 0)
-    const stateAvailable = (name, fallback) => snapshotMode ? ['ready','partial'].includes(name) : Boolean(fallback)
-    const statePartial = (name, fallback) => snapshotMode ? name === 'partial' : Boolean(fallback)
+      ? snapshotFinanceState === 'partial' && !selectedFinancePeriodCovered
+      : Boolean(!selectedFinancePeriodCovered && (financeLedger?.coverage?.financePartial || (financePersistedRows > 0 && ['queued','running','rate_limited','retry_scheduled'].includes(String(financeState?.status || '')))))
 `,
 `    const financePartial = snapshotMode
-      ? snapshotFinanceState === 'partial' && !Boolean(persistedAvailability.finance)
-      : Boolean(financeLedger?.coverage?.financePartial || (financePersistedRows > 0 && ['queued','running','rate_limited','retry_scheduled'].includes(String(financeState?.status || ''))))
-    const financeMovementsInPeriod = Number(ledgerSummary.movements || financeLedger?.pagination?.total || 0)
-    const stateAvailable = (name, fallback) => snapshotMode ? ['ready','partial'].includes(name) || Boolean(fallback) : Boolean(fallback)
+      ? snapshotFinanceState === 'partial' && !selectedFinancePeriodCovered && !Boolean(persistedAvailability.finance)
+      : Boolean(!selectedFinancePeriodCovered && (financeLedger?.coverage?.financePartial || (financePersistedRows > 0 && ['queued','running','rate_limited','retry_scheduled'].includes(String(financeState?.status || '')))))
+`,
+'finance availability fallback')
+
+replaceOnce(
+`    const stateAvailable = (name, fallback) => snapshotMode ? ['ready','partial'].includes(name) : Boolean(fallback)
+    const statePartial = (name, fallback) => snapshotMode ? name === 'partial' : Boolean(fallback)
+`,
+`    const stateAvailable = (name, fallback) => snapshotMode ? ['ready','partial'].includes(name) || Boolean(fallback) : Boolean(fallback)
     const statePartial = (name, fallback, persistedReady = false) => snapshotMode ? name === 'partial' && !Boolean(persistedReady) : Boolean(fallback)
 `,
-'availability fallback')
+'metric availability fallback')
 
 const replacements = [
   ["partial:statePartial(snapshotSalesState,!analyticsAvailability.sales && Boolean(syncStateFor('sales')))", "partial:statePartial(snapshotSalesState,!analyticsAvailability.sales && Boolean(syncStateFor('sales')),persistedAvailability.sales)"],
   ["partial:statePartial(snapshotOrdersState,!analyticsAvailability.orders && Boolean(syncStateFor('orders')))", "partial:statePartial(snapshotOrdersState,!analyticsAvailability.orders && Boolean(syncStateFor('orders')),persistedAvailability.orders)"],
   ["partial:statePartial(snapshotAdvertisingState,!analyticsAvailability.advertising && Boolean(syncStateFor('advertising')))", "partial:statePartial(snapshotAdvertisingState,!analyticsAvailability.advertising && Boolean(syncStateFor('advertising')),persistedAvailability.advertising)"],
-  ["partial:statePartial(snapshotFinanceState,financeHasAnyProgress)", "partial:statePartial(snapshotFinanceState,financeHasAnyProgress,persistedAvailability.finance)"],
-  ["partial:statePartial(snapshotFinanceState,financeHasAnyProgress || Boolean(syncStateFor('paidStorage')))", "partial:statePartial(snapshotFinanceState,financeHasAnyProgress || Boolean(syncStateFor('paidStorage')),persistedAvailability.paidStorage)"],
-  ["partial:statePartial(snapshotFinanceState,financeHasAnyProgress || Boolean(syncStateFor('acquiring')))", "partial:statePartial(snapshotFinanceState,financeHasAnyProgress || Boolean(syncStateFor('acquiring')),persistedAvailability.acquiring)"],
+  ["const financeMetricPartial = statePartial(snapshotFinanceState,financePartial)", "const financeMetricPartial = statePartial(snapshotFinanceState,financePartial,persistedAvailability.finance)"],
 ]
 for (const [oldText,newText] of replacements) {
   if (source.includes(newText)) continue
