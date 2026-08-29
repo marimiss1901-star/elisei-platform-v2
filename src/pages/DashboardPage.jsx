@@ -325,6 +325,36 @@ const completedThirtyDayPeriod = () => {
   return { preset:'procurement',from:addDays(to,-29),to }
 }
 
+const quarterPeriodFor = (year, quarter) => {
+  const numericYear = Number(year) || new Date().getFullYear()
+  const numericQuarter = Math.max(1,Math.min(4,Number(quarter) || 1))
+  const startMonth = (numericQuarter-1)*3
+  const today = isoLocalDate(new Date())
+  const from = isoLocalDate(new Date(numericYear,startMonth,1))
+  const quarterEnd = isoLocalDate(new Date(numericYear,startMonth+3,0))
+  const to = from > today ? quarterEnd : earlierIsoDate(quarterEnd,today)
+  return { preset:`tax-q${numericQuarter}`,from,to,year:numericYear,quarter:numericQuarter }
+}
+
+const quarterForDate = value => {
+  const date = new Date(`${String(value || isoLocalDate(new Date())).slice(0,10)}T12:00:00`)
+  const safeDate = Number.isNaN(date.getTime()) ? new Date() : date
+  return { year:safeDate.getFullYear(),quarter:Math.floor(safeDate.getMonth()/3)+1 }
+}
+
+const taxDeadlinesFor = period => {
+  const { year,quarter } = quarterForDate(period?.to || period?.from)
+  if (quarter === 4) return {
+    usn:'УСН по году: до 28 апреля следующего года',
+    vat:'НДС за IV квартал: 28 января, 28 февраля, 28 марта по 1/3',
+  }
+  const nextMonth = String(quarter*3+1).padStart(2,'0')
+  return {
+    usn:`Аванс УСН: до 28.${nextMonth}.${year}`,
+    vat:`НДС за квартал: 28.${nextMonth}, 28.${String(quarter*3+2).padStart(2,'0')}, 28.${String(quarter*3+3).padStart(2,'0')} по 1/3`,
+  }
+}
+
 const clampDemandFactor = value => Math.max(.7,Math.min(1.5,Number(value) || 1))
 
 function monthlyAnalyticsRows(core = {}, year = new Date().getFullYear()) {
@@ -1198,7 +1228,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   }, [analyticsCompare])
 
   useEffect(() => {
-    if (!['Главная','Аналитика','Остатки','Финансы'].includes(active) || !connection.connected || !connection.connectionId) return undefined
+    if (!['Главная','Аналитика','Остатки','Финансы','Налоговая'].includes(active) || !connection.connected || !connection.connectionId) return undefined
     const timer = window.setTimeout(() => {
       loadAnalyticsData(connection.connectionId,analyticsPeriod,['Главная','Аналитика'].includes(active) ? analyticsCompare : false)
     }, 320)
@@ -1259,7 +1289,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
 
   const nav = [
     ['Главная', Home], ['Аналитика', BarChart3], ['Годовая аналитика', TrendingUp], ['Закупки', Calculator], ['Товары', PackageSearch], ['Остатки', Boxes], ['История остатков', Warehouse],
-    ['Финансы', WalletCards], ['Документы WB', FileText], ['Цены и акции', Tag], ['Реклама', Megaphone], ['Поисковые запросы', Search], ['Коммуникации', Star],
+    ['Финансы', WalletCards], ['Налоговая', Percent], ['Документы WB', FileText], ['Цены и акции', Tag], ['Реклама', Megaphone], ['Поисковые запросы', Search], ['Коммуникации', Star],
     ['Сезонность', CalendarDays], ['Отчёты', FileText], ['Импорт данных', Upload], ['AI CRM', UsersRound], ['Спросить ЭЛа', MessageCircle],
     ['Подключения', PlugZap], ['Синхронизации', RefreshCw], ['Настройки', Settings]
   ]
@@ -2689,6 +2719,71 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     </section>
   }
 
+  const renderTax = () => {
+    const current = quarterForDate(analyticsPeriod.to || analyticsPeriod.from)
+    const selectedQuarterPeriod = quarterPeriodFor(current.year,current.quarter)
+    const today = isoLocalDate(new Date())
+    const quarterOptions = [1,2,3,4].map(quarter => quarterPeriodFor(current.year,quarter)).filter(period => period.from <= today)
+    const selectQuarter = period => {
+      setAnalyticsPeriodDraft(period)
+      if (!analyticsPeriodsMatch(period,analyticsPeriod)) {
+        setAnalyticsPeriod(period)
+        queuePeriodHistory(period,() => loadAnalyticsData(connectionRef.current.connectionId,period,false))
+      }
+    }
+    const periodLabel = `${formatDate(analyticsPeriod.from)} — ${formatDate(analyticsPeriod.to)}`
+    const taxBase = analyticsSummary?.revenue == null ? null : Number(analyticsSummary.revenue || 0)
+    const usnRate = 6
+    const vatRate = 5
+    const usnTax = taxBase == null ? null : Math.max(0,taxBase*usnRate/100)
+    const vatTax = taxBase == null ? null : Math.max(0,taxBase*vatRate/100)
+    const totalTax = taxBase == null ? null : usnTax+vatTax
+    const vatPart = vatTax == null ? null : vatTax/3
+    const deadlines = taxDeadlinesFor(analyticsPeriod)
+    const topTaxProducts = [...analyticsFilteredProducts]
+      .filter(product => Number(product.revenue || 0) > 0)
+      .sort((left,right) => Number(right.revenue || 0)-Number(left.revenue || 0))
+      .slice(0,12)
+      .map(product => {
+        const revenue = Number(product.revenue || 0)
+        return { ...product,usn:revenue*usnRate/100,vat:revenue*vatRate/100,totalTax:revenue*(usnRate+vatRate)/100 }
+      })
+
+    return <section className="app-page glass-panel tax-page">
+      <div className="analytics-title-row">
+        <div className="page-title"><span>Налоговая модель</span><h1>Налоговая</h1><p>Предварительный расчёт по УСН «доходы» и НДС 5% на основе сохранённой выручки WB за выбранный квартал или период.</p></div>
+        <div className="annual-year-switch tax-quarter-switch">{quarterOptions.map(period => <button key={period.quarter} className={analyticsPeriodsMatch(period,analyticsPeriod)?'active':''} onClick={()=>selectQuarter(period)}>Q{period.quarter}</button>)}</div>
+      </div>
+      {analyticsLoading && <div className="notice info"><RefreshCw className="spin" size={20}/><div><strong>Собираю налоговый период</strong><p>Сохранённые данные остаются на экране, новый квартал догружается в фоне.</p></div></div>}
+      {analyticsError && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Налоговый период не обновлён</strong><p>{analyticsError}</p></div><button onClick={()=>loadAnalyticsData(connection.connectionId,analyticsPeriod,false)}>Повторить</button></div>}
+      {!analyticsPeriodsMatch(selectedQuarterPeriod,analyticsPeriod) && <div className="notice info tax-period-note"><CalendarDays size={20}/><div><strong>Сейчас открыт не полный квартал</strong><p>{periodLabel}. Для квартального расчёта нажмите Q{current.quarter}; ELISEI выставит даты {formatDate(selectedQuarterPeriod.from)} — {formatDate(selectedQuarterPeriod.to)}.</p></div><button onClick={()=>selectQuarter(selectedQuarterPeriod)}>Открыть квартал</button></div>}
+      <div className="notice success tax-source-note"><ShieldCheck size={20}/><div><strong>Маркетплейс считается вместе с комиссией</strong><p>Для УСН «доходы» база берётся по полной выручке от покупателя. Комиссия WB, логистика и другие удержания не уменьшают УСН в этом режиме.</p></div></div>
+      <div className="metrics-grid four tax-metrics">
+        <MetricCard label="База УСН / НДС" value={formatMoney(taxBase)} delta={periodLabel} icon={CircleDollarSign}/>
+        <MetricCard label="УСН доходы 6%" value={formatMoney(usnTax)} delta={deadlines.usn} icon={Percent}/>
+        <MetricCard label="НДС 5%" value={formatMoney(vatTax)} delta={vatPart == null ? 'по 1/3 после квартала' : `по ${formatMoney(vatPart)} тремя платежами`} icon={Calculator}/>
+        <MetricCard label="Итого к резерву" value={formatMoney(totalTax)} delta="УСН + НДС 5%, предварительно" icon={WalletCards}/>
+      </div>
+      <div className="tax-layout">
+        <div className="settings-card tax-rules-card">
+          <h3><Info size={20}/> Как считает ELISEI</h3>
+          <div className="tax-rule-list">
+            <div><span>УСН «доходы»</span><strong>{formatMoney(taxBase)} × {usnRate}% = {formatMoney(usnTax)}</strong><small>База: выручка WB до удержания комиссии маркетплейса.</small></div>
+            <div><span>НДС 5%</span><strong>{formatMoney(taxBase)} × {vatRate}% = {formatMoney(vatTax)}</strong><small>{deadlines.vat}</small></div>
+            <div><span>Квартал</span><strong>Q{current.quarter} · {current.year}</strong><small>Отчётные периоды УСН идут нарастающим итогом: квартал, полугодие, 9 месяцев, год. Здесь показан резерв по выбранному квартальному окну.</small></div>
+          </div>
+        </div>
+        <div className="pnl-card tax-summary-card">
+          <h3><ShieldCheck size={20}/> Что держать в голове</h3>
+          <p>Это управленческий расчёт для резерва денег. Финальную декларацию и вычеты нужно сверять с бухгалтером, особенно если меняется ставка НДС или право на освобождение.</p>
+          <div className="pnl-line total"><span>Налоговый резерв</span><strong>{formatMoney(totalTax)}</strong></div>
+        </div>
+      </div>
+      <div className="section-title-row"><div><span>По артикулам</span><h2>Налоговая нагрузка товаров</h2></div><small>{periodLabel}</small></div>
+      <div className="data-table tax-product-table"><div className="data-row head tax-product-row"><span>Товар</span><span>Выручка</span><span>Продажи</span><span>УСН 6%</span><span>НДС 5%</span><span>Всего</span></div>{topTaxProducts.length ? topTaxProducts.map(product => <button className="data-row tax-product-row product-drill-row" key={product.id || product.key} onClick={()=>openProduct360(product)}><span><strong>{product.title}</strong><small>{product.vendorCode || product.article || product.nmID}</small></span><span>{formatMoney(product.revenue)}</span><span>{formatNumber(product.salesCount)}</span><span>{formatMoney(product.usn)}</span><span>{formatMoney(product.vat)}</span><span>{formatMoney(product.totalTax)}</span></button>) : <div className="product-empty">За выбранный период выручки по товарам пока нет.</div>}</div>
+    </section>
+  }
+
   const renderSeasonality = () => {
     const month = new Date().getMonth()+1
     const stages = {
@@ -3111,7 +3206,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
 
   const renderers = {
     'Главная':renderHome, 'Аналитика':renderAnalytics, 'Годовая аналитика':renderAnnualAnalytics, 'Закупки':renderProcurement, 'Товары':renderProducts, 'Остатки':renderStocks, 'История остатков':renderStockHistory,
-    'Финансы':renderFinance, 'Документы WB':renderDocuments, 'Цены и акции':renderPricing, 'Реклама':renderAdvertising, 'Поисковые запросы':renderSearchQueries, 'Коммуникации':renderCommunications,
+    'Финансы':renderFinance, 'Налоговая':renderTax, 'Документы WB':renderDocuments, 'Цены и акции':renderPricing, 'Реклама':renderAdvertising, 'Поисковые запросы':renderSearchQueries, 'Коммуникации':renderCommunications,
     'Сезонность':renderSeasonality, 'Отчёты':renderReports, 'Импорт данных':renderImport, 'AI CRM':renderCrm, 'Спросить ЭЛа':renderChat,
     'Подключения':renderConnections, 'Синхронизации':renderSyncHistory, 'Настройки':renderSettings,
   }
