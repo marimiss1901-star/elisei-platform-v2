@@ -312,7 +312,42 @@ function formatStocks(data, tone) {
   return lines.filter(Boolean).join('\n');
 }
 
-function formatFinance(data, tone) {
+function asksProductPnlDetail(message = '') {
+  return /по\s+(?:каждому\s+)?артикул|артикул|товар|nmid|расшифров|детализац|по\s+каждому|эквайринг|комисси|логистик|хранен|штраф|удержан|затрат/i.test(String(message || ''));
+}
+
+function formatProductPnlDetail(data, tone, options = {}) {
+  const rows = Array.isArray(data?.productPnlRows) ? data.productPnlRows : [];
+  const message = String(options.message || '');
+  const needleMatch = message.match(/(?:артикул|nmid|nmID)\s*([a-zа-яё0-9._/-]+)/i) || message.match(/\b(\d{3,}|[a-zа-яё]{2,}[-_/]?\d{2,})\b/i);
+  const needle = String(needleMatch?.[1] || '').toLowerCase();
+  const visible = needle
+    ? rows.filter(item => [item.vendorCode,item.nmID,item.key,item.title].some(value => String(value || '').toLowerCase().includes(needle)))
+    : rows;
+  const selected = visible.slice(0, needle ? 8 : 7);
+  const lines = [`Товарный P&L за ${periodLabel(data)}: ${rows.length ? `${number(rows.length)} строк по артикулам` : 'пока нет товарных строк'}.`];
+  if (!rows.length) {
+    lines.push('Общая финансовая сводка может быть доступна, но построчная привязка к товарам за этот период ещё не подтверждена. Нули по артикулам не выдумываю.');
+    return lines.join('\n');
+  }
+  if (needle && !selected.length) {
+    lines.push(`По запросу «${needle}» товар в текущем периоде не найден. Проверь период или открой поиск по артикулу в таблице «Деньги по каждому артикулу».`);
+    return lines.join('\n');
+  }
+  for (const item of selected) {
+    const financeSource = item.financeSource === 'wb_finance_api' ? 'WB финансы' : 'резервный расчёт';
+    const profit = item.profit == null ? 'прибыль не рассчитана: нужна себестоимость' : `прибыль ${money(item.profit)}, маржа ${percent(item.margin)}`;
+    lines.push(`• ${titleOf(item)}: выручка ${money(item.revenue)}, продажи ${number(item.sales)}, реклама ${money(item.advertising)}, комиссия ${money(item.commission)}, логистика ${money(item.logistics)}, эквайринг ${money(item.acquiring)}, хранение ${money(item.storage)}, штрафы/удержания ${money(Number(item.penalties || 0)+Number(item.deductions || 0))}, все затраты ${money(item.expenses)}, ${profit}. Источник: ${financeSource}.`);
+  }
+  if (!needle && visible.length > selected.length) lines.push(`Показал первые ${selected.length} строк с самым заметным денежным эффектом. Полный список доступен в «Аналитика» → «Деньги по каждому артикулу» и в CSV-выгрузке.`);
+  const missing = Array.isArray(data?.missingCostProducts) ? data.missingCostProducts : [];
+  if (missing.length) lines.push(`Ограничение: у ${number(missing.length)} товаров не заполнена себестоимость, поэтому прибыль по ним скрыта, а не показана нулём.`);
+  lines.push('Следующее действие: открой самый убыточный или самый дорогой по расходам артикул в SKU 360 и проверь цену, рекламу и возвраты.');
+  return lines.filter(Boolean).join('\n');
+}
+
+function formatFinance(data, tone, options = {}) {
+  if (asksProductPnlDetail(options.message)) return formatProductPnlDetail(data, tone, options);
   const s = data?.summary || {};
   const missing = Array.isArray(data?.missingCostProducts) ? data.missingCostProducts : [];
   const losses = Array.isArray(data?.lossMakingProducts) ? data.lossMakingProducts : [];
