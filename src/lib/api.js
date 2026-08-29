@@ -218,6 +218,7 @@ export const authApi = {
   requestRegisterPhoneCode: (data) => request('/api/auth/register/phone/request', { method: 'POST', body: JSON.stringify(data) }),
   confirmRegisterPhoneCode: (data) => request('/api/auth/register/phone/confirm', { method: 'POST', body: JSON.stringify(data) }),
   login: (data) => request('/api/auth/login', { method: 'POST', body: JSON.stringify(data) }),
+  updateProfile: (data) => request('/api/auth/profile', { method:'PUT',body:JSON.stringify(data) }),
   requestPasswordResetSms: (data) => request('/api/auth/password-reset/sms/request', { method: 'POST', body: JSON.stringify(data) }),
   confirmPasswordResetSms: (data) => request('/api/auth/password-reset/sms/confirm', { method: 'POST', body: JSON.stringify(data) }),
   me: () => request('/api/auth/me'),
@@ -279,7 +280,13 @@ export const wbApi = {
       ...(params?.from ? { from:String(params.from).slice(0,10) } : {}),
       ...(params?.to ? { to:String(params.to).slice(0,10) } : {}),
     }
-    return request(`/api/wb/data-quality/${encodeURIComponent(connectionId)}${querySuffix(clean)}`)
+    const suffix = querySuffix(clean)
+    return cachedRead(
+      `quality:${connectionId}:${clean.from || 'all'}:${clean.to || 'all'}`,
+      `/api/wb/data-quality/${encodeURIComponent(connectionId)}${suffix}`,
+      {},
+      3 * 24 * 60 * 60 * 1000,
+    )
   },
   financeLedger: (connectionId, params = {}) => {
     const suffix = querySuffix(params)

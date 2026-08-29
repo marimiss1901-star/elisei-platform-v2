@@ -13,6 +13,8 @@ import WbExtendedWorkspace from '../components/WbExtendedWorkspace'
 import Product360Drawer from '../components/Product360Drawer'
 import { authApi, businessApi, elApi, wbApi } from '../lib/api'
 
+const ELISEI_CANONICAL_FRONTEND_PATCHES = '5.16.2'
+
 const formatMoney = value => value == null ? 'Не загружено' : `${new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))} ₽`
 const formatNumber = value => value == null ? 'Не загружено' : new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))
 const formatPercent = value => value == null ? '—' : `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits:1 }).format(Number(value || 0))}%`
@@ -36,6 +38,11 @@ const EL_CHAT_CONVERSATION_KEY = 'elisei.el.embedded.conversation.v2'
 const EL_CHAT_SETTINGS_KEY = 'elisei.el.embedded.settings.v2'
 const EL_CHAT_MODE_KEY = 'elisei.el.mode.v1'
 const EL_PERIOD_KEYS = ['elisei.globalPeriod.v3','elisei.globalPeriod','elisei.period.v4']
+
+const scopedElStorageKey = (key, user = {}) => {
+  const identity = String(user?.id || user?.email || 'guest').trim().toLowerCase()
+  return `${key}:${identity || 'guest'}`
+}
 
 const defaultElPlan = {
   tier:'analyst', status:'active',
@@ -150,6 +157,22 @@ const qualityActionText = item => item?.nextAllowedAt
 
 const ANALYTICS_PERIOD_KEY = 'elisei.analytics.period.v2'
 const ANALYTICS_COMPARE_KEY = 'elisei.analytics.compare.v1'
+const WORKSPACE_CACHE_PREFIX = 'elisei.workspace.lastgood.v2.'
+const ANALYTICS_CACHE_PREFIX = 'elisei.analytics.lastgood.v2.'
+
+function readSessionJson(key, fallback = null) {
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? JSON.parse(raw) : fallback
+  } catch { return fallback }
+}
+
+function writeSessionJson(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* cache is best-effort */ }
+}
+
+const workspaceCacheKey = connectionId => WORKSPACE_CACHE_PREFIX + String(connectionId || 'main')
+const analyticsCacheKey = (connectionId, period) => ANALYTICS_CACHE_PREFIX + [connectionId || 'main', period?.from || '', period?.to || ''].join('|')
 
 const isoLocalDate = date => {
   const value = date instanceof Date ? date : new Date(date)
@@ -182,7 +205,10 @@ const periodPresetValue = preset => {
     const yesterday = addDays(to,-1)
     return { preset, from:yesterday, to:yesterday }
   }
-  if (preset === '7') return { preset, from:addDays(to,-6), to }
+  if (preset === '7') {
+    const completedTo = addDays(to,-1)
+    return { preset, from:addDays(completedTo,-6), to:completedTo }
+  }
   if (preset === '90') return { preset, from:addDays(to,-89), to }
   if (preset === 'month') return { preset, from:isoLocalDate(new Date(today.getFullYear(),today.getMonth(),1)), to }
   if (preset === 'prevMonth') {
@@ -196,10 +222,15 @@ const periodPresetValue = preset => {
 
 const normalizeAnalyticsPeriod = value => {
   const fallback = periodPresetValue('yesterday')
+  const preset = String(value?.preset || '')
+  // Relative presets are intentions, not frozen dates. Re-resolve them from
+  // today's local date every time the workspace starts. Only a manual custom
+  // range is allowed to remain fixed across days.
+  if (['yesterday','7','30','90','month','prevMonth','year'].includes(preset)) return periodPresetValue(preset)
   const from = String(value?.from || '').slice(0,10)
   const to = String(value?.to || '').slice(0,10)
   const days = periodDaysBetween({from,to})
-  return days > 0 && days <= 366 ? { preset:value?.preset || 'custom', from, to } : fallback
+  return days > 0 && days <= 366 ? { preset:'custom', from, to } : fallback
 }
 
 const previousPeriodFor = period => {
@@ -378,14 +409,18 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const profileInitial = displayName ? displayName.slice(0,1).toUpperCase() : 'Э'
   const hour = new Date().getHours()
   const greeting = hour < 12 ? 'Доброе утро' : hour < 18 ? 'Добрый день' : 'Добрый вечер'
+  const elMessagesStorageKey = scopedElStorageKey(EL_CHAT_MESSAGES_KEY,user)
+  const elConversationStorageKey = scopedElStorageKey(EL_CHAT_CONVERSATION_KEY,user)
+  const elSettingsStorageKey = scopedElStorageKey(EL_CHAT_SETTINGS_KEY,user)
+  const elModeStorageKey = scopedElStorageKey(EL_CHAT_MODE_KEY,user)
 
   const [active, setActive] = useState('Главная')
   const [query, setQuery] = useState('')
   const [toast, setToast] = useState('')
   const [chat, setChat] = useState('')
   const [chatBusy, setChatBusy] = useState(false)
-  const [elConversationId, setElConversationId] = useState(() => localStorage.getItem(EL_CHAT_CONVERSATION_KEY) || createElConversationId())
-  const [elSettings, setElSettings] = useState(() => normalizeElSettings(readStoredJson(EL_CHAT_SETTINGS_KEY, {})))
+  const [elConversationId, setElConversationId] = useState(() => localStorage.getItem(elConversationStorageKey) || createElConversationId())
+  const [elSettings, setElSettings] = useState(() => normalizeElSettings(readStoredJson(elSettingsStorageKey, {})))
   const preferredElName = elSettings.preferredName || displayName
   const preferredProfileInitial = preferredElName ? preferredElName.slice(0,1).toUpperCase() : profileInitial
   const [elPlan, setElPlan] = useState(defaultElPlan)
@@ -393,10 +428,10 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const [elProfileSaving, setElProfileSaving] = useState(false)
   const [showElPersonality, setShowElPersonality] = useState(false)
   const [elMood, setElMood] = useState('happy')
-  const [elMode, setElMode] = useState(() => localStorage.getItem(EL_CHAT_MODE_KEY) || 'analyst')
+  const [elMode, setElMode] = useState(() => localStorage.getItem(elModeStorageKey) || 'analyst')
   const [messages, setMessages] = useState(() => {
-    const stored = readStoredJson(EL_CHAT_MESSAGES_KEY, [])
-    const storedSettings = normalizeElSettings(readStoredJson(EL_CHAT_SETTINGS_KEY, {}))
+    const stored = readStoredJson(elMessagesStorageKey, [])
+    const storedSettings = normalizeElSettings(readStoredJson(elSettingsStorageKey, {}))
     return Array.isArray(stored) && stored.length ? stored.slice(-50) : [{
       role:'el',
       text:initialElGreeting(greeting, storedSettings.preferredName || displayName, storedSettings),
@@ -420,7 +455,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const [analyticsLoading, setAnalyticsLoading] = useState(false)
   const [analyticsError, setAnalyticsError] = useState('')
   const [analyticsPeriod, setAnalyticsPeriod] = useState(() => normalizeAnalyticsPeriod(readStoredJson(ANALYTICS_PERIOD_KEY, null)))
-  const [analyticsCompare, setAnalyticsCompare] = useState(() => localStorage.getItem(ANALYTICS_COMPARE_KEY) !== 'false')
+  const [analyticsCompare, setAnalyticsCompare] = useState(() => localStorage.getItem(ANALYTICS_COMPARE_KEY) === 'true')
   const [analyticsBrand, setAnalyticsBrand] = useState('Все')
   const [analyticsCategory, setAnalyticsCategory] = useState('Все')
   const [analyticsAbc, setAnalyticsAbc] = useState('Все')
@@ -431,6 +466,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const [integrationDiagnostics, setIntegrationDiagnostics] = useState(null)
   const [dataQuality, setDataQuality] = useState(null)
   const [dataQualityLoading, setDataQualityLoading] = useState(false)
+  const [dataQualityError, setDataQualityError] = useState('')
   const [qualityView, setQualityView] = useState('problems')
   const [financeLedger, setFinanceLedger] = useState(null)
   const [financeLedgerLoading, setFinanceLedgerLoading] = useState(false)
@@ -446,6 +482,9 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const [liveProducts, setLiveProducts] = useState([])
   const [syncHistory, setSyncHistory] = useState([])
   const [settingsDraft, setSettingsDraft] = useState(defaultSettings)
+  const [accountNameDraft, setAccountNameDraft] = useState(user?.name || '')
+  const [accountProfileBusy, setAccountProfileBusy] = useState(false)
+  const [accountProfileNotice, setAccountProfileNotice] = useState('')
   const [accountPhoneDraft, setAccountPhoneDraft] = useState(user?.phone || '')
   const [accountPhoneCode, setAccountPhoneCode] = useState('')
   const [accountPhoneStage, setAccountPhoneStage] = useState('idle')
@@ -463,6 +502,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const connectionRef = useRef(emptyConnection)
   const syncRevisionRef = useRef('')
   const analyticsRequestRef = useRef(0)
+  const analyticsPeriodKeyRef = useRef('')
   const lastBusinessSectionRef = useRef('Главная')
 
   const notify = (text, duration = 4200) => {
@@ -472,10 +512,24 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   }
 
   useEffect(() => {
+    setAccountNameDraft(user?.name || '')
     setAccountPhoneDraft(user?.phone || '')
     setAccountPhoneStage('idle')
     setAccountPhoneCode('')
-  }, [user?.phone])
+  }, [user?.name,user?.phone])
+
+  const saveAccountProfile = async () => {
+    setAccountProfileBusy(true); setAccountProfileNotice('')
+    try {
+      const result=await authApi.updateProfile({ name:accountNameDraft })
+      if (result.user) onUserUpdate?.(result.user)
+      if (!elSettings.preferredName || elSettings.preferredName === displayName) {
+        setElSettings(current=>normalizeElSettings({ ...current,preferredName:String(result.user?.name || accountNameDraft).split(/\s+/)[0] }))
+      }
+      setAccountProfileNotice(result.message || 'Имя профиля сохранено.')
+    } catch (error) { setAccountProfileNotice(error.message) }
+    finally { setAccountProfileBusy(false) }
+  }
 
   const requestAccountPhoneCode = async () => {
     setAccountPhoneBusy(true); setAccountPhoneNotice('')
@@ -597,27 +651,80 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   }
 
   const loadConnectionData = async connectionId => {
-    const [dashboard, productResult, historyResult, coreResult, advertisingResult, diagnosticsResult] = await Promise.all([
-      wbApi.dashboard(connectionId), wbApi.products(connectionId), wbApi.syncHistory(connectionId), wbApi.core(connectionId), wbApi.advertising(connectionId,{ from:analyticsPeriod.from,to:analyticsPeriod.to }), wbApi.diagnostics(connectionId)
-    ])
-    setDashboardData(dashboard.dashboard || null)
-    setLiveProducts(productResult.products || [])
-    setSyncHistory(historyResult.history || [])
-    setCoreData(coreResult.core || null)
-    setAdvertisingSnapshot(advertisingResult.advertising || coreResult.core?.advertising || null)
-    setAdvertisingCoverage(advertisingResult.coverage || null)
-    setIntegrationDiagnostics(diagnosticsResult || null)
-    if (coreResult.core?.settings) setSettingsDraft(coreResult.core.settings)
+    const cacheKey = workspaceCacheKey(connectionId)
+    const cached = readSessionJson(cacheKey, {}) || {}
+    const nextCache = { ...cached, savedAt:new Date().toISOString() }
+
+    // First meaningful paint: products only. The selected-period core is loaded
+    // exactly once by loadAnalyticsData, so the same 20+ WB streams are not
+    // hydrated twice on every entry.
+    try {
+      const productResult = await wbApi.products(connectionId)
+      const incomingProducts = Array.isArray(productResult?.products) ? productResult.products : null
+      if (incomingProducts && (incomingProducts.length > 0 || !Array.isArray(cached.products) || cached.products.length === 0)) {
+        setLiveProducts(incomingProducts)
+        nextCache.products = incomingProducts
+      } else if (Array.isArray(cached.products) && cached.products.length) {
+        setLiveProducts(current => current.length ? current : cached.products)
+      }
+      writeSessionJson(cacheKey,nextCache)
+    } catch (error) {
+      if (Array.isArray(cached.products) && cached.products.length) setLiveProducts(current => current.length ? current : cached.products)
+      else throw error
+    }
+
+    // Secondary workspace readers wait until the business core had a chance to
+    // paint. They are independent and can never blank the main business screen.
+    window.setTimeout(async () => {
+      const secondary = []
+      const secondaryReaders = [
+        () => wbApi.dashboard(connectionId),
+        () => wbApi.syncHistory(connectionId),
+        () => wbApi.advertising(connectionId,{ from:analyticsPeriod.from,to:analyticsPeriod.to }),
+        () => wbApi.diagnostics(connectionId),
+      ]
+      // The Render PostgreSQL tier intentionally uses a tiny pool. Keep the
+      // business core responsive by letting secondary readers use one slot at
+      // a time instead of opening four competing DB requests at once.
+      for (const read of secondaryReaders) {
+        try { secondary.push({ status:'fulfilled', value:await read() }) }
+        catch (reason) { secondary.push({ status:'rejected', reason }) }
+        await new Promise(resolve => window.setTimeout(resolve, 180))
+      }
+      const value = index => secondary[index]?.status === 'fulfilled' ? secondary[index].value : null
+      const dashboard = value(0)
+      const historyResult = value(1)
+      const advertisingResult = value(2)
+      const diagnosticsResult = value(3)
+      const refreshedCache = { ...(readSessionJson(cacheKey,{}) || {}), savedAt:new Date().toISOString() }
+      if (dashboard?.dashboard) { setDashboardData(dashboard.dashboard); refreshedCache.dashboard=dashboard.dashboard }
+      else if (cached.dashboard) setDashboardData(current => current || cached.dashboard)
+      if (Array.isArray(historyResult?.history)) { setSyncHistory(historyResult.history); refreshedCache.history=historyResult.history }
+      else if (Array.isArray(cached.history)) setSyncHistory(current => current.length ? current : cached.history)
+      if (advertisingResult?.advertising) { setAdvertisingSnapshot(advertisingResult.advertising); refreshedCache.advertising=advertisingResult.advertising }
+      else if (cached.advertising) setAdvertisingSnapshot(current => current || cached.advertising)
+      if (advertisingResult?.coverage) { setAdvertisingCoverage(advertisingResult.coverage); refreshedCache.advertisingCoverage=advertisingResult.coverage }
+      else if (cached.advertisingCoverage) setAdvertisingCoverage(current => current || cached.advertisingCoverage)
+      if (diagnosticsResult) { setIntegrationDiagnostics(diagnosticsResult); refreshedCache.diagnostics=diagnosticsResult }
+      else if (cached.diagnostics) setIntegrationDiagnostics(current => current || cached.diagnostics)
+      if (secondary.some(item => item.status === 'fulfilled')) writeSessionJson(cacheKey,refreshedCache)
+    }, 1200)
   }
 
   const loadDataQuality = async (connectionId = connection.connectionId, period = analyticsPeriod) => {
     if (!connectionId) return
     setDataQualityLoading(true)
+    setDataQualityError('')
     try {
       const result=await wbApi.dataQuality(connectionId,{ from:period?.from,to:period?.to })
       setDataQuality(result?.quality || null)
+      setDataQualityError('')
     } catch (error) {
-      notify(error.message,8000)
+      const transient = ['DATABASE_RECONNECTING','REQUEST_TIMEOUT','BACKEND_UNAVAILABLE'].includes(String(error?.code || ''))
+        || Number(error?.status || 0) === 503
+        || /timeout exceeded when trying to connect|connection timeout|database.*reconnect/i.test(String(error?.message || ''))
+      setDataQualityError(error?.message || 'Проверка качества временно недоступна.')
+      if (!transient) notify(error.message,8000)
     } finally {
       setDataQualityLoading(false)
     }
@@ -663,22 +770,58 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const loadAnalyticsData = async (connectionId, period = analyticsPeriod, compare = analyticsCompare) => {
     if (!connectionId || !period?.from || !period?.to) return
     const requestId = ++analyticsRequestRef.current
+    const cacheKey = analyticsCacheKey(connectionId, period)
+    const cached = readSessionJson(cacheKey, null)
+    const previousKey = analyticsPeriodKeyRef.current
     setAnalyticsLoading(true)
     setAnalyticsError('')
-    setAnalyticsCore(null)
-    setAnalyticsCompareCore(null)
+
+    if (previousKey !== cacheKey) {
+      if (cached?.core) {
+        setAnalyticsCore(cached.core)
+        setCoreData(cached.core)
+        setAnalyticsCompareCore(cached.compareCore || null)
+        analyticsPeriodKeyRef.current = cacheKey
+      } else if (previousKey) {
+        setAnalyticsCore(null)
+        setCoreData(null)
+        setAnalyticsCompareCore(null)
+      }
+    }
+
     try {
-      const previous = previousPeriodFor(period)
-      const [currentResult, previousResult] = await Promise.all([
-        wbApi.core(connectionId,{ from:period.from,to:period.to }),
-        compare ? wbApi.core(connectionId,{ from:previous.from,to:previous.to }) : Promise.resolve(null),
-      ])
+      const currentResult = await wbApi.core(connectionId,{ from:period.from,to:period.to })
       if (requestId !== analyticsRequestRef.current) return
-      setAnalyticsCore(currentResult?.core || null)
-      setAnalyticsCompareCore(previousResult?.core || null)
+      const nextCore = currentResult?.core || null
+      if (nextCore) {
+        setAnalyticsCore(nextCore)
+        setCoreData(nextCore)
+        analyticsPeriodKeyRef.current = cacheKey
+        writeSessionJson(cacheKey,{ core:nextCore, compareCore:cached?.compareCore || null, savedAt:new Date().toISOString() })
+      }
+      if (compare && nextCore) {
+        const previous = previousPeriodFor(period)
+        try {
+          const previousResult = await wbApi.core(connectionId,{ from:previous.from,to:previous.to })
+          if (requestId !== analyticsRequestRef.current) return
+          const nextCompareCore = previousResult?.core || null
+          setAnalyticsCompareCore(nextCompareCore)
+          writeSessionJson(cacheKey,{ core:nextCore, compareCore:nextCompareCore, savedAt:new Date().toISOString() })
+        } catch (compareError) {
+          if (cached?.compareCore) setAnalyticsCompareCore(current => current || cached.compareCore)
+        }
+      } else if (!compare) {
+        setAnalyticsCompareCore(null)
+      }
     } catch (error) {
       if (requestId !== analyticsRequestRef.current) return
-      setAnalyticsError(error.message || 'Не удалось пересчитать аналитику за выбранный период.')
+      if (cached?.core) {
+        setAnalyticsCore(current => current || cached.core)
+        setCoreData(current => current || cached.core)
+        setAnalyticsCompareCore(current => current || cached.compareCore || null)
+        analyticsPeriodKeyRef.current = cacheKey
+      }
+      setAnalyticsError(error.message || 'Не удалось пересчитать аналитику за выбранный период. Показываем последние подтверждённые данные.')
     } finally {
       if (requestId === analyticsRequestRef.current) setAnalyticsLoading(false)
     }
@@ -690,20 +833,20 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
 
 
   useEffect(() => {
-    localStorage.setItem(EL_CHAT_MESSAGES_KEY, JSON.stringify(messages.slice(-50)))
-  }, [messages])
+    localStorage.setItem(elMessagesStorageKey, JSON.stringify(messages.slice(-50)))
+  }, [elMessagesStorageKey,messages])
 
   useEffect(() => {
-    localStorage.setItem(EL_CHAT_CONVERSATION_KEY, elConversationId)
-  }, [elConversationId])
+    localStorage.setItem(elConversationStorageKey, elConversationId)
+  }, [elConversationId,elConversationStorageKey])
 
   useEffect(() => {
-    localStorage.setItem(EL_CHAT_SETTINGS_KEY, JSON.stringify(elSettings))
-  }, [elSettings])
+    localStorage.setItem(elSettingsStorageKey, JSON.stringify(elSettings))
+  }, [elSettings,elSettingsStorageKey])
 
   useEffect(() => {
-    localStorage.setItem(EL_CHAT_MODE_KEY, elMode)
-  }, [elMode])
+    localStorage.setItem(elModeStorageKey, elMode)
+  }, [elMode,elModeStorageKey])
 
   useEffect(() => {
     if (!elApi?.status) return
@@ -740,7 +883,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
       syncRevisionRef.current = syncDataRevision(normalized)
       setConnection(normalized)
       setSyncHistory(status.syncHistory || [])
-      await Promise.all([loadDailyReady(status.connectionId),loadConnectionData(status.connectionId),loadLiveSync(status.connectionId)])
+      await Promise.allSettled([loadDailyReady(status.connectionId),loadConnectionData(status.connectionId),loadLiveSync(status.connectionId)])
     }).catch(error => notify(error.message, 8000))
   }, [])
 
@@ -762,7 +905,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
         // Данные статуса и расчётное ядро приходят из разных endpoint'ов.
         // После фонового завершения отчёта обязательно перечитываем core,
         // иначе журнал уже показывает новый остаток, а раздел «Остатки» остаётся на старом снимке.
-        if (shouldReload) await Promise.all([loadDailyReady(connectionId),loadConnectionData(connectionId)])
+        if (shouldReload) await loadDailyReady(connectionId)
       } catch { /* фоновая проверка не должна мешать работе интерфейса */ }
     }, 15000)
     return () => window.clearInterval(timer)
@@ -870,16 +1013,17 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
       loadAnalyticsData(connection.connectionId,analyticsPeriod,['Главная','Аналитика'].includes(active) ? analyticsCompare : false)
     }, 320)
     return () => window.clearTimeout(timer)
-  }, [active, connection.connected, connection.connectionId, connection.lastSync, analyticsPeriod.from, analyticsPeriod.to, analyticsCompare])
+  }, [active, connection.connected, connection.connectionId, analyticsPeriod.from, analyticsPeriod.to, analyticsCompare])
 
   useEffect(() => {
-    if (!['Главная','Финансы'].includes(active) || !connection.connected || !connection.connectionId) return undefined
+    // Detailed ledger belongs to the Finance page. The main screen uses the core finance summary.
+    if (active !== 'Финансы' || !connection.connected || !connection.connectionId) return undefined
     const timer = window.setTimeout(() => {
-      loadFinanceLedger(connection.connectionId, active === 'Главная' ? { tab:'overview', query:'', page:1 } : {}).catch(() => {})
-    }, 280)
+      loadFinanceLedger(connection.connectionId).catch(() => {})
+    }, 450)
     return () => window.clearTimeout(timer)
   }, [active, connection.connected, connection.connectionId, financeTab, query, financePage, analyticsPeriod.from, analyticsPeriod.to,
-      (connection.syncStates || []).filter(item => ['finance','acquiring','paidStorage','acceptance','documents','jamSubscription'].includes(item.stage)).map(item => `${item.stage}:${item.lastSuccessAt || item.nextAllowedAt || ''}`).join('|')])
+      (connection.syncStates || []).filter(item => ['finance','acquiring','paidStorage','acceptance','documents','jamSubscription'].includes(item.stage)).map(item => item.stage + ':' + (item.lastSuccessAt || item.nextAllowedAt || '')).join('|')])
 
   useEffect(() => {
     if (active !== 'Документы WB' || !connection.connected || !connection.connectionId) return undefined
@@ -1443,19 +1587,47 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const snapshotMode = Boolean(dailyReady?.snapshot?.date && dailyReady.snapshot.date === analyticsPeriod.from && analyticsPeriod.from === analyticsPeriod.to)
     const readySnapshot = snapshotMode ? dailyReady.snapshot : null
     const readyCore = readySnapshot?.core || null
-    const businessSummary = readyCore?.summary || analyticsCore?.summary || summary || {}
+    const snapshotStates = readySnapshot?.metricStates || {}
+    const persistedSummary = analyticsCore?.summary || summary || {}
+    const snapshotSummary = readyCore?.summary || {}
+    const persistedAvailability = analyticsCore?.availability || {}
+    const snapshotAvailability = readyCore?.availability || {}
+    const analyticsAvailability = { ...persistedAvailability }
+    for (const [key,value] of Object.entries(snapshotAvailability)) {
+      if (value || analyticsAvailability[key] == null) analyticsAvailability[key] = value
+    }
+    const businessSummary = snapshotMode ? { ...persistedSummary, ...snapshotSummary } : persistedSummary
+    const snapshotState = stage => String(snapshotStates?.[stage]?.state || '')
+    const preserveConfirmedDomain = (stage, keys = []) => {
+      if (!snapshotMode) return
+      const state = snapshotState(stage)
+      const persistedReady = Boolean(persistedAvailability?.[stage])
+      for (const key of keys) {
+        const persistedValue = persistedSummary?.[key]
+        if (persistedValue == null) continue
+        if ((persistedReady && state !== 'ready') || businessSummary?.[key] == null) businessSummary[key] = persistedValue
+      }
+    }
+    preserveConfirmedDomain('sales',['revenue','sales','returns','returnRate','averagePrice'])
+    preserveConfirmedDomain('orders',['orders'])
+    preserveConfirmedDomain('advertising',['advertising'])
+    preserveConfirmedDomain('finance',['commission','logistics','storage','acceptance','acquiring','penalties','deductions','adjustments','sellerPayable','operatingProfit','margin'])
     const previousSummary = readySnapshot?.previous?.core?.summary || analyticsCompareCore?.summary || {}
     const compareReady = Boolean(readySnapshot?.previous?.core || analyticsCompareCore)
     const snapshotFinance = readyCore?.finance?.summary || {}
     const loadedLedgerSummary = financeLedger?.summary || {}
     const coreFinanceSummary = analyticsCore?.finance?.summary || {}
-    const ledgerSummary = Number(snapshotFinance?.movements || 0) > 0
+    const sourceLedgerSummary = Number(snapshotFinance?.movements || 0) > 0
       ? snapshotFinance
       : Number(loadedLedgerSummary?.movements || 0) > 0 ? loadedLedgerSummary : coreFinanceSummary
+    // Statistics sales expose the seller amount before the weekly realization
+    // detail is ready. Keep that safe estimate visible instead of rendering an
+    // empty settlement card for an otherwise fully loaded period.
+    const ledgerSummary = Number(sourceLedgerSummary?.movements || 0) > 0
+      ? sourceLedgerSummary
+      : { ...sourceLedgerSummary,sellerPayable:businessSummary.revenue == null ? 0 : Number(businessSummary.revenue || 0) }
     const periodLabel = `${formatDate(analyticsPeriod.from)} — ${formatDate(analyticsPeriod.to)}`
     const periodDays = periodDaysBetween(analyticsPeriod)
-    const analyticsAvailability = readyCore?.availability || analyticsCore?.availability || {}
-    const snapshotStates = readySnapshot?.metricStates || {}
     const syncStateFor = stage => (connection.syncStates || []).find(item => item.stage === stage) || null
     const financeState = syncStateFor('finance')
     const financePersistedRows = Number(financeState?.metadata?.persistedCount || financeState?.lastCount || 0)
@@ -1465,7 +1637,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const snapshotAdvertisingState = String(snapshotStates?.advertising?.state || '')
     const selectedFinancePeriodCovered = Boolean(financeLedger?.coverage?.selectedPeriod?.covered || analyticsCore?.finance?.selectedPeriod?.covered)
     const financePartial = snapshotMode
-      ? snapshotFinanceState === 'partial' && !selectedFinancePeriodCovered
+      ? snapshotFinanceState === 'partial' && !selectedFinancePeriodCovered && !Boolean(persistedAvailability.finance)
       : Boolean(!selectedFinancePeriodCovered && (financeLedger?.coverage?.financePartial || (financePersistedRows > 0 && ['queued','running','rate_limited','retry_scheduled'].includes(String(financeState?.status || '')))))
     const financeMovementsInPeriod = Number(ledgerSummary.movements || financeLedger?.pagination?.total || 0)
     const ledgerHasMovements = financeMovementsInPeriod > 0
@@ -1492,11 +1664,11 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const homeMargin = homeOperatingProfit != null && Number(businessSummary.revenue || 0) > 0
       ? homeOperatingProfit/Number(businessSummary.revenue)*100
       : businessSummary.margin
-    const stateAvailable = (name, fallback) => snapshotMode ? ['ready','partial'].includes(name) : Boolean(fallback)
-    const statePartial = (name, fallback) => snapshotMode ? name === 'partial' : Boolean(fallback)
-    const metric = (label,value,current,previous,{ money=true,lowerIsBetter=false,note='',onClick='Аналитика',available=true,partial=false }={}) => {
+    const stateAvailable = (name, fallback) => snapshotMode ? ['ready','partial'].includes(name) || Boolean(fallback) : Boolean(fallback)
+    const statePartial = (name, fallback, persistedReady = false) => snapshotMode ? name === 'partial' && !Boolean(persistedReady) : Boolean(fallback)
+    const metric = (label,value,current,previous,{ money=true,lowerIsBetter=false,note='',onClick='Аналитика',available=true,partial=false,showProvisionalZero=false }={}) => {
       const numeric = Number(value)
-      const hideUnconfirmedZero = partial && Number.isFinite(numeric) && numeric === 0
+      const hideUnconfirmedZero = partial && !showProvisionalZero && Number.isFinite(numeric) && numeric === 0
       return {
         label,
         value:available && !hideUnconfirmedZero ? (money ? formatMoney(value) : formatNumber(value)) : (partial ? 'Уточняется…' : 'Ожидается'),
@@ -1504,34 +1676,50 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
         tone:available && !partial ? comparisonToneDirectional(current,previous,compareReady,lowerIsBetter) : '',onClick,
       }
     }
-    const financeAvailableForPeriod = Boolean(stateAvailable(snapshotFinanceState,analyticsAvailability.finance) || ledgerHasMovements || selectedFinancePeriodCovered)
+    const advertisingAvailableForPeriod = stateAvailable(snapshotAdvertisingState,analyticsAvailability.advertising)
+    const salesAvailableForPeriod = stateAvailable(snapshotSalesState,analyticsAvailability.sales)
+    const ordersAvailableForPeriod = stateAvailable(snapshotOrdersState,analyticsAvailability.orders)
+    const financeEstimateAvailable = Boolean(!ledgerHasMovements && salesAvailableForPeriod && businessSummary.revenue != null)
+    const financeAvailableForPeriod = Boolean(stateAvailable(snapshotFinanceState,analyticsAvailability.finance) || ledgerHasMovements || selectedFinancePeriodCovered || financeEstimateAvailable)
     const financeHasAnyProgress = statePartial(snapshotFinanceState,financePartial) || financePersistedRows > 0 || financeMovementsInPeriod > 0
-    const financeMetricPartial = statePartial(snapshotFinanceState,financePartial)
+    const financeMetricPartial = Boolean(statePartial(snapshotFinanceState,financePartial,persistedAvailability.finance) || financeEstimateAvailable)
     const storageMetricPartial = financeMetricPartial && !Boolean(analyticsAvailability.paidStorage)
     const acquiringMetricPartial = financeMetricPartial && !Boolean(analyticsAvailability.acquiring)
     const storageAvailableForPeriod = financeAvailableForPeriod || (!snapshotMode && Boolean(analyticsAvailability.paidStorage))
     const acquiringAvailableForPeriod = financeAvailableForPeriod || (!snapshotMode && Boolean(analyticsAvailability.acquiring))
-    const advertisingAvailableForPeriod = stateAvailable(snapshotAdvertisingState,analyticsAvailability.advertising)
-    const salesAvailableForPeriod = stateAvailable(snapshotSalesState,analyticsAvailability.sales)
-    const ordersAvailableForPeriod = stateAvailable(snapshotOrdersState,analyticsAvailability.orders)
-    const sellerPayableAvailable = financeAvailableForPeriod && (financeMovementsInPeriod > 0 || snapshotFinanceState === 'ready')
+    const sellerPayableAvailable = Boolean(financeAvailableForPeriod && (financeMovementsInPeriod > 0 || snapshotFinanceState === 'ready' || financeEstimateAvailable))
+    const financeMetricNote = financeEstimateAvailable ? 'предварительно · резервные параметры' : 'финансовая детализация WB'
+    const wbBalance = analyticsCore?.finance?.balance && typeof analyticsCore.finance.balance === 'object' ? analyticsCore.finance.balance : null
+    const moneyOrNull = value => value === null || value === undefined || value === '' ? null : Number.isFinite(Number(value)) ? Number(value) : null
+    const wbCurrentBalance = moneyOrNull(wbBalance?.current)
+    const wbForWithdraw = moneyOrNull(wbBalance?.for_withdraw)
+    const wbBalanceUpdatedAt = wbBalance?.updatedAt || wbBalance?.updated_at || null
     const digitizationMetrics = [
-      metric('Выручка',businessSummary.revenue,businessSummary.revenue,previousSummary.revenue,{ note:salesAvailableForPeriod ? `${formatNumber(businessSummary.sales)} продаж` : 'продажи ещё подтверждаются WB',available:salesAvailableForPeriod,partial:statePartial(snapshotSalesState,!analyticsAvailability.sales && Boolean(syncStateFor('sales'))) }),
-      { label:'К перечислению',value:sellerPayableAvailable && !(financePartial && Number(ledgerSummary.sellerPayable || 0) === 0) ? formatMoney(ledgerSummary.sellerPayable || 0) : financeHasAnyProgress ? 'Уточняется…' : 'Ожидается',delta:sellerPayableAvailable ? (financePartial ? 'предварительно · финансы догружаются' : 'подтверждено финансовым реестром WB') : financeHasAnyProgress ? 'часть финансов уже сохранена' : 'ожидаем финансовые данные',tone:'',onClick:'Финансы' },
-      { label:'Опер. прибыль',value:businessSummary.cogs == null ? 'Не рассчитано' : (homeOperatingProfit != null && salesAvailableForPeriod && financeAvailableForPeriod && !(financePartial && Number(homeOperatingProfit || 0) === 0) ? formatMoney(homeOperatingProfit) : financeHasAnyProgress ? 'Уточняется…' : 'Ожидается'),delta:businessSummary.cogs == null ? 'нужна себестоимость' : (homeOperatingProfit != null && salesAvailableForPeriod && financeAvailableForPeriod ? (financePartial ? 'предварительно · финансы догружаются' : `маржа ${formatPercent(homeMargin)}`) : 'ждём продажи и финансовую детализацию'),tone:'',onClick:'Финансы' },
-      metric('Заказы',businessSummary.orders,businessSummary.orders,previousSummary.orders,{ money:false,note:ordersAvailableForPeriod ? `${formatNumber(businessSummary.sales)} продаж` : 'заказы ещё подтверждаются WB',available:ordersAvailableForPeriod,partial:statePartial(snapshotOrdersState,!analyticsAvailability.orders && Boolean(syncStateFor('orders'))) }),
-      metric('Продажи',businessSummary.sales,businessSummary.sales,previousSummary.sales,{ money:false,note:salesAvailableForPeriod ? `выкуп ${businessSummary.orders ? formatPercent(Number(businessSummary.sales || 0)/Number(businessSummary.orders || 1)*100) : '—'}` : 'продажи ещё подтверждаются WB',available:salesAvailableForPeriod,partial:statePartial(snapshotSalesState,!analyticsAvailability.sales && Boolean(syncStateFor('sales'))) }),
-      metric('Возвраты',businessSummary.returns,businessSummary.returns,previousSummary.returns,{ money:false,lowerIsBetter:true,note:salesAvailableForPeriod ? `${formatPercent(businessSummary.returnRate)} от продаж` : 'возвраты считаются из подтверждённых продаж',available:salesAvailableForPeriod,partial:statePartial(snapshotSalesState,!analyticsAvailability.sales && Boolean(syncStateFor('sales'))) }),
-      metric('Комиссия WB',confirmedFinanceSummary.commission,confirmedFinanceSummary.commission,previousSummary.commission,{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:financeMetricPartial,note:'финансовая детализация WB' }),
-      metric('Логистика',confirmedFinanceSummary.logistics,confirmedFinanceSummary.logistics,previousSummary.logistics,{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:financeMetricPartial,note:'финансовая детализация WB' }),
-      metric('Реклама',businessSummary.advertising,businessSummary.advertising,previousSummary.advertising,{ lowerIsBetter:true,onClick:'Реклама',available:advertisingAvailableForPeriod,partial:statePartial(snapshotAdvertisingState,!analyticsAvailability.advertising && Boolean(syncStateFor('advertising'))),note:advertisingAvailableForPeriod ? '' : 'статистика рекламы ещё подтверждается' }),
-      metric('Хранение',confirmedFinanceSummary.storage,confirmedFinanceSummary.storage,previousSummary.storage,{ lowerIsBetter:true,onClick:'Финансы',available:storageAvailableForPeriod,partial:storageMetricPartial,note:'подтверждается финансами/отчётом хранения' }),
-      metric('Эквайринг',confirmedFinanceSummary.acquiring,confirmedFinanceSummary.acquiring,previousSummary.acquiring,{ lowerIsBetter:true,onClick:'Финансы',available:acquiringAvailableForPeriod,partial:acquiringMetricPartial,note:'подтверждается финансовой детализацией' }),
-      metric('Штрафы + удержания',Number(confirmedFinanceSummary.penalties || 0)+Number(confirmedFinanceSummary.deductions || 0),Number(confirmedFinanceSummary.penalties || 0)+Number(confirmedFinanceSummary.deductions || 0),Number(previousSummary.penalties || 0)+Number(previousSummary.deductions || 0),{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:financeMetricPartial,note:'финансовая детализация WB' }),
+      metric('Выручка',businessSummary.revenue,businessSummary.revenue,previousSummary.revenue,{ note:salesAvailableForPeriod ? `${formatNumber(businessSummary.sales)} продаж` : 'продажи ещё подтверждаются WB',available:salesAvailableForPeriod,partial:statePartial(snapshotSalesState,!analyticsAvailability.sales && Boolean(syncStateFor('sales')),persistedAvailability.sales) }),
+      { label:'К перечислению',value:sellerPayableAvailable ? formatMoney(ledgerSummary.sellerPayable || 0) : financeHasAnyProgress ? 'Уточняется…' : 'Ожидается',delta:financeEstimateAvailable ? 'предварительно по оперативным продажам' : sellerPayableAvailable ? (financePartial ? 'предварительно · финансы догружаются' : 'подтверждено финансовым реестром WB') : financeHasAnyProgress ? 'часть финансов уже сохранена' : 'ожидаем финансовые данные',tone:'',onClick:'Финансы' },
+      { label:'Доступно к выводу',value:wbForWithdraw == null ? 'Ожидается' : formatMoney(wbForWithdraw),delta:wbForWithdraw == null ? 'ночной снимок баланса WB ещё не загружен' : `текущий баланс ${wbCurrentBalance == null ? "—" : formatMoney(wbCurrentBalance)}${wbBalanceUpdatedAt ? ` · ${formatLocalDateTime(wbBalanceUpdatedAt)}` : ""}`,tone:'',onClick:'Финансы' },
+      { label:'Опер. прибыль',value:businessSummary.cogs == null ? 'Не рассчитано' : (homeOperatingProfit != null && salesAvailableForPeriod && financeAvailableForPeriod && !(financePartial && !financeEstimateAvailable && Number(homeOperatingProfit || 0) === 0) ? formatMoney(homeOperatingProfit) : financeHasAnyProgress ? 'Уточняется…' : 'Ожидается'),delta:businessSummary.cogs == null ? 'нужна себестоимость' : (homeOperatingProfit != null && salesAvailableForPeriod && financeAvailableForPeriod ? (financeEstimateAvailable ? `предварительно · маржа ${formatPercent(homeMargin)}` : financePartial ? 'предварительно · финансы догружаются' : `маржа ${formatPercent(homeMargin)}`) : 'ждём продажи и финансовую детализацию'),tone:'',onClick:'Финансы' },
+      metric('Заказы',businessSummary.orders,businessSummary.orders,previousSummary.orders,{ money:false,note:ordersAvailableForPeriod ? `${formatNumber(businessSummary.sales)} продаж` : 'заказы ещё подтверждаются WB',available:ordersAvailableForPeriod,partial:statePartial(snapshotOrdersState,!analyticsAvailability.orders && Boolean(syncStateFor('orders')),persistedAvailability.orders) }),
+      metric('Продажи',businessSummary.sales,businessSummary.sales,previousSummary.sales,{ money:false,note:salesAvailableForPeriod ? `выкуп ${businessSummary.orders ? formatPercent(Number(businessSummary.sales || 0)/Number(businessSummary.orders || 1)*100) : '—'}` : 'продажи ещё подтверждаются WB',available:salesAvailableForPeriod,partial:statePartial(snapshotSalesState,!analyticsAvailability.sales && Boolean(syncStateFor('sales')),persistedAvailability.sales) }),
+      metric('Возвраты',businessSummary.returns,businessSummary.returns,previousSummary.returns,{ money:false,lowerIsBetter:true,note:salesAvailableForPeriod ? `${formatPercent(businessSummary.returnRate)} от продаж` : 'возвраты считаются из подтверждённых продаж',available:salesAvailableForPeriod,partial:statePartial(snapshotSalesState,!analyticsAvailability.sales && Boolean(syncStateFor('sales')),persistedAvailability.sales) }),
+      metric('Комиссия WB',confirmedFinanceSummary.commission,confirmedFinanceSummary.commission,previousSummary.commission,{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:financeMetricPartial,showProvisionalZero:financeEstimateAvailable,note:financeMetricNote }),
+      metric('Логистика',confirmedFinanceSummary.logistics,confirmedFinanceSummary.logistics,previousSummary.logistics,{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:financeMetricPartial,showProvisionalZero:financeEstimateAvailable,note:financeMetricNote }),
+      metric('Реклама',businessSummary.advertising,businessSummary.advertising,previousSummary.advertising,{ lowerIsBetter:true,onClick:'Реклама',available:advertisingAvailableForPeriod,partial:statePartial(snapshotAdvertisingState,!analyticsAvailability.advertising && Boolean(syncStateFor('advertising')),persistedAvailability.advertising),note:advertisingAvailableForPeriod ? '' : 'статистика рекламы ещё подтверждается' }),
+      metric('Хранение',confirmedFinanceSummary.storage,confirmedFinanceSummary.storage,previousSummary.storage,{ lowerIsBetter:true,onClick:'Финансы',available:storageAvailableForPeriod,partial:storageMetricPartial,showProvisionalZero:financeEstimateAvailable,note:financeEstimateAvailable ? financeMetricNote : 'подтверждается финансами/отчётом хранения' }),
+      metric('Эквайринг',confirmedFinanceSummary.acquiring,confirmedFinanceSummary.acquiring,previousSummary.acquiring,{ lowerIsBetter:true,onClick:'Финансы',available:acquiringAvailableForPeriod,partial:acquiringMetricPartial,showProvisionalZero:financeEstimateAvailable,note:financeEstimateAvailable ? financeMetricNote : 'подтверждается финансовой детализацией' }),
+      metric('Штрафы + удержания',Number(confirmedFinanceSummary.penalties || 0)+Number(confirmedFinanceSummary.deductions || 0),Number(confirmedFinanceSummary.penalties || 0)+Number(confirmedFinanceSummary.deductions || 0),Number(previousSummary.penalties || 0)+Number(previousSummary.deductions || 0),{ lowerIsBetter:true,onClick:'Финансы',available:financeAvailableForPeriod,partial:financeMetricPartial,showProvisionalZero:financeEstimateAvailable,note:financeMetricNote }),
     ]
+    const persistedTopProducts = analyticsAvailability.sales
+      ? [...analyticsBaseProducts].sort((a,b)=>Number(b.revenue || 0)-Number(a.revenue || 0)).slice(0,10)
+      : []
+    const snapshotTopProducts = readyCore?.topProducts || []
     const topProducts = snapshotMode
-      ? (salesAvailableForPeriod ? (readyCore?.topProducts || []) : [])
-      : (analyticsAvailability.sales ? [...analyticsBaseProducts].sort((a,b)=>Number(b.revenue || 0)-Number(a.revenue || 0)).slice(0,10) : [])
+      ? (snapshotSalesState === 'ready' && snapshotTopProducts.length
+          ? snapshotTopProducts
+          : persistedAvailability.sales && persistedTopProducts.length
+            ? persistedTopProducts
+            : salesAvailableForPeriod ? snapshotTopProducts : [])
+      : persistedTopProducts
     const openProduct = row => openProduct360(row)
     const readyCounts = readySnapshot?.readiness || null
     const readyStatus = String(readySnapshot?.status || readyCounts?.status || '')
@@ -1585,7 +1773,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
             <div className="digitization-row head"><span>Товар</span><span>Выручка</span><span>Продажи</span><span>Возвраты</span><span>Реклама</span><span>Расходы</span><span>Прибыль</span><span>Остаток сейчас</span></div>
             {topProducts.map(row=><button className="digitization-row" key={row.id || row.key} onClick={()=>openProduct(row)}>
               <span className="digitization-product">{row.photo?<img src={row.photo} alt=""/>:<span className="digitization-product-placeholder"><PackageSearch size={18}/></span>}<b>{row.vendorCode || row.nmID || '—'}<small>{row.title || row.brand || 'Товар'}</small></b></span>
-              <span>{formatMoney(row.revenue)}</span><span>{formatNumber(row.salesCount)}</span><span>{formatNumber(row.returnsCount)}<small>{formatPercent(row.returnRate)}</small></span><span>{advertisingAvailableForPeriod ? formatMoney(row.advertising) : 'Уточняется'}</span><span>{financeAvailableForPeriod && !financePartial ? formatMoney(row.expenses) : 'Уточняется'}</span><span className={financeAvailableForPeriod && !financePartial && row.profit != null && row.profit < 0 ? 'negative' : financeAvailableForPeriod && !financePartial && row.profit != null ? 'positive' : ''}>{financeAvailableForPeriod && !financePartial ? formatMoney(row.profit) : 'Уточняется'}</span><span>{row.stock == null ? '—' : formatNumber(row.stock)}</span>
+              <span>{formatMoney(row.revenue)}</span><span>{formatNumber(row.salesCount)}</span><span>{formatNumber(row.returnsCount)}<small>{formatPercent(row.returnRate)}</small></span><span>{advertisingAvailableForPeriod ? formatMoney(row.advertising) : 'Уточняется'}</span><span>{financeAvailableForPeriod && (!financePartial || financeEstimateAvailable) ? formatMoney(row.expenses) : 'Уточняется'}</span><span className={financeAvailableForPeriod && (!financePartial || financeEstimateAvailable) && row.profit != null && row.profit < 0 ? 'negative' : financeAvailableForPeriod && (!financePartial || financeEstimateAvailable) && row.profit != null ? 'positive' : ''}>{financeAvailableForPeriod && (!financePartial || financeEstimateAvailable) ? formatMoney(row.profit) : 'Уточняется'}</span><span>{row.stock == null ? '—' : formatNumber(row.stock)}</span>
             </button>)}
           </div></div> : <div className="digitization-empty"><PackageSearch size={24}/><div><strong>Товарная оцифровка ещё загружается</strong><span>После первой синхронизации здесь появятся продажи, расходы, прибыль и остатки по каждому SKU.</span></div></div>}
         </div>
@@ -1801,8 +1989,27 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const visibleFinanceProducts = periodFinanceRows.filter(row => !financeProductNeedle || [row.article,row.vendorCode,row.barcode,row.title,row.brand,row.nmID,row.key].join(' ').toLowerCase().includes(financeProductNeedle))
     const ledger = financeLedger || { rows:[],summary:{},products:[],groups:[],sources:[],timeline:[],reports:{sales:{rows:[]},acquiring:{rows:[]}},riskDetails:{},coverage:{} }
     const ledgerRows = Array.isArray(ledger.rows) ? ledger.rows : []
-    const ledgerSummary = ledger.summary || {}
-    const ledgerHasMovements = Number(ledgerSummary.movements || 0) > 0
+    const rawLedgerSummary = ledger.summary || {}
+    const ledgerHasMovements = Number(rawLedgerSummary.movements || 0) > 0
+    const financeEstimateAvailable = Boolean(!ledgerHasMovements && basePeriodFinanceSummary.revenue != null)
+    const provisionalWbExpenses = [
+      basePeriodFinanceSummary.commission,basePeriodFinanceSummary.logistics,basePeriodFinanceSummary.storage,
+      basePeriodFinanceSummary.acceptance,basePeriodFinanceSummary.acquiring,basePeriodFinanceSummary.penalties,
+      basePeriodFinanceSummary.deductions,
+    ].reduce((total,value)=>total+Number(value || 0),0)
+    const ledgerSummary = ledgerHasMovements ? rawLedgerSummary : {
+      ...rawLedgerSummary,
+      sellerPayable:Number(basePeriodFinanceSummary.revenue || 0),
+      expenses:provisionalWbExpenses,
+      commission:Number(basePeriodFinanceSummary.commission || 0),
+      logistics:Number(basePeriodFinanceSummary.logistics || 0),
+      storage:Number(basePeriodFinanceSummary.storage || 0),
+      acceptance:Number(basePeriodFinanceSummary.acceptance || 0),
+      acquiring:Number(basePeriodFinanceSummary.acquiring || 0),
+      penalties:Number(basePeriodFinanceSummary.penalties || 0),
+      deductions:Number(basePeriodFinanceSummary.deductions || 0),
+      compensations:Number(basePeriodFinanceSummary.additionalPayment || 0),
+    }
     const selectedPeriodCovered = Boolean(ledger.coverage?.selectedPeriod?.covered)
     const financeReady = Boolean(ledgerHasMovements || selectedPeriodCovered || (!ledger.coverage?.selectedPeriod && (ledger.coverage?.financeReady || coreData?.availability?.finance)))
     const financePartial = Boolean(ledger.coverage?.financePartial)
@@ -1815,7 +2022,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
         // категории не является подтверждённым нулём.
         return financePartial && value === 0 ? null : value
       }
-      if (!financeComplete) return null
+      if (!financeComplete && !financeEstimateAvailable) return null
       const fallback = basePeriodFinanceSummary?.[fallbackKey]
       return fallback == null ? 0 : Number(fallback || 0)
     }
@@ -1826,7 +2033,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const pnlAdvertising = campaignAdvertising ?? ledgerAdvertisingCharges
     const wbExpensesExAdvertising = ledgerHasMovements
       ? Math.max(0, Number(ledgerSummary.expenses || 0) - Number(ledgerSummary.advertisingCharges || 0))
-      : financeComplete
+      : financeComplete || financeEstimateAvailable
         ? [
             basePeriodFinanceSummary.commission, basePeriodFinanceSummary.logistics, basePeriodFinanceSummary.storage,
             basePeriodFinanceSummary.acceptance, basePeriodFinanceSummary.acquiring, basePeriodFinanceSummary.penalties,
@@ -1842,7 +2049,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
       : Math.max(0, wbExpensesExAdvertising - knownWbExpenseParts)
     const pnlCompensations = ledgerHasMovements
       ? (financePartial && Number(ledgerSummary.compensations || 0) === 0 ? null : Number(ledgerSummary.compensations || 0))
-      : financeComplete
+      : financeComplete || financeEstimateAvailable
         ? Number(basePeriodFinanceSummary.additionalPayment || 0)
         : null
     const pnlRevenue = basePeriodFinanceSummary.revenue == null ? null : Number(basePeriodFinanceSummary.revenue || 0)
@@ -1887,8 +2094,10 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
       ? `Финансовая детализация WB завершена. ${formatNumber(ledgerSummary.movements || 0)} движений за ${formatDate(analyticsPeriod.from)} — ${formatDate(analyticsPeriod.to)}.`
       : financeReady
         ? `Финансовая детализация загружается частями. Уже подтверждено ${formatNumber(ledgerSummary.movements || 0)} движений; отсутствующие суммы до завершения не считаются нулём.`
-        : 'Финансовый отчёт WB ещё не начат или не сохранил первую страницу. Нули не считаются подтверждёнными.'
-    const financeValue = value => financeComplete || ledgerHasMovements || Number(value || 0) !== 0 ? formatMoney(value) : 'Ожидает WB'
+        : financeEstimateAvailable
+          ? 'Показан предварительный P&L по оперативным продажам и резервным параметрам. После получения детализации WB ELISEI автоматически заменит оценки подтверждёнными суммами.'
+          : 'Финансовый отчёт WB ещё не начат или не сохранил первую страницу. Нули не считаются подтверждёнными.'
+    const financeValue = value => financeComplete || ledgerHasMovements || financeEstimateAvailable || Number(value || 0) !== 0 ? formatMoney(value) : 'Ожидает WB'
     const reportNumber = (row, aliases = []) => {
       for (const key of aliases) {
         const value = Number(String(row?.[key] ?? '').replace(',','.'))
@@ -1929,11 +2138,13 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     return <section className="app-page glass-panel">
       <div className="page-title"><span>Финансы / P&amp;L</span><h1>Все движения денег WB</h1><p>Продажи, перечисления, FBS/FBO-логистика, хранение, приёмка, эквайринг, штрафы, удержания, компенсации и корректировки — с привязкой к товару и источнику.</p></div>
       {renderSharedPeriodControls({ note:'Финансовый реестр, отчёты, динамика и P&L ограничиваются единым выбранным периодом. Поиск применяется на сервере ко всем операциям.' })}
-      <div className={`notice ${financeComplete ? 'success' : 'warning'}`}><ShieldCheck size={20}/><div><strong>{financeComplete ? 'Финансовые данные подтверждены WB' : financeReady ? 'Финансовые данные загружены частично' : 'Ожидает «Финансы WB»'}</strong><p>{statusText}</p></div><button onClick={() => setActive('Синхронизации')}>Открыть статусы</button></div>
+      <div className={`notice ${financeComplete ? 'success' : 'warning'}`}><ShieldCheck size={20}/><div><strong>{financeComplete ? 'Финансовые данные подтверждены WB' : financeReady ? 'Финансовые данные загружены частично' : financeEstimateAvailable ? 'Предварительный расчёт доступен' : 'Ожидает «Финансы WB»'}</strong><p>{statusText}</p></div><button onClick={() => setActive('Синхронизации')}>Открыть статусы</button></div>
       <div className="finance-tabs">{tabs.map(([key,label]) => <button className={financeTab === key ? 'active' : ''} key={key} onClick={() => { setFinanceTab(key); setFinancePage(1) }}>{label}</button>)}</div>
 
       <div className="metrics-grid four finance-movement-metrics">
-        <MetricCard label="К перечислению" value={financeValue(ledgerSummary.sellerPayable)} delta="поле forPay из отчёта WB" icon={WalletCards}/>
+        <MetricCard label="К перечислению" value={financeValue(ledgerSummary.sellerPayable)} delta="поле forPay из отчёта WB · выбранный период" icon={WalletCards}/>
+        <MetricCard label="Доступно к выводу" value={analyticsCore?.finance?.balance?.for_withdraw == null ? 'Ожидается' : formatMoney(analyticsCore.finance.balance.for_withdraw)} delta="текущий снимок WB · не зависит от выбранного периода" icon={WalletCards}/>
+        <MetricCard label="Баланс WB" value={analyticsCore?.finance?.balance?.current == null ? 'Ожидается' : formatMoney(analyticsCore.finance.balance.current)} delta={analyticsCore?.finance?.balance?.updatedAt ? `обновлено ${formatLocalDateTime(analyticsCore.finance.balance.updatedAt)}` : 'ночной снимок ещё не загружен'} icon={CircleDollarSign}/>
         <MetricCard label="Расходы WB" value={financeValue(ledgerSummary.expenses)} delta={`логистика ${financeValue(ledgerSummary.logistics)}`} icon={CircleDollarSign}/>
         <MetricCard label="Удержания и штрафы" value={financeValue(Number(ledgerSummary.penalties || 0)+Number(ledgerSummary.deductions || 0))} delta={`${formatNumber(ledgerSummary.movements || 0)} движений`} icon={AlertTriangle}/>
         <MetricCard label="Компенсации" value={financeValue(ledgerSummary.compensations)} delta={`FBS-логистика ${financeValue(ledgerSummary.fbsLogistics)}`} icon={TrendingUp}/>
@@ -1943,7 +2154,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
       {financeTab === 'overview' && <>
         <div className="finance-layout">
           <div className="settings-card"><h3><Calculator size={19}/> Резервные параметры и себестоимость</h3><p className="settings-hint">WB-расходы подставляются автоматически. Здесь остаются себестоимость, налог, постоянные расходы и fallback на случай недоступности отчёта.</p><div className="settings-grid"><label>Комиссия WB, %<input type="number" min="0" max="100" value={settingsDraft.commissionPercent ?? 0} onChange={e => updateSetting('commissionPercent',e.target.value)}/></label><label>Логистика за продажу, ₽<input type="number" min="0" value={settingsDraft.logisticsPerSale ?? 0} onChange={e => updateSetting('logisticsPerSale',e.target.value)}/></label><label>Реклама, ₽/мес.<input type="number" min="0" value={settingsDraft.advertisingMonthly ?? 0} onChange={e => updateSetting('advertisingMonthly',e.target.value)}/></label><label>Хранение, ₽/мес.<input type="number" min="0" value={settingsDraft.storageMonthly ?? 0} onChange={e => updateSetting('storageMonthly',e.target.value)}/></label><label>Постоянные расходы, ₽/мес.<input type="number" min="0" value={settingsDraft.fixedMonthly ?? 0} onChange={e => updateSetting('fixedMonthly',e.target.value)}/></label><label>Налог с выручки, %<input type="number" min="0" max="100" value={settingsDraft.taxPercent ?? 0} onChange={e => updateSetting('taxPercent',e.target.value)}/></label><label>Себестоимость по умолчанию, % цены<input type="number" min="0" max="100" value={settingsDraft.defaultCostPercent ?? 0} onChange={e => updateSetting('defaultCostPercent',e.target.value)}/></label><label>Целевая маржа, %<input type="number" min="0" max="90" value={settingsDraft.targetMarginPercent ?? 20} onChange={e => updateSetting('targetMarginPercent',e.target.value)}/></label></div><button className="primary-btn" disabled={savingSettings} onClick={saveSettings}>{savingSettings ? <RefreshCw className="spin" size={17}/> : <Save size={17}/>} Сохранить и пересчитать</button></div>
-          <div className="pnl-card"><h3>P&amp;L за выбранный период</h3>{[['Выручка',periodFinanceSummary.revenue],['Себестоимость',periodFinanceSummary.cogs],['Комиссия WB',periodFinanceSummary.commission],['Логистика',periodFinanceSummary.logistics],['Хранение',periodFinanceSummary.storage],['Платная приёмка',periodFinanceSummary.acceptance],['Эквайринг',periodFinanceSummary.acquiring],['Штрафы',periodFinanceSummary.penalties],['Удержания',periodFinanceSummary.deductions],['Подписки / сервисы WB',periodFinanceSummary.subscriptions],['Прочие списания WB',periodFinanceSummary.otherWbExpenses],['Корректировки / доплаты',periodFinanceSummary.additionalPayment],['Реклама',periodFinanceSummary.advertising],['Постоянные расходы',periodFinanceSummary.fixed],['Налог',periodFinanceSummary.tax]].map(([label,value]) => <div className="pnl-line" key={label}><span>{label}</span><strong>{value == null ? 'Не загружено' : formatMoney(value)}</strong></div>)}<div className={`pnl-line total ${periodFinanceSummary.operatingProfit != null && periodFinanceSummary.operatingProfit < 0 ? 'negative' : ''}`}><span>Операционная прибыль</span><strong>{formatMoney(periodFinanceSummary.operatingProfit)}</strong></div><div className="pnl-margin"><span>Операционная маржа</span><strong>{formatPercent(periodFinanceSummary.margin)}</strong></div><div className="finance-source-note"><ShieldCheck size={16}/><span>WB-расходы в P&L берутся из финансового реестра за выбранный период. Неподтверждённый ноль не показывается; отдельные отчёты используются для детализации без двойного счёта.</span></div></div>
+          <div className="pnl-card"><h3>P&amp;L за выбранный период</h3>{[['Выручка',periodFinanceSummary.revenue],['Себестоимость',periodFinanceSummary.cogs],['Комиссия WB',periodFinanceSummary.commission],['Логистика',periodFinanceSummary.logistics],['Хранение',periodFinanceSummary.storage],['Платная приёмка',periodFinanceSummary.acceptance],['Эквайринг',periodFinanceSummary.acquiring],['Штрафы',periodFinanceSummary.penalties],['Удержания',periodFinanceSummary.deductions],['Подписки / сервисы WB',periodFinanceSummary.subscriptions],['Прочие списания WB',periodFinanceSummary.otherWbExpenses],['Корректировки / доплаты',periodFinanceSummary.additionalPayment],['Реклама',periodFinanceSummary.advertising],['Постоянные расходы',periodFinanceSummary.fixed],['Налог',periodFinanceSummary.tax]].map(([label,value]) => <div className="pnl-line" key={label}><span>{label}</span><strong>{value == null ? 'Не загружено' : formatMoney(value)}</strong></div>)}<div className={`pnl-line total ${periodFinanceSummary.operatingProfit != null && periodFinanceSummary.operatingProfit < 0 ? 'negative' : ''}`}><span>Операционная прибыль</span><strong>{formatMoney(periodFinanceSummary.operatingProfit)}</strong></div><div className="pnl-margin"><span>Операционная маржа</span><strong>{formatPercent(periodFinanceSummary.margin)}</strong></div><div className="finance-source-note"><ShieldCheck size={16}/><span>{financeEstimateAvailable ? 'Предварительно: комиссия и логистика рассчитаны по резервным параметрам, остальные неподтверждённые удержания считаются нулём до ответа WB. Подтверждённая детализация заменит оценки автоматически.' : 'WB-расходы в P&L берутся из финансового реестра за выбранный период. Отдельные отчёты используются для детализации без двойного счёта.'}</span></div></div>
         </div>
         <div className="finance-breakdown-grid">{(ledger.groups || []).map(item => <div key={item.group}><span>{groupNames[item.group] || item.group}</span><strong>{formatMoney(item.expense || item.income)}</strong><small>{formatNumber(item.movements)} операций</small></div>)}</div>
         <div className="section-title-row"><div><span>Себестоимость</span><h2>По товарам</h2></div><button className="secondary-btn" onClick={saveSettings}><Save size={16}/> Сохранить</button></div><div className="data-table cost-table"><div className="data-row head cost-row"><span>Товар</span><span>Средняя цена</span><span>Себестоимость за единицу</span><span>Цена в ноль</span><span>Прибыль</span><span>Маржа</span></div>{visibleFinanceProducts.slice(0,100).map(p => { const costKey=String(p.key || p.nmID || p.vendorCode); const cost=settingsDraft.productCosts?.[costKey] ?? p.unitCost ?? 0; return <div className="data-row cost-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatMoney(p.averagePrice)}</span><span><input className="inline-cost" type="number" min="0" value={cost} onChange={e => updateProductCost(p,e.target.value)} /></span><span>{formatMoney(p.breakevenPrice)}</span><span className={p.profit != null && p.profit < 0 ? 'negative' : 'positive'}>{formatMoney(p.profit)}</span><span>{formatPercent(p.margin)}</span></div>})}</div>
@@ -2121,10 +2332,11 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
       { stage:'products', title:'Товары', text:'Карточки, фото, артикулы и характеристики' },
       { stage:'orders', title:'Заказы', text:'Заказы и оперативная динамика' },
       { stage:'sales', title:'Продажи', text:'Продажи, выкупы и возвраты' },
-      { stage:'stocks', title:'Остатки FBO', text:'Остатки на складах Wildberries' },
+      { stage:'stocks', title:'Склад WB', text:'Остатки на складах Wildberries' },
       { stage:'sellerStocks', title:'Остатки FBS', text:'Остатки на складах продавца' },
       { stage:'advertising', title:'Реклама', text:'Кампании, расходы и эффективность' },
-      { stage:'finance', title:'Финансы', text:'Детализация реализации, комиссия, логистика, удержания, выплаты и баланс' },
+      { stage:'finance', title:'Финансы', text:'Детализация реализации, комиссия, логистика, удержания и выплаты за период' },
+      { stage:'balance', title:'Баланс WB', text:'Текущий баланс кабинета и сумма, доступная к выводу' },
       { stage:'paidStorage', title:'Хранение', text:'Платное хранение по товарам' },
       { stage:'acceptance', title:'Приёмка', text:'Платные операции при приёмке' },
       { stage:'acquiring', title:'Эквайринг', text:'Издержки на приём платежей; при необходимости рассчитываются из финансовой детализации' },
@@ -2147,6 +2359,9 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const syncStatus = stage => connection.syncStates?.find(item => item.stage === stage)
     const stageLabel = state => {
       if (!state) return 'Будет загружено автоматически'
+      if (state.lastSuccessAt && ['orders','sales','stocks','sellerStocks'].includes(String(state.stage || '')) && ['queued','rate_limited','retry_scheduled'].includes(String(state.status || ''))) {
+        return state.lastCount == null ? 'Последние данные сохранены' : `Последние данные: ${formatNumber(state.lastCount)}`
+      }
       if (state.status === 'success') return `Загружено: ${formatNumber(state.lastCount)}`
       if (state.status === 'pending') return 'WB формирует данные'
       if (state.status === 'queued') return state.nextAllowedAt && new Date(state.nextAllowedAt).getTime() > Date.now() ? `Ожидает запуска · ${formatSchedulerWait(state.nextAllowedAt)}` : 'В фоновой очереди'
@@ -2197,7 +2412,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
 
   const renderSyncHistory = () => {
     const stages = [
-      ['products','Товары'], ['orders','Заказы'], ['sales','Продажи'], ['stocks','Остатки FBO'], ['sellerStocks','Остатки FBS'], ['advertising','Реклама'],
+      ['products','Товары'], ['orders','Заказы'], ['sales','Продажи'], ['stocks','Склад WB'], ['sellerStocks','Остатки FBS'], ['advertising','Реклама'],
       ['finance','Финансы WB'], ['paidStorage','Хранение'], ['acceptance','Приёмка'], ['acquiring','Эквайринг'],
       ['fbsArchive','Архив FBS'], ['measurementPenalties','Штрафы за габариты'], ['deductionsReport','Подмены и вложения'], ['warehouseMeasurements','Замеры склада'], ['antifraudRetention','Самовыкупы'], ['labelingRetention','Маркировка'],
       ['goodsReturns','Возвраты и перемещения'], ['tariffs','Тарифы WB'], ['funnel','Воронка карточек'], ['documents','Документы WB'], ['searchQueries','Поисковые запросы'], ['stockHistory','История остатков'], ['reviews','Отзывы'], ['questions','Вопросы'], ['chats','Чаты']
@@ -2205,6 +2420,14 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const stateFor = stage => connection.syncStates?.find(item => item.stage === stage)
     const statusCopy = (state, stage) => {
       if (!state) return { tone:'idle', title:'Не запускалось', text:'Данные этого раздела ещё не запрашивались.' }
+      const operationalLastGood = ['orders','sales','stocks','sellerStocks'].includes(stage)
+        && state.lastSuccessAt
+        && ['queued','rate_limited','retry_scheduled'].includes(String(state.status || ''))
+      if (operationalLastGood) {
+        const title = state.lastCount == null ? 'Последние данные сохранены' : `Последние данные: ${formatNumber(state.lastCount)}`
+        const next = state.nextAllowedAt ? `Следующее обновление ${formatSchedulerWait(state.nextAllowedAt)}.` : 'ELISEI обновит данные автоматически.'
+        return { tone:'idle', title, text:`Обновлено ${new Date(state.lastSuccessAt).toLocaleString('ru-RU')}. ${next}` }
+      }
       if (state.status === 'success') {
         if (stage === 'acquiring' && Number(state.lastCount || 0) === 0) {
           const financeState = stateFor('finance')
@@ -2301,7 +2524,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     return <section className="app-page glass-panel"><div className="page-title"><span>Контроль данных</span><h1>Журнал синхронизаций</h1><p>Smart WB Scheduler сам распределяет запросы по очереди и окнам API. Ожидание лимита — нормальный статус, а не ошибка кабинета.</p></div>{connection.connected && <div className="quality-center">
       <div className="quality-center-head">
         <div className={`quality-score ${dataQuality?.overall || 'loading'}`}>
-          <strong>{dataQualityLoading && !dataQuality ? '…' : `${formatNumber(dataQuality?.score || 0)}%`}</strong>
+          <strong>{dataQualityLoading && !dataQuality ? '…' : dataQuality ? `${formatNumber(dataQuality?.score ?? 0)}%` : '—'}</strong>
           <span>готовность данных</span>
         </div>
         <div className="quality-center-summary">
@@ -2310,15 +2533,15 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
           <p>{dataQuality?.confirmedPeriod ? `Общий подтверждённый период: ${formatDate(dataQuality.confirmedPeriod.from)} — ${formatDate(dataQuality.confirmedPeriod.to)}.` : 'Общий подтверждённый период ещё формируется.'}</p>
         </div>
         <div className={`quality-confidence ${dataQuality?.profitConfidence?.status || 'unavailable'}`}>
-          <ShieldCheck size={21}/><div><strong>{dataQuality?.profitConfidence?.label || 'Проверяем качество'}</strong><span>{dataQuality?.profitConfidence?.text || 'Собираем паспорта источников.'}</span></div>
+          <ShieldCheck size={21}/><div><strong>{dataQuality?.profitConfidence?.label || (dataQualityError ? 'Проверка временно недоступна' : 'Проверяем качество')}</strong><span>{dataQuality?.profitConfidence?.text || (dataQualityError ? 'Сохранённые данные не удалены. ELISEI повторит проверку после восстановления соединения с базой.' : 'Собираем паспорта источников.')}</span></div>
         </div>
         <button className="secondary-btn" disabled={dataQualityLoading} onClick={()=>loadDataQuality(connection.connectionId,analyticsPeriod)}><RefreshCw className={dataQualityLoading?'spin':''} size={17}/>Проверить</button>
       </div>
       <div className="quality-kpis">
-        <div><span>Подтверждено</span><strong>{formatNumber(dataQuality?.summary?.ready || 0)}</strong></div>
-        <div><span>Догружается</span><strong>{formatNumber(dataQuality?.summary?.partial || 0)}</strong></div>
-        <div><span>Критично</span><strong>{formatNumber(dataQuality?.summary?.critical || 0)}</strong></div>
-        <div><span>Предупреждения</span><strong>{formatNumber(dataQuality?.summary?.warnings || 0)}</strong></div>
+        <div><span>Подтверждено</span><strong>{dataQuality ? formatNumber(dataQuality?.summary?.ready ?? 0) : '—'}</strong></div>
+        <div><span>Догружается</span><strong>{dataQuality ? formatNumber(dataQuality?.summary?.partial ?? 0) : '—'}</strong></div>
+        <div><span>Критично</span><strong>{dataQuality ? formatNumber(dataQuality?.summary?.critical ?? 0) : '—'}</strong></div>
+        <div><span>Предупреждения</span><strong>{dataQuality ? formatNumber(dataQuality?.summary?.warnings ?? 0) : '—'}</strong></div>
       </div>
       <div className="quality-tabs">
         <button className={qualityView==='problems'?'active':''} onClick={()=>setQualityView('problems')}>Проблемы и действия</button>
@@ -2326,7 +2549,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
         <button className={qualityView==='finance'?'active':''} onClick={()=>setQualityView('finance')}>Финансовая сверка</button>
       </div>
       {qualityView==='problems' && <div className="quality-problems">
-        {dataQualityLoading && !dataQuality ? <div className="quality-empty"><RefreshCw className="spin" size={22}/>Собираем покрытие источников…</div> : dataQuality?.issues?.length ? dataQuality.issues.map(item=><div className={`quality-issue ${item.severity}`} key={item.id}><span>{item.severity==='critical'?<AlertTriangle size={19}/>:item.severity==='warning'?<Info size={19}/>:<CheckCircle2 size={19}/>}</span><div><strong>{item.title}</strong><p>{item.text}</p><small>{qualityActionText(item)}</small></div>{item.stage&&<button onClick={()=>document.getElementById(`sync-stage-${item.stage}`)?.scrollIntoView({behavior:'smooth',block:'center'})}>Показать карточку</button>}</div>) : <div className="quality-empty success"><CheckCircle2 size={22}/>Критических разрывов не найдено. Итоги можно использовать в рамках указанного покрытия.</div>}
+        {dataQualityLoading && !dataQuality ? <div className="quality-empty"><RefreshCw className="spin" size={22}/>Собираем покрытие источников…</div> : dataQualityError && !dataQuality ? <div className="quality-empty"><AlertTriangle size={22}/>Проверка качества временно недоступна. Данные сохранены; повторим после восстановления базы.</div> : dataQuality?.issues?.length ? dataQuality.issues.map(item=><div className={`quality-issue ${item.severity}`} key={item.id}><span>{item.severity==='critical'?<AlertTriangle size={19}/>:item.severity==='warning'?<Info size={19}/>:<CheckCircle2 size={19}/>}</span><div><strong>{item.title}</strong><p>{item.text}</p><small>{qualityActionText(item)}</small></div>{item.stage&&<button onClick={()=>document.getElementById(`sync-stage-${item.stage}`)?.scrollIntoView({behavior:'smooth',block:'center'})}>Показать карточку</button>}</div>) : <div className="quality-empty success"><CheckCircle2 size={22}/>Критических разрывов не найдено. Итоги можно использовать в рамках указанного покрытия.</div>}
         {!dataQualityLoading && dataQuality?.productDiagnostics?.unmatchedStock?.length > 0 && <div className="quality-unmatched">
           <div className="quality-unmatched-head"><div><span>Сопоставление остатков</span><h3>Карточки без подтверждённой строки в текущем снимке</h3><p>Это не всегда ошибка: у товара может быть нулевой остаток. Список показывает, где ELISEI не смог подтвердить связь по barcode → nmID → vendorCode.</p></div><strong>{formatNumber(dataQuality.productDiagnostics.unmatchedStockCount ?? dataQuality.productDiagnostics.unmatchedStock.length)}</strong></div>
           <div className="quality-unmatched-list">{dataQuality.productDiagnostics.unmatchedStock.map((item,index)=><div className="quality-unmatched-row" key={`${item.nmID || item.vendorCode || index}`}><div><strong>{item.title || item.vendorCode || `Товар ${item.nmID || ''}`}</strong><span>{item.vendorCode ? `Арт. ${item.vendorCode}` : 'Артикул не указан'}{item.nmID ? ` · nmID ${item.nmID}` : ''}{item.brand ? ` · ${item.brand}` : ''}</span></div><p>{item.reason}</p></div>)}</div>
@@ -2393,7 +2616,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
 
   const renderSettings = () => <section className="app-page glass-panel">
     <div className="page-title"><span>Настройки</span><h1>Параметры бизнеса и Эла</h1><p>Финансовые допущения и характер AI-помощника сохраняются отдельно для вашего аккаунта и кабинета.</p></div>
-    <div className="settings-card standalone"><h3><Phone size={20}/> Безопасность аккаунта</h3><p className="settings-hint">Подтверждённый телефон используется для восстановления пароля по SMS. У каждого пользователя свой номер.</p><div className="settings-grid"><label>Электронная почта<input value={user?.email || ''} disabled/></label><label>Телефон<input type="tel" value={accountPhoneDraft} onChange={e=>{setAccountPhoneDraft(e.target.value);setAccountPhoneStage('idle');setAccountPhoneCode('');setAccountPhoneNotice('')}} placeholder="+7 999 123-45-67" autoComplete="tel"/></label></div><div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}}><button type="button" className="secondary-btn" onClick={requestAccountPhoneCode} disabled={accountPhoneBusy || !accountPhoneDraft || accountPhoneDraft===user?.phone}><Phone size={17}/>{accountPhoneBusy ? 'Отправляем…' : (user?.phone ? 'Сменить телефон' : 'Добавить телефон')}</button>{accountPhoneStage==='code' && <><input style={{maxWidth:150}} inputMode="numeric" value={accountPhoneCode} onChange={e=>setAccountPhoneCode(e.target.value.replace(/\D/g,'').slice(0,6))} placeholder="Код из SMS" maxLength={6}/><button type="button" className="primary-btn" onClick={confirmAccountPhone} disabled={accountPhoneBusy || accountPhoneCode.length!==6}><KeyRound size={17}/> Подтвердить</button></>}</div>{accountPhoneNotice && <p className="settings-hint" style={{marginTop:10}}>{accountPhoneNotice}</p>}{user?.phone && <div className="security-note" style={{marginTop:12}}><ShieldCheck size={20}/><div><strong>Телефон подтверждён</strong><p>{user.phone}. Код восстановления будет отправляться только на этот номер.</p></div></div>}</div>
+    <div className="settings-card standalone"><h3><Phone size={20}/> Профиль · Безопасность аккаунта</h3><p className="settings-hint">Имя используется в приветствии. Подтверждённый телефон — для восстановления пароля по SMS.</p><div className="settings-grid"><label>Имя<input value={accountNameDraft} onChange={e=>{setAccountNameDraft(e.target.value);setAccountProfileNotice('')}} placeholder="Например, Мария" autoComplete="name"/></label><label>Электронная почта<input value={user?.email || ''} disabled/></label><label>Телефон<input type="tel" value={accountPhoneDraft} onChange={e=>{setAccountPhoneDraft(e.target.value);setAccountPhoneStage('idle');setAccountPhoneCode('');setAccountPhoneNotice('')}} placeholder="+7 999 123-45-67" autoComplete="tel"/></label></div><div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}}><button type="button" className="secondary-btn" onClick={saveAccountProfile} disabled={accountProfileBusy || !accountNameDraft.trim() || accountNameDraft.trim()===String(user?.name || '').trim()}><Save size={17}/>{accountProfileBusy ? 'Сохраняем…' : 'Сохранить имя'}</button><button type="button" className="secondary-btn" onClick={requestAccountPhoneCode} disabled={accountPhoneBusy || !accountPhoneDraft || accountPhoneDraft===user?.phone}><Phone size={17}/>{accountPhoneBusy ? 'Отправляем…' : (user?.phone ? 'Сменить телефон' : 'Добавить телефон')}</button>{accountPhoneStage==='code' && <><input style={{maxWidth:150}} inputMode="numeric" value={accountPhoneCode} onChange={e=>setAccountPhoneCode(e.target.value.replace(/\D/g,'').slice(0,6))} placeholder="Код из SMS" maxLength={6}/><button type="button" className="primary-btn" onClick={confirmAccountPhone} disabled={accountPhoneBusy || accountPhoneCode.length!==6}><KeyRound size={17}/> Подтвердить</button></>}</div>{accountProfileNotice && <p className="settings-hint" style={{marginTop:10}}>{accountProfileNotice}</p>}{accountPhoneNotice && <p className="settings-hint" style={{marginTop:10}}>{accountPhoneNotice}</p>}{user?.phone && <div className="security-note" style={{marginTop:12}}><ShieldCheck size={20}/><div><strong>Телефон подтверждён</strong><p>{user.phone}. Код восстановления будет отправляться только на этот номер.</p></div></div>}</div>
     <div className="settings-card standalone"><h3><Settings size={20}/> Основные параметры</h3><div className="settings-grid"><label>Комиссия WB, %<input type="number" value={settingsDraft.commissionPercent ?? 0} onChange={e => updateSetting('commissionPercent',e.target.value)}/></label><label>Логистика за продажу, ₽<input type="number" value={settingsDraft.logisticsPerSale ?? 0} onChange={e => updateSetting('logisticsPerSale',e.target.value)}/></label><label>Налог, %<input type="number" value={settingsDraft.taxPercent ?? 0} onChange={e => updateSetting('taxPercent',e.target.value)}/></label><label>Целевая маржа, %<input type="number" value={settingsDraft.targetMarginPercent ?? 20} onChange={e => updateSetting('targetMarginPercent',e.target.value)}/></label></div><button className="primary-btn" onClick={saveSettings} disabled={savingSettings}><Save size={17}/> Сохранить</button></div>
     {renderElPersonalityControls()}
     <div className="security-note"><ShieldCheck size={22}/><div><strong>MAXADORRE и ELISEI не связаны данными</strong><p>В ELISEI перенесена проверенная бизнес-логика, но репозитории, базы, API-ключи и клиентские данные полностью раздельны.</p></div></div>

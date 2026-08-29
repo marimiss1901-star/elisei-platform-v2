@@ -8,6 +8,7 @@ const STAGE_CONFIG = Object.freeze({
   sellerStocks:{ label:'Остатки FBS',weight:6,freshSeconds:30*60,mode:'snapshot' },
   advertising:{ label:'Реклама',weight:5,freshSeconds:3*3600 },
   finance:{ label:'Финансы WB',weight:18,freshSeconds:14*3600,critical:true },
+  balance:{ label:'Баланс WB',weight:2,freshSeconds:30*3600,mode:'snapshot' },
   paidStorage:{ label:'Платное хранение',weight:3,freshSeconds:36*3600 },
   acceptance:{ label:'Платная приёмка',weight:3,freshSeconds:36*3600 },
   acquiring:{ label:'Эквайринг',weight:3,freshSeconds:14*3600,dependsOn:'finance' },

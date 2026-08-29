@@ -19,9 +19,14 @@ export const DAILY_READY_CORE_STAGES = Object.freeze([
   'orders','sales','advertising','finance','paidStorage','acceptance','acquiring','stocks','sellerStocks',
 ])
 
-export const DAILY_READY_OPERATIONAL_RECOVERY_STAGES = Object.freeze(['orders','sales','advertising'])
+export const DAILY_READY_OPERATIONAL_RECOVERY_STAGES = Object.freeze(['orders','sales'])
 
 export const DAILY_READY_HEAVY_INTERVALS_SECONDS = Object.freeze({
+  // Current WB balance is a light snapshot, but by product policy it belongs
+  // to the nightly lane rather than competing with seller-day operations.
+  // 20h guarantees it becomes eligible again in the next business-night window.
+  balance: 20 * 60 * 60,
+
   // Nightly Ready: one complete heavy pass per business night. 20h for the two
   // financial contours guarantees the next night's pass is eligible even when
   // the previous run finished closer to morning.
@@ -30,6 +35,17 @@ export const DAILY_READY_HEAVY_INTERVALS_SECONDS = Object.freeze({
   paidStorage: 24 * 60 * 60,
   acceptance: 24 * 60 * 60,
   documents: 24 * 60 * 60,
+
+  // Seller-day policy: these streams are useful by the next morning, but do not
+  // need to compete with orders/sales or stock refreshes during the day.
+  products: 24 * 60 * 60,
+  advertising: 24 * 60 * 60,
+  reviews: 24 * 60 * 60,
+  questions: 24 * 60 * 60,
+  chats: 24 * 60 * 60,
+  financeReports: 24 * 60 * 60,
+  acquiringReports: 24 * 60 * 60,
+  jamSubscription: 24 * 60 * 60,
 
   // Secondary nightly layer. These reports are valuable for morning analytics
   // but do not need to compete with live orders/sales during the seller day.
@@ -161,7 +177,7 @@ export function dailyOperationalStageCovered({ stage = '', coverage = {}, state 
 export function dailyOperationalRecoveryPlan({ coverage = {}, states = [], date = '', now = Date.now(), minimumRetryMs = 5*60*1000 } = {}) {
   if (!date) return []
   const map = new Map((Array.isArray(states) ? states : []).map(item=>[String(item?.stage || ''),item]))
-  const blocked = new Set(['running','pending','queued','rate_limited','retry_scheduled','missing_token','token_invalid','forbidden','subscription_required','optional_unavailable','error'])
+  const blocked = new Set(['running','pending','queued','rate_limited','retry_scheduled','missing_token','token_invalid','forbidden','subscription_required','optional_unavailable'])
   const plan = []
   for (const stage of DAILY_READY_OPERATIONAL_RECOVERY_STAGES) {
     const state = map.get(stage) || {}

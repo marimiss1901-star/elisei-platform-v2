@@ -2,6 +2,7 @@ import fs from 'node:fs'
 
 const file = 'src/pages/DashboardPage.jsx'
 let source = fs.readFileSync(file, 'utf8')
+if (source.includes('ELISEI_CANONICAL_FRONTEND_PATCHES')) process.exit(0)
 
 const oldBlock = `      const secondary = await Promise.allSettled([\n        wbApi.dashboard(connectionId),\n        wbApi.syncHistory(connectionId),\n        wbApi.advertising(connectionId,{ from:analyticsPeriod.from,to:analyticsPeriod.to }),\n        wbApi.diagnostics(connectionId),\n      ])`
 

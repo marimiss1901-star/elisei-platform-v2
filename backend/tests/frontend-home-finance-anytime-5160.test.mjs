@@ -8,7 +8,7 @@ assert.match(page,/const coreFinanceSummary = analyticsCore\?\.finance\?\.summar
   'Main must use the durable core summary even when the detailed Finance page reader is idle')
 assert.match(page,/const confirmedFinanceSummary = ledgerHasMovements \? \{/)
 assert.match(page,/commission:Number\(ledgerSummary\.commission \|\| 0\)/)
-assert.match(page,/const financeAvailableForPeriod = Boolean\(stateAvailable\(snapshotFinanceState,analyticsAvailability\.finance\) \|\| ledgerHasMovements \|\| selectedFinancePeriodCovered\)/,
+assert.match(page,/const financeAvailableForPeriod = Boolean\(stateAvailable\(snapshotFinanceState,analyticsAvailability\.finance\) \|\| ledgerHasMovements \|\| selectedFinancePeriodCovered \|\| financeEstimateAvailable\)/,
   'saved ledger movements must make finance visible after a fresh login')
 assert.match(page,/partial:financeMetricPartial/,
   'saved progress must not be confused with an incomplete selected period')

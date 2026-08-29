@@ -59,6 +59,7 @@ import {
 } from './wb/daily-ready.js'
 import { buildElEngagementData } from './services/elEngagement.js'
 import elDecisionEngine from './services/elDecisionEngine.cjs'
+import { loadCurrentWbStocks } from './wb/current-stocks.js'
 
 const { buildDecisionAnalysis, previousEqualPeriod } = elDecisionEngine
 
@@ -72,9 +73,11 @@ const databaseUrl = process.env.DATABASE_URL || ''
 const pool = databaseUrl ? new Pool({
   connectionString: databaseUrl,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
-  max: Math.max(2, Math.min(10, Number(process.env.PG_POOL_MAX || 5))),
-  connectionTimeoutMillis: Math.max(3000, Number(process.env.PG_CONNECT_TIMEOUT_MS || 8000)),
-  idleTimeoutMillis: Math.max(10000, Number(process.env.PG_IDLE_TIMEOUT_MS || 30000)),
+  // ELISEI runs many background WB stages. Keep the application pool deliberately
+  // small so a low-tier PostgreSQL instance is never saturated by one browser tab.
+  max: Math.max(1, Math.min(4, Number(process.env.PG_POOL_MAX || 2))),
+  connectionTimeoutMillis: Math.max(3000, Number(process.env.PG_CONNECT_TIMEOUT_MS || 6000)),
+  idleTimeoutMillis: Math.max(10000, Number(process.env.PG_IDLE_TIMEOUT_MS || 20000)),
 }) : null
 const encryptionSecret = process.env.ENCRYPTION_KEY || jwtSecret
 const encryptionKey = encryptionSecret ? crypto.createHash('sha256').update(encryptionSecret).digest() : null
@@ -160,11 +163,33 @@ async function initializeDatabaseWithRetry(reason = 'startup') {
 
 if (pool) {
   pool.on('error', error => {
-    databaseState.ready = false
-    databaseState.status = 'reconnecting'
+    // node-postgres already removes a broken idle client from the pool. Treat this
+    // as a degraded connection, not as proof that the whole database is down.
+    // Re-running the full schema initializer on every idle-client error used to
+    // create the visible ELISEI "rollback" loop.
+    databaseState.status = 'degraded'
     databaseState.lastError = error.message
-    console.warn('PostgreSQL pool error; API stays online and will reconnect:', error.message)
-    scheduleDatabaseInitialization(2000, 'pool-error')
+    console.warn('PostgreSQL pool client error; keeping API online and probing:', error.message)
+    let attempt = 0
+    const probe = async () => {
+      attempt += 1
+      try {
+        await pool.query('SELECT 1')
+        databaseState.ready = true
+        databaseState.status = 'ok'
+        databaseState.lastError = null
+        databaseState.lastConnectedAt = new Date().toISOString()
+      } catch (probeError) {
+        databaseState.status = 'degraded'
+        databaseState.lastError = probeError.message
+        if (attempt < 12) {
+          const retry = setTimeout(probe, Math.min(10000, 500 * (2 ** Math.min(4, attempt))))
+          retry.unref?.()
+        }
+      }
+    }
+    const probeTimer = setTimeout(probe, 250)
+    probeTimer.unref?.()
   })
 }
 
@@ -221,6 +246,45 @@ async function recoverRetryableErrorStates() {
   return result.rows
 }
 
+
+async function recoverLegacyFbsMarketplaceReaderError() {
+  if (!pool) return []
+  const migrated = await pool.query(`
+    UPDATE wb_sync_states
+    SET status='retry_scheduled',
+        next_allowed_at=NOW(),
+        last_error='ELISEI перепроверяет FBS через Marketplace API после обновления reader.',
+        metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object(
+          'fbsMarketplaceReaderMigration',true,
+          'fbsMarketplaceReaderMigrationAt',NOW()
+        ),
+        updated_at=NOW()
+    WHERE stage='sellerStocks'
+      AND status='error'
+      AND COALESCE(last_error,'') ILIKE '%token does not satisfy additional requirements%'
+      AND COALESCE(last_attempt_at,updated_at) < TIMESTAMPTZ '2026-08-26T07:54:09Z'
+    RETURNING connection_id,stage
+  `)
+  const authCompat = await pool.query(`
+    UPDATE wb_sync_states
+    SET status='retry_scheduled',
+        next_allowed_at=NOW(),
+        last_error='ELISEI повторяет FBS стандартной Marketplace-авторизацией без лишнего сервисного заголовка.',
+        metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object(
+          'marketplaceAuthHeaderCompatRetry',true,
+          'marketplaceAuthHeaderCompatRetryAt',NOW()
+        ),
+        updated_at=NOW()
+    WHERE stage='sellerStocks'
+      AND status='error'
+      AND COALESCE(last_error,'') ILIKE '%token does not satisfy additional requirements%'
+      AND COALESCE(metadata->>'marketplaceAuthHeaderCompatRetry','') <> 'true'
+    RETURNING connection_id,stage
+  `)
+  const rows=[...migrated.rows,...authCompat.rows]
+  if(rows.length) console.log('[ELISEI] Requeued '+rows.length+' FBS auth compatibility check(s).')
+  return rows
+}
 
 async function recoverLegacyFinanceCooldowns({ connectionId = null } = {}) {
   // 5.10.4: legacy compatibility hook; current finance period pagination is
@@ -289,6 +353,36 @@ async function recoverLegacyRuntimeRateWindows({ connectionId = null } = {}) {
   return result.rows
 }
 
+
+const LEGACY_ORDERS_ROLLBACK_VERSION=2
+
+async function recoverOrderFeedProductionRollback({ connectionId = null } = {}) {
+  if(!pool) return []
+  const params=[String(LEGACY_ORDERS_ROLLBACK_VERSION)]
+  let connectionFilter=''
+  if(connectionId){params.push(connectionId);connectionFilter=' AND connection_id=$2'}
+  const result=await pool.query(`
+    UPDATE wb_sync_states
+    SET status='queued',next_allowed_at=NOW(),task_id=NULL,
+        last_error='ELISEI повторно запускает проверенный поток заказов/продаж WB. Сохранённые цифры не удалены.',
+        metadata=(COALESCE(metadata,'{}'::jsonb)
+          - 'orderFeedPrimaryVersion' - 'orderFeedSource' - 'orderFeedMigrationQueuedVersion' - 'orderFeedMigrationQueuedAt'
+          - 'derivedFromOrders' - 'snapshotTime' - 'minimumIntervalSeconds' - 'statusCounts')
+          || jsonb_build_object('legacyOrdersRollbackVersion',$1::int,'legacyOrdersRollbackAt',NOW()),
+        updated_at=NOW()
+    WHERE stage IN ('orders','sales')
+      AND COALESCE(metadata->>'legacyOrdersRollbackVersion','')<>$1::text
+      AND (
+        metadata ? 'orderFeedPrimaryVersion' OR metadata ? 'orderFeedSource' OR metadata ? 'orderFeedMigrationQueuedVersion'
+        OR status IN ('queued','rate_limited','retry_scheduled','error')
+        OR COALESCE(metadata->>'legacyOrdersRollbackVersion','')='1'
+      )
+      ${connectionFilter}
+    RETURNING connection_id,stage
+  `,params)
+  if(result.rows.length) console.warn(`Legacy orders production rollback queued ${result.rows.length} stage(s).`)
+  return result.rows
+}
 
 async function recoverLegacySearchQueryBindings({ connectionId = null } = {}) {
   if (!pool) return []
@@ -430,6 +524,7 @@ function kickBackgroundWorkers(reason = 'timer') {
   backgroundWorkerState.lastError = null
   const promise = (async () => {
     await recoverStaleSyncStates({ reason:`worker:${reason}` })
+    await recoverOrderFeedProductionRollback()
     await recoverLegacyFinanceCooldowns()
     // 5.10.5 Smart WB Scheduler: сначала добавляем живые задачи в очередь,
     // затем выбираем по одному due-этапу на каждую независимую WB API-группу.
@@ -460,17 +555,9 @@ app.use(cors({ origin(origin, cb) { if (!origin || !allowedOrigins.length || all
 app.use(express.json({ limit: '2mb' }))
 app.use('/api', (req, res, next) => {
   if (!pool) return res.status(503).json({ error:'DATABASE_URL не настроен', code:'DATABASE_NOT_CONFIGURED' })
-  if (!databaseState.ready) {
-    const retryAfterSeconds = databaseState.nextRetryAt
-      ? Math.max(1, Math.ceil((new Date(databaseState.nextRetryAt).getTime() - Date.now()) / 1000))
-      : 3
-    res.setHeader('Retry-After', String(retryAfterSeconds))
-    return res.status(503).json({
-      error:'База данных временно переподключается. Backend работает и повторит подключение автоматически.',
-      code:'DATABASE_RECONNECTING',
-      retryAfterSeconds,
-    })
-  }
+  // databaseState is observability only. Never reject every API request merely
+  // because one background probe is degraded. The route performs the real query;
+  // db-resilience-preload converts an actual transient PostgreSQL failure to 503.
   next()
 })
 
@@ -694,6 +781,7 @@ async function initDatabase() {
   await migrateAutomaticRefreshSettings()
   await recoverStaleSyncStates({ reason:'startup' })
   await recoverRetryableErrorStates()
+  await recoverLegacyFbsMarketplaceReaderError()
   await recoverExcessiveOperationalBackoffs()
   // 5.10.3: миграция старого длинного finance next_allowed_at выполняется
   // сразу при старте backend, ещё до первого открытия пользователем страницы.
@@ -950,10 +1038,11 @@ const WB_SYNC_STAGES = Object.freeze({
   products: { label: 'Товары', scope: 'content' },
   orders: { label: 'Заказы', scope: 'statistics' },
   sales: { label: 'Продажи', scope: 'statistics' },
-  stocks: { label: 'Остатки FBO', scope: 'analytics' },
+  stocks: { label: 'Склад WB', scope: 'analytics' },
   sellerStocks: { label: 'Остатки FBS', scope: 'marketplace' },
   advertising: { label: 'Реклама', scope: 'promotion' },
   finance: { label: 'Финансы WB', scope: 'finance' },
+  balance: { label: 'Баланс WB', scope: 'finance' },
   paidStorage: { label: 'Платное хранение', scope: 'analytics' },
   acceptance: { label: 'Платная приёмка', scope: 'analytics' },
   acquiring: { label: 'Эквайринг', scope: 'finance' },
@@ -1182,7 +1271,7 @@ function financeRuntimeTokenInfo(tokenInfo = {}) {
   return { ...(tokenInfo || {}), hasServiceSecret:Boolean(publicServiceSecretStatus().valid) }
 }
 
-function authHeaders(token) {
+function authHeaders(token, url = '') {
   const info = inspectWbToken(token)
   const headers = {
     Authorization: token,
@@ -1192,7 +1281,11 @@ function authHeaders(token) {
   // WB требует маркировать секретом запросы зарегистрированного облачного сервиса.
   // Персональные токены облачный ELISEI не принимает; для Базового без секрета действуют сниженные лимиты.
   const serviceSecret = publicServiceSecretStatus()
-  if (serviceSecret.valid && (info.typeId === 1 || info.typeId === 4)) headers['X-Client-Secret'] = wbClientSecret
+  const marketplaceRequest = /^https:\/\/marketplace-api\.wildberries\.ru(?:\/|$)/i.test(String(url || ''))
+  // Marketplace FBS endpoints use the seller token exactly as documented.
+  // Do not leak the registered-service secret into this API family: the same
+  // cabinet works with Authorization-only requests in the verified seller flow.
+  if (serviceSecret.valid && !marketplaceRequest && (info.typeId === 1 || info.typeId === 4)) headers['X-Client-Secret'] = wbClientSecret
   return headers
 }
 
@@ -1219,7 +1312,7 @@ async function wbFetch(url, token, options = {}) {
     try {
       response = await fetch(url, {
         ...fetchOptions,
-        headers: { ...authHeaders(token), ...(fetchOptions.headers || {}) },
+        headers: { ...authHeaders(token, url), ...(fetchOptions.headers || {}) },
         signal: AbortSignal.timeout(Math.max(1000, Math.min(timeoutMs, remainingMs))),
       })
     } catch (error) {
@@ -1294,7 +1387,7 @@ async function wbFetchBuffer(url, token, options = {}) {
   try {
     response = await fetch(url, {
       ...fetchOptions,
-      headers:{ ...authHeaders(token), Accept:'application/zip,text/csv,*/*', ...(fetchOptions.headers || {}) },
+      headers:{ ...authHeaders(token, url), Accept:'application/zip,text/csv,*/*', ...(fetchOptions.headers || {}) },
       signal:AbortSignal.timeout(Math.max(1000,Math.min(timeoutMs,remainingMs))),
     })
   } catch (cause) {
@@ -2152,7 +2245,7 @@ async function queueMissingStreamsForRecovery(connection, data, sources) {
   return queued
 }
 
-async function canonicalConnectionData(connection, { repair = true, persistManifest = true, queueMissing = true } = {}) {
+async function canonicalConnectionDataImpl(connection, { repair = true, persistManifest = true, queueMissing = true } = {}) {
   if (!connection) return { data: {}, sources: {}, recovered: [], recoveryQueued: [] }
   const hydrated = await hydrateStreamData(pool, connection.id, connection.data || {}, { repair })
   const data = hydrated.data
@@ -2222,22 +2315,33 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
   const stockMeta = trustedStocks && data?.stockMeta && typeof data.stockMeta === 'object' ? { ...data.stockMeta } : null
   const advertisingData = data?.advertising && typeof data.advertising === 'object' ? data.advertising : { campaigns: [], totals: {} }
   const financeData = data?.finance && typeof data.finance === 'object' && !Array.isArray(data.finance) ? data.finance : { rows:[], totals:{}, balance:null, period:null }
+  const separateBalance = data?.balance && typeof data.balance === 'object' && !Array.isArray(data.balance) ? data.balance : null
+  const accountBalanceData = separateBalance && (separateBalance.current != null || separateBalance.for_withdraw != null) ? separateBalance : (financeData?.balance || null)
   const financeRows = Array.isArray(financeData.rows) ? financeData.rows : []
   const paidStorageRows = Array.isArray(data?.paidStorage) ? data.paidStorage : []
   const acceptanceRows = Array.isArray(data?.acceptance) ? data.acceptance : []
   const acquiringData = data?.acquiring && typeof data.acquiring === 'object' && !Array.isArray(data.acquiring) ? data.acquiring : { rows:[], totals:{} }
   const acquiringRows = Array.isArray(acquiringData.rows) ? acquiringData.rows : []
   const stageStatus = data?.stageStatus && typeof data.stageStatus === 'object' ? data.stageStatus : {}
+  const periodCoverage = data?.__periodCoverage || null
+  const requestedCoverage = periodCoverage?.requested || null
+  const periodCoverageConfirms = stage => {
+    if (!data?.__periodFiltered || !requestedCoverage?.from || !requestedCoverage?.to) return false
+    const coverage = periodCoverage?.[stage]
+    if (!coverage?.from || !coverage?.to) return false
+    return String(coverage.from) <= String(requestedCoverage.from) && String(coverage.to) >= String(requestedCoverage.to)
+  }
   const availability = {
     products: streamDataAvailable(stageStatus, 'products', rawProducts.length),
-    orders: streamDataAvailable(stageStatus, 'orders', orders.length),
-    sales: streamDataAvailable(stageStatus, 'sales', salesRows.length),
+    orders: data?.__periodFiltered ? (periodCoverageConfirms('orders') || orders.length > 0) : streamDataAvailable(stageStatus, 'orders', orders.length),
+    sales: data?.__periodFiltered ? (periodCoverageConfirms('sales') || salesRows.length > 0) : streamDataAvailable(stageStatus, 'sales', salesRows.length),
     stocks: Boolean((trustedStocks && streamDataAvailable(stageStatus, 'stocks', fboStocks.length)) || streamDataAvailable(stageStatus, 'sellerStocks', sellerStocks.length)),
     fboStocks: trustedStocks && streamDataAvailable(stageStatus, 'stocks', fboStocks.length),
     sellerStocks: streamDataAvailable(stageStatus, 'sellerStocks', sellerStocks.length),
     stockDetails: stocks.length > 0,
-    advertising: streamDataAvailable(stageStatus, 'advertising', Array.isArray(advertisingData.campaigns) ? advertisingData.campaigns.length : 0),
-    finance: streamDataAvailable(stageStatus, 'finance', financeRows.length),
+    advertising: periodCoverageConfirms('advertising') || streamDataAvailable(stageStatus, 'advertising', Array.isArray(advertisingData.campaigns) ? advertisingData.campaigns.length : 0),
+    finance: data?.__periodFiltered ? (periodCoverageConfirms('finance') || financeRows.length > 0) : streamDataAvailable(stageStatus, 'finance', financeRows.length),
+    balance: streamDataAvailable(stageStatus, 'balance', accountBalanceData && (accountBalanceData.current != null || accountBalanceData.for_withdraw != null) ? 1 : 0),
     paidStorage: streamDataAvailable(stageStatus, 'paidStorage', paidStorageRows.length),
     acceptance: streamDataAvailable(stageStatus, 'acceptance', acceptanceRows.length),
     acquiring: streamDataAvailable(stageStatus, 'acquiring', acquiringRows.length),
@@ -3042,7 +3146,7 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     finance: {
       rows: financeRows,
       totals: financeTotals,
-      balance: financeData?.balance || null,
+      balance: accountBalanceData,
       period: financeData?.period || null,
       complete: financeData?.complete !== false,
       sources:{ commission:financeHasRows?'finance_report':'manual', logistics:financeHasRows?'finance_report':'manual', storage:storageSource, acceptance:acceptanceSource, acquiring:acquiringSource },
@@ -3360,6 +3464,7 @@ function previousStageValue(data, stage) {
   const value = data?.[stageDataKey(stage)]
   if (stage === 'advertising') return value && typeof value === 'object' ? value : { campaigns: [], totals: {}, period: null }
   if (stage === 'finance') return value && typeof value === 'object' ? value : { rows:[], totals:{}, period:null, balance:null, complete:true }
+  if (stage === 'balance') return value && typeof value === 'object' && !Array.isArray(value) ? value : { currency:'RUB',current:null,for_withdraw:null,updatedAt:null,complete:false }
   if (stage === 'acquiring') return value && typeof value === 'object' ? value : { rows:[], totals:{}, period:null, complete:true }
   if (EXTENDED_OBJECT_STAGES.has(stage)) return value && typeof value === 'object' && !Array.isArray(value) ? value : { rows:[], totalRows:0, complete:true }
   return Array.isArray(value) ? value : []
@@ -3368,6 +3473,7 @@ function previousStageValue(data, stage) {
 function stageCount(stage, value) {
   if (stage === 'advertising') return Array.isArray(value?.campaigns) ? value.campaigns.length : 0
   if (stage === 'finance' || stage === 'acquiring') return Array.isArray(value?.rows) ? value.rows.length : 0
+  if (stage === 'balance') return value && (value.current != null || value.for_withdraw != null) ? 1 : 0
   if (EXTENDED_OBJECT_STAGES.has(stage)) return Number(value?.totalRows ?? (Array.isArray(value?.rows) ? value.rows.length : 0)) || 0
   return Array.isArray(value) ? value.length : 0
 }
@@ -4160,50 +4266,8 @@ async function advanceGeneratedReportTask(stage, token, state, { deadlineAt = 0 
   }
 }
 
-async function advanceWarehouseRemainsTask(token, state, { deadlineAt = 0 } = {}) {
-  const base = 'https://seller-analytics-api.wildberries.ru/api/v1/warehouse_remains'
-  // Отчёт создаём сразу в детализации, необходимой для единой карточки товара.
-  // Без этих groupBy WB вправе вернуть агрегат, который невозможно надёжно распределить по ШК/артикулу.
-  const reportUrl = `${base}?locale=ru&groupBySa=true&groupByNm=true&groupByBarcode=true&groupBySize=true`
-  const stateProfile = String(state?.metadata?.reportProfile || '')
-  const taskIdFromState = stateProfile === STOCK_REPORT_PROFILE ? state?.task_id : null
-  if (!taskIdFromState) {
-    const created = await wbFetch(reportUrl, token, {
-      label: 'Создание детального отчёта остатков WB', timeoutMs: 30000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
-    })
-    const taskId = created?.data?.taskId
-    if (!taskId) throw Object.assign(new Error('Отчёт остатков WB: не получен taskId'), { status: 502 })
-    return {
-      pending: true,
-      taskId,
-      taskStatus: 'new',
-      reportProfile: STOCK_REPORT_PROFILE,
-      nextAllowedAt: new Date(Date.now() + 30000).toISOString(),
-    }
-  }
-
-  const taskId = taskIdFromState
-  const statusPayload = await wbFetch(`${base}/tasks/${encodeURIComponent(taskId)}/status`, token, {
-    label: 'Проверка отчёта остатков WB', timeoutMs: 25000, maxAttempts: 1, maxRetryDelayMs: 0, deadlineAt,
-  })
-  const taskStatus = String(statusPayload?.data?.status || '').toLowerCase()
-  if (taskStatus === 'done') {
-    const downloaded = await downloadWarehouseRemainsReport(token, taskId, { deadlineAt })
-    return {
-      pending:false,
-      rows:downloaded.rows,
-      stockMeta:downloaded.stockMeta,
-      rawPayload:downloaded.rawPayload,
-      endpoint:downloaded.endpoint,
-      validation:downloaded.validation,
-      taskId:null,
-      taskStatus:'done',
-    }
-  }
-  if (taskStatus === 'canceled' || taskStatus === 'purged') {
-    throw Object.assign(new Error(`Отчёт остатков WB завершён со статусом ${taskStatus}. Будет создан новый отчёт.`), { status: 502, resetTask: true })
-  }
-  return { pending: true, taskId, taskStatus: taskStatus || 'processing', reportProfile:STOCK_REPORT_PROFILE, nextAllowedAt: new Date(Date.now() + 30000).toISOString() }
+async function advanceWarehouseRemainsTask(token, _state, { deadlineAt = 0 } = {}) {
+  return loadCurrentWbStocks(token, { request:wbFetch, deadlineAt })
 }
 
 function extractExtendedRows(payload, preferredKeys = []) {
@@ -5273,6 +5337,32 @@ async function extendedStreamSummary(connectionId, stream, syncId, filters = {})
 }
 
 
+async function loadSellerBalance(token, { deadlineAt = 0 } = {}) {
+  const raw = await wbFetch('https://finance-api.wildberries.ru/api/v1/account/balance', token, {
+    label:'Баланс WB', timeoutMs:20000, maxAttempts:2, maxRetryDelayMs:65000, deadlineAt,
+  })
+  const money = value => {
+    if (value === null || value === undefined || value === '') return null
+    const number = Number(value)
+    return Number.isFinite(number) ? Math.round(number * 100) / 100 : null
+  }
+  const value = {
+    currency:String(raw?.currency || 'RUB'),
+    current:money(raw?.current),
+    for_withdraw:money(raw?.for_withdraw),
+    updatedAt:new Date().toISOString(),
+    complete:true,
+  }
+  if (value.current == null && value.for_withdraw == null) {
+    throw Object.assign(new Error('Баланс WB: ответ не содержит current/for_withdraw'), { status:502 })
+  }
+  return {
+    value,
+    endpoint:'https://finance-api.wildberries.ru/api/v1/account/balance',
+    validation:{accessConfirmed:true,currency:value.currency,currentAvailable:value.current != null,withdrawAvailable:value.for_withdraw != null},
+  }
+}
+
 async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
   const definition = WB_SYNC_STAGES[stage]
   const fallback = previousStageValue(data, stage)
@@ -5337,6 +5427,11 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       const loaded = await loadAdvertising(selected.token, { deadlineAt, previous:fallback, period:state?.metadata?.period || null })
       value = loaded.value
       meta = value.meta || null
+      snapshot = loaded
+    } else if (stage === 'balance') {
+      const loaded = await loadSellerBalance(selected.token, { deadlineAt })
+      value = loaded.value
+      meta = loaded.validation || null
       snapshot = loaded
     } else if (stage === 'financeReports' || stage === 'acquiringReports') {
       const result = await advanceFinanceReportListTask(stage,connection.id,selected.token,state,{deadlineAt,tokenInfo:selected.info})
@@ -5614,8 +5709,13 @@ function enrichProducts(products, stats) {
 function withSyncLog(history, entry) { return [{ id: crypto.randomUUID(), at: new Date().toISOString(), ...entry }, ...(history || [])].slice(0, 20) }
 function buildDashboard(data, settings = DEFAULT_BUSINESS_SETTINGS) { const summary = buildCoreAnalytics(data, settings).summary; return { revenue: summary.revenue, orders: summary.orders, sales: summary.sales, returns: summary.returns, stockUnits: summary.stockUnits, profit: summary.operatingProfit, margin: summary.margin, periodDays: 30 } }
 
-app.get('/health', async (_req, res) => {
+app.get('/health', async (req, res) => {
+  const dailyReadyWake = String(req.query?.wake || '') === 'daily-ready'
+  if (dailyReadyWake && databaseState.ready) {
+    setTimeout(() => kickBackgroundWorkers('daily-ready-wake'), 100).unref?.()
+  }
   res.json({
+    wakeAccepted:dailyReadyWake && databaseState.ready,
     ok: true,
     ready: databaseState.ready,
     service: 'elisei-api',
@@ -5842,6 +5942,18 @@ app.get('/api/auth/me', authRequired, async (req, res) => {
   const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.auth.sub])
   if (!result.rowCount) return res.status(404).json({ error: 'Пользователь не найден' })
   res.json({ user: publicUser(result.rows[0]) })
+})
+
+app.put('/api/auth/profile', authRequired, async (req, res) => {
+  try {
+    const name=String(req.body?.name || '').replace(/\s+/g,' ').trim()
+    if (name.length < 2 || name.length > 80 || !/^[\p{L}\p{M} .'-]+$/u.test(name)) {
+      return res.status(400).json({ error:'Укажите имя длиной от 2 до 80 символов.' })
+    }
+    const updated=await pool.query('UPDATE users SET name=$1 WHERE id=$2 RETURNING *',[name,req.auth.sub])
+    if (!updated.rowCount) return res.status(404).json({ error:'Пользователь не найден' })
+    return res.json({ ok:true,user:publicUser(updated.rows[0]),message:'Имя профиля сохранено.' })
+  } catch (error) { return res.status(error.status || 500).json({ error:error.message }) }
 })
 
 app.post('/api/auth/phone/request', authRequired, async (req, res) => {
@@ -7272,6 +7384,11 @@ app.get('/api/wb/data-quality/:id', authRequired, async (req,res)=>{
     const quality=await dataQualityForConnection(connection,range)
     res.json({quality})
   }catch(error){
+    const code=String(error?.code || '').trim().toUpperCase()
+    const message=String(error?.message || error || '')
+    const transientDb=['57P01','57P02','57P03','08000','08003','08006','08001','08004','08P01','ECONNRESET','ECONNREFUSED','ETIMEDOUT'].includes(code)
+      || /connection terminated unexpectedly|server closed the connection unexpectedly|database system is in recovery mode|database system is not yet accepting connections|connection reset|connection refused|connection timeout|timeout exceeded when trying to connect|timeout acquiring (?:a )?client|etimedout/i.test(message)
+    if(transientDb) throw error
     console.warn('WB data quality failed:',error.message)
     res.status(error.status||500).json({error:error.message})
   }
@@ -8261,7 +8378,7 @@ async function scheduleDailyReadyStages() {
       // во вчерашнем дне. При усыновлении мы НЕ меняем next_allowed_at и не
       // нарушаем окно WB — только добавляем recovery metadata/dateFrom.
       const recoverableQueuedStatuses = new Set(['queued','rate_limited','retry_scheduled'])
-      const hardBlockedStatuses = new Set(['running','pending','missing_token','token_invalid','forbidden','subscription_required','optional_unavailable','error'])
+      const hardBlockedStatuses = new Set(['running','pending','missing_token','token_invalid','forbidden','subscription_required','optional_unavailable'])
       for(const stage of ['orders','sales','advertising']){
         const current=states.find(item=>item.stage===stage) || null
         if(dailyOperationalStageCovered({stage,coverage:coverage?.[stage] || {},state:current || {},date:targetDate})) continue
@@ -8278,6 +8395,11 @@ async function scheduleDailyReadyStages() {
           continue
         }
         if(hardBlockedStatuses.has(status)) continue
+        const lastFailureAt=Math.max(
+          current?.last_attempt_at ? new Date(current.last_attempt_at).getTime() : 0,
+          current?.updated_at ? new Date(current.updated_at).getTime() : 0,
+        )
+        if(status==='error' && lastFailureAt && now-lastFailureAt<5*60*1000) continue
         const existingNext=current?.next_allowed_at || current?.nextAllowedAt || null
         const nextAllowedAt=existingNext && new Date(existingNext).getTime()>now ? existingNext : new Date().toISOString()
         await updateSyncState(row.id,stage,{status:'queued',nextAllowedAt,lastError:null,metadata})
@@ -8526,3 +8648,29 @@ setInterval(() => {
   if (databaseState.ready) kickBackgroundWorkers('interval')
   else if (!databaseInitPromise && !databaseRetryTimer) scheduleDatabaseInitialization(0, 'interval-retry')
 }, 30000)
+
+
+// ELISEI golden-path stability: collapse concurrent cabinet hydration.
+const canonicalConnectionDataInflight = new Map()
+const canonicalConnectionDataRecent = new Map()
+async function canonicalConnectionData(connection, options = {}) {
+  if (!connection) return canonicalConnectionDataImpl(connection, options)
+  const repair = options?.repair !== false
+  const persistManifest = options?.persistManifest !== false
+  const queueMissing = options?.queueMissing !== false
+  const key = [connection.id || 'none', repair ? 1 : 0, persistManifest ? 1 : 0, queueMissing ? 1 : 0].join(':')
+  const recent = canonicalConnectionDataRecent.get(key)
+  if (recent && recent.expiresAt > Date.now()) return recent.value
+  if (recent) canonicalConnectionDataRecent.delete(key)
+  const existing = canonicalConnectionDataInflight.get(key)
+  if (existing) return existing
+  const task = canonicalConnectionDataImpl(connection,{ repair,persistManifest,queueMissing })
+  canonicalConnectionDataInflight.set(key,task)
+  try {
+    const value = await task
+    canonicalConnectionDataRecent.set(key,{ value,expiresAt:Date.now()+5000 })
+    return value
+  } finally {
+    if (canonicalConnectionDataInflight.get(key) === task) canonicalConnectionDataInflight.delete(key)
+  }
+}

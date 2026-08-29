@@ -4,7 +4,9 @@ import fs from 'node:fs'
 const page = fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx', import.meta.url), 'utf8')
 
 assert.match(page,/const basePeriodFinanceSummary = analyticsCore\?\.summary \|\| summary \|\| \{\}/)
-assert.match(page,/const ledgerHasMovements = Number\(ledgerSummary\.movements \|\| 0\) > 0/)
+assert.match(page,/const rawLedgerSummary = ledger\.summary \|\| \{\}/)
+assert.match(page,/const ledgerHasMovements = Number\(rawLedgerSummary\.movements \|\| 0\) > 0/,
+  'movement evidence must be checked before provisional values are layered onto the display summary')
 assert.match(page,/acquiring:ledgerAmount\('acquiring'\)/)
 assert.match(page,/penalties:ledgerAmount\('penalties'\)/)
 assert.match(page,/deductions:ledgerAmount\('deductions'\)/)

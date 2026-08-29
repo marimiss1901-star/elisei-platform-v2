@@ -2,6 +2,7 @@ import fs from 'node:fs'
 
 const file='src/pages/DashboardPage.jsx'
 let source=fs.readFileSync(file,'utf8')
+if (source.includes('ELISEI_CANONICAL_FRONTEND_PATCHES')) process.exit(0)
 
 function replaceOnce(oldText,newText,label){
   if(source.includes(newText)) return
