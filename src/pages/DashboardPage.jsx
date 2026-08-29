@@ -86,6 +86,29 @@ function normalizeElSettings(value = {}) {
   }
 }
 
+const asArray = value => Array.isArray(value) ? value : []
+const chatText = value => {
+  if (typeof value === 'string') return value
+  if (value == null) return ''
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  try { return JSON.stringify(value,null,2) } catch { return String(value) }
+}
+const normalizeElChatMessage = (message = {}) => {
+  const modules = asArray(message.modules?.length ? message.modules : message.modulesUsed).map(item => String(item)).filter(Boolean)
+  const facts = asArray(message.grounding?.facts).map(item => typeof item === 'string' ? item : chatText(item)).filter(Boolean)
+  const assumptions = asArray(message.grounding?.assumptions).map(item => typeof item === 'string' ? item : chatText(item)).filter(Boolean)
+  return {
+    ...message,
+    role:message.role === 'user' ? 'user' : 'el',
+    text:chatText(message.text ?? message.answer ?? message.content),
+    sources:asArray(message.sources).filter(source => source && typeof source === 'object'),
+    modules,
+    modulesUsed:modules,
+    grounding:facts.length || assumptions.length ? { facts,assumptions } : null,
+    reaction:message.reaction && typeof message.reaction === 'object' ? message.reaction : null,
+  }
+}
+
 function initialElGreeting(greeting, displayName, settings) {
   const name = displayName ? `, ${displayName}` : ''
   if (settings.character === 'professional') return `${greeting}${name}. Готов проанализировать WB-кабинет и предложить следующий шаг.`
@@ -520,7 +543,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const [messages, setMessages] = useState(() => {
     const stored = readStoredJson(elMessagesStorageKey, [])
     const storedSettings = normalizeElSettings(readStoredJson(elSettingsStorageKey, {}))
-    return Array.isArray(stored) && stored.length ? stored.slice(-50) : [{
+    return Array.isArray(stored) && stored.length ? stored.slice(-50).map(normalizeElChatMessage) : [{
       role:'el',
       text:initialElGreeting(greeting, storedSettings.preferredName || displayName, storedSettings),
       reaction:{ mood:'happy',label:'На связи' },
@@ -1000,7 +1023,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
 
 
   useEffect(() => {
-    localStorage.setItem(elMessagesStorageKey, JSON.stringify(messages.slice(-50)))
+    localStorage.setItem(elMessagesStorageKey, JSON.stringify(messages.slice(-50).map(normalizeElChatMessage)))
   }, [elMessagesStorageKey,messages])
 
   useEffect(() => {
@@ -1677,9 +1700,9 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const question = String(forcedText || chat).trim()
     if (!question || chatBusy) return
 
-    const userMessage = { role:'user', text:question, createdAt:new Date().toISOString() }
-    const previousMessages = messages
-    setMessages(current => [...current, userMessage])
+    const userMessage = normalizeElChatMessage({ role:'user', text:question, createdAt:new Date().toISOString() })
+    const previousMessages = messages.map(normalizeElChatMessage)
+    setMessages(current => [...current.map(normalizeElChatMessage), userMessage])
     setChat('')
     setChatBusy(true)
     setElMood('thinking')
@@ -1694,7 +1717,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
         conversationId:elConversationId,
         history:previousMessages.slice(-18).map(item => ({
           role:item.role === 'el' ? 'assistant' : 'user',
-          content:item.text,
+          content:chatText(item.text),
           ...(item.resolvedPeriod ? { resolvedPeriod:item.resolvedPeriod } : {}),
           ...(item.analysisContext ? { analysisContext:item.analysisContext } : {}),
           ...(item.modulesUsed ? { modulesUsed:item.modulesUsed } : {}),
@@ -1746,7 +1769,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
       })
 
       if (result.conversationId && result.conversationId !== elConversationId) setElConversationId(result.conversationId)
-      setMessages(current => [...current, {
+      setMessages(current => [...current.map(normalizeElChatMessage), normalizeElChatMessage({
         role:'el',
         text:result.answer || 'Я проверил данные, но ответ не сформировался. Давай повторим вопрос.',
         sources:Array.isArray(result.sources) ? result.sources : [],
@@ -1762,16 +1785,16 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
         grounding:result.grounding || null,
         answerKind:result.answerKind || 'analysis',
         createdAt:new Date().toISOString(),
-      }])
+      })])
       setElMood(result.reaction?.mood || 'happy')
     } catch (error) {
-      setMessages(current => [...current, {
+      setMessages(current => [...current.map(normalizeElChatMessage), normalizeElChatMessage({
         role:'el',
         text:error.message || 'Не удалось получить ответ Эла. Базовый аналитик работает без OpenAI; GPT и Pro требуют подключённой допфункции и активного API-баланса.',
         error:true,
         reaction:{ mood:'concerned',label:'Нужно проверить' },
         createdAt:new Date().toISOString(),
-      }])
+      })])
       setElMood('concerned')
     } finally {
       setChatBusy(false)
