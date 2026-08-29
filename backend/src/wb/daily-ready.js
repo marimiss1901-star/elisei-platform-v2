@@ -21,6 +21,13 @@ export const DAILY_READY_CORE_STAGES = Object.freeze([
 
 export const DAILY_READY_OPERATIONAL_RECOVERY_STAGES = Object.freeze(['orders','sales'])
 
+export const DAILY_READY_QUARTER_STAGES = Object.freeze([
+  'finance','acquiring','advertising','paidStorage','acceptance','documents',
+  'financeReports','acquiringReports','jamSubscription',
+  'measurementPenalties','deductionsReport','warehouseMeasurements',
+  'antifraudRetention','labelingRetention','goodsReturns','funnel','searchQueries','stockHistory',
+])
+
 export const DAILY_READY_HEAVY_INTERVALS_SECONDS = Object.freeze({
   // Current WB balance is a light snapshot, but by product policy it belongs
   // to the nightly lane rather than competing with seller-day operations.
@@ -101,6 +108,27 @@ export function shiftIsoDate(value, days = 0) {
 
 export function yesterdayDateKey(value = new Date(), timeZone = DEFAULT_DAILY_READY_TIMEZONE) {
   return shiftIsoDate(businessDateKey(value,timeZone),-1)
+}
+
+export function quarterStartDateKey(value = new Date(), timeZone = DEFAULT_DAILY_READY_TIMEZONE) {
+  const parts = zonedParts(value,timeZone)
+  const startMonth = Math.floor((Math.max(1,parts.month)-1)/3)*3+1
+  return dateKeyFromParts({year:parts.year,month:startMonth,day:1})
+}
+
+export function nightlyQuarterTaxPeriod(value = new Date(), timeZone = DEFAULT_DAILY_READY_TIMEZONE) {
+  const dateTo = yesterdayDateKey(value,timeZone)
+  const dateFrom = quarterStartDateKey(value,timeZone)
+  const start = new Date(`${dateFrom}T00:00:00.000Z`)
+  const end = new Date(`${dateTo}T00:00:00.000Z`)
+  const days = Math.max(1,Math.round((end-start)/DAY_MS)+1)
+  return {
+    dateFrom,
+    dateTo:dateTo < dateFrom ? dateFrom : dateTo,
+    days:dateTo < dateFrom ? 1 : days,
+    closedDay:true,
+    purpose:'quarter_tax',
+  }
 }
 
 export function dailyReadySlot(value = new Date(), timeZone = DEFAULT_DAILY_READY_TIMEZONE) {
