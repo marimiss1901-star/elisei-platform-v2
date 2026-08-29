@@ -73,6 +73,7 @@ assert.match(relation.text,/2505/);
 const profitGap = await ask('Почему прибыль ниже выручки?');
 assert.match(profitGap.text,/выручка — это деньги до расходов/);
 assert.match(profitGap.text,/Что съело разницу/);
+assert.doesNotMatch(profitGap.text,/Заказов —/,'profit/revenue gap answer must not append a duplicate sales section');
 
 const tired = await ask('Эл, я устала. Помоги выбрать одно главное действие.');
 assert.match(tired.text,/Понимаю, что сейчас тяжело/);
@@ -104,5 +105,24 @@ assert.match(turnaround.text,/кабинет в минусе/);
 assert.match(turnaround.text,/План выхода в плюс/);
 assert.match(turnaround.text,/жестк|конкур/i);
 assert.match(turnaround.text,/Рекламу не выключать всю/);
+
+const negativeGap = await runElAnalyst({
+  message:'Почему прибыль ниже выручки?',
+  history:[],
+  context:{ period,screen:{ period,summary:negativeSummary } },
+  identity:{userId:'u1',userName:'Мария'},
+  personality:{character:'insider',humor:'off',support:true,celebrations:true,address:'informal'},
+  classification:{modules:detectModules('Почему прибыль ниже выручки?',4),reason:'cabinet-question'},
+  dataBridge:{ async getMany(requested) {
+    const data = {
+      finance:{ok:true,data:{available:true,period,summary:negativeSummary,productPnlRows:lossRows,lossMakingProducts:lossRows,missingCostProducts:[]}},
+      sales:{ok:true,data:{available:true,period,summary:negativeSummary,topByRevenue:lossRows,topBySales:lossRows}},
+    };
+    return Object.fromEntries(requested.map(module => [module, data[module] || {ok:false,warning:`Нет тестовых данных ${module}`}]));
+  }},
+});
+assert.match(negativeGap.text,/Первым проверь: комиссия WB|Первым проверь: логистика|Первым проверь: реклама/);
+assert.doesNotMatch(negativeGap.text,/Первым проверь: себестоимость/);
+assert.doesNotMatch(negativeGap.text,/Заказов —/,'negative profit/revenue gap must not append sales module');
 
 console.log('ELISEI El chat suggestion regression tests passed');
