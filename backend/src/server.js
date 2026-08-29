@@ -2371,7 +2371,13 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     stocks: Boolean((trustedStocks && streamDataAvailable(stageStatus, 'stocks', fboStocks.length)) || streamDataAvailable(stageStatus, 'sellerStocks', sellerStocks.length)),
     fboStocks: trustedStocks && streamDataAvailable(stageStatus, 'stocks', fboStocks.length),
     sellerStocks: streamDataAvailable(stageStatus, 'sellerStocks', sellerStocks.length),
-    stockDetails: stocks.length > 0,
+    // A trusted successful WB snapshot with totalQuantity=0 is a confirmed
+    // empty warehouse, not an unavailable report.
+    stockDetails: stocks.length > 0 || Boolean(
+      trustedStocks
+      && streamDataAvailable(stageStatus, 'stocks', fboStocks.length)
+      && Number(stockMeta?.totalQuantity || 0) === 0
+    ),
     advertising: periodCoverageConfirms('advertising') || streamDataAvailable(stageStatus, 'advertising', Array.isArray(advertisingData.campaigns) ? advertisingData.campaigns.length : 0),
     finance: data?.__periodFiltered ? (periodCoverageConfirms('finance') || financeRows.length > 0) : streamDataAvailable(stageStatus, 'finance', financeRows.length),
     balance: streamDataAvailable(stageStatus, 'balance', accountBalanceData && (accountBalanceData.current != null || accountBalanceData.for_withdraw != null) ? 1 : 0),
@@ -2563,7 +2569,8 @@ function buildCoreAnalytics(data = {}, rawSettings = {}) {
     mappedStockQuantity += quantity
     if (matched.method && Object.prototype.hasOwnProperty.call(stockMatchMethods, matched.method)) stockMatchMethods[matched.method] += 1
   }
-  const stockMappingReady = stocks.length > 0 && (rawStockQuantity === 0 || mappedStockRows > 0)
+  const confirmedEmptyStock = Boolean(availability.stockDetails && stocks.length === 0 && Number(stockMeta?.totalQuantity || 0) === 0)
+  const stockMappingReady = confirmedEmptyStock || (stocks.length > 0 && (rawStockQuantity === 0 || mappedStockRows > 0))
   availability.stockDetails = Boolean(availability.stockDetails && stockMappingReady)
   const metaStockQuantity = Math.max(0, Number(stockMeta?.totalQuantity || 0) || 0)
   const resolvedStockQuantity = availability.stocks
@@ -3526,7 +3533,9 @@ function statisticRowKey(kind, row, index = 0) {
 
 function mergeStatisticsRows(kind, previousRows, incomingRows) {
   const map = new Map()
-  const cutoff = Date.now() - 95 * 86400000
+  // WB permits refetching only a recent operational window, but rows already
+  // received by ELISEI must remain available for the annual workspace.
+  const cutoff = Date.now() - 370 * 86400000
   const add = (row, index) => {
     const eventDate = Date.parse(row?.date || row?.saleDate || row?.orderDate || row?.lastChangeDate || '')
     if (Number.isFinite(eventDate) && eventDate < cutoff) return
@@ -3555,8 +3564,10 @@ async function loadStatisticsRows(kind, token, { deadlineAt = 0, previousRows = 
   // Daily Ready может обнаружить дырку именно во вчерашнем дне, хотя более новые
   // строки уже существуют. Обычный incrementalDateFrom тогда начнёт слишком поздно.
   // Берём сутки запаса до целевой даты и восстанавливаем пропущенный диапазон.
-  const dateFrom = overrideDate
-    ? `${shiftIsoDate(overrideDate,-1)}T00:00:00.000Z`
+  const earliestStatisticsDate = isoDaysAgo(94).slice(0,10)
+  const boundedOverrideDate = overrideDate && overrideDate < earliestStatisticsDate ? earliestStatisticsDate : overrideDate
+  const dateFrom = boundedOverrideDate
+    ? `${shiftIsoDate(boundedOverrideDate,-1)}T00:00:00.000Z`
     : incrementalDateFrom(previousRows)
   const endpoint = `https://statistics-api.wildberries.ru/api/v1/supplier/${endpointName}?dateFrom=${encodeURIComponent(dateFrom)}&flag=0`
   const rawPayload = await wbFetch(endpoint, token, {
@@ -3566,7 +3577,7 @@ async function loadStatisticsRows(kind, token, { deadlineAt = 0, previousRows = 
   return {
     value:mergeStatisticsRows(kind, previousRows, incoming),
     rawPayload,
-    validation:{ incomingRows:incoming.length, dateFrom, dailyReadyRecoveryDate:overrideDate || null },
+    validation:{ incomingRows:incoming.length,dateFrom,requestedDateFrom:overrideDate || null,dailyReadyRecoveryDate:overrideDate || null,historyLimited:Boolean(overrideDate && boundedOverrideDate !== overrideDate) },
     endpoint,
   }
 }
@@ -5467,7 +5478,9 @@ async function runSyncStage({ connection, tokens, data, stage, deadlineAt }) {
       snapshot = loaded
     } else if (stage === 'orders' || stage === 'sales') {
       const loaded = await loadStatisticsRows(stage, selected.token, {
-        deadlineAt,previousRows:fallback,dateFromOverride:state?.metadata?.dailyReadyDate || state?.metadata?.dateFrom || '',
+        deadlineAt,
+        previousRows:fallback,
+        dateFromOverride:state?.metadata?.dailyReadyDate || state?.metadata?.dateFrom || state?.metadata?.period?.dateFrom || '',
       })
       value = loaded.value
       snapshot = loaded
@@ -6499,7 +6512,7 @@ app.post('/api/wb/sync', authRequired, async (req, res) => {
   const requestedStages = allRequestedStages.filter(stage => !backgroundArchiveStages.includes(stage))
   const requestedRange = analyticsPeriodRange(req.body?.period || {})
   if (requestedRange) {
-    for (const stage of allRequestedStages.filter(item => ['advertising','searchQueries','stockHistory','finance','acquiring','documents'].includes(item))) {
+    for (const stage of allRequestedStages.filter(item => ['orders','sales','advertising','searchQueries','stockHistory','finance','acquiring','documents'].includes(item))) {
       const period = syncPeriodForStage(stage,requestedRange)
       await updateSyncState(connection.id,stage,{
         status:'queued',lastAttemptAt:null,nextAllowedAt:null,lastError:null,lastCount:0,taskId:null,
@@ -6764,7 +6777,13 @@ app.get('/api/wb/dashboard/:id', authRequired, async (req, res) => {
     canonicalConnectionData(connection),
     getBusinessSettings(req.auth.sub),
   ])
-  res.json({ dashboard: buildDashboard(data, settings), dataSources:sources, recovered, recoveryQueued, lastSync: connection.last_sync_at || null })
+  const range = analyticsPeriodRange(req.query)
+  const selectedData = analyticsFilterConnectionData(data, range)
+  res.json({
+    dashboard:buildDashboard(selectedData, settings),
+    period:range ? { from:range.from,to:range.to,days:range.days } : null,
+    dataSources:sources, recovered, recoveryQueued, lastSync:connection.last_sync_at || null,
+  })
 })
 
 app.get('/api/wb/core/:id', authRequired, async (req, res) => {

@@ -244,7 +244,14 @@ export const wbApi = {
     }),
     signal: AbortSignal.timeout(110000),
   }),
-  dashboard: (connectionId) => cachedRead(`dashboard:${connectionId}`, `/api/wb/dashboard/${encodeURIComponent(connectionId)}`),
+  dashboard: (connectionId, params = {}) => {
+    const clean = {
+      ...(params?.from ? { from:String(params.from).slice(0,10) } : {}),
+      ...(params?.to ? { to:String(params.to).slice(0,10) } : {}),
+    }
+    const suffix = querySuffix(clean)
+    return cachedRead(`dashboard:${connectionId}:${clean.from || 'all'}:${clean.to || 'all'}`, `/api/wb/dashboard/${encodeURIComponent(connectionId)}${suffix}`)
+  },
   dailyReady: (connectionId, date = '') => {
     const query = date ? `?date=${encodeURIComponent(String(date).slice(0,10))}` : ''
     return cachedRead(`daily:${connectionId}:${date || 'latest'}`, `/api/wb/daily-ready/${encodeURIComponent(connectionId)}${query}`, {}, 3 * 24 * 60 * 60 * 1000)

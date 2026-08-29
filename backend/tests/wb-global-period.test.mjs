@@ -12,7 +12,7 @@ for (const marker of [
   "if (stage==='stockHistory') return boundedSyncPeriod(range,90)",
   "if (stage==='advertising') return boundedSyncPeriod(range,31)",
   "if (stage==='searchQueries') return boundedSyncPeriod(range,365)",
-  "allRequestedStages.filter(item => ['advertising','searchQueries','stockHistory','finance','acquiring','documents'].includes(item))",
+  "allRequestedStages.filter(item => ['orders','sales','advertising','searchQueries','stockHistory','finance','acquiring','documents'].includes(item))",
   'function extendedSqlFilter',
   'payload::text ILIKE',
   "app.get('/api/wb/extended/:stream'",

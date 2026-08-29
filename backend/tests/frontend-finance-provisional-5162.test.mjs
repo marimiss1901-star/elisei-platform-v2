@@ -3,7 +3,7 @@ import fs from 'node:fs'
 
 const source=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')
 
-assert.match(source,/const ELISEI_CANONICAL_FRONTEND_PATCHES = '5\.16\.4'/,
+assert.match(source,/const ELISEI_CANONICAL_FRONTEND_PATCHES = '5\.17\.0'/,
   'the committed frontend must be canonical so prebuild patches cannot overwrite the fix')
 assert.match(source,/const financeEstimateAvailable = Boolean\(!ledgerHasMovements && salesAvailableForPeriod && businessSummary\.revenue != null\)/,
   'Main must offer an estimate whenever operational sales exist without a closed WB ledger')
