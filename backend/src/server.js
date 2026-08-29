@@ -4897,11 +4897,26 @@ function stockHistoryDuplicateIdError(error) {
   return /(?:id\s+is\s+already\s+exists|already\s+exists|уже\s+существ)/i.test(String(error?.message || ''))
 }
 
+function stockHistoryRetainedPeriod(value = {}, now = Date.now()) {
+  const today = new Date(now).toISOString().slice(0,10)
+  // WB validates the start against today's rolling retention window, not
+  // against the requested end date. Keep a small safety margin inside the
+  // documented 90-day report window so an older saved task cannot fail with
+  // “start day is before earliest available date”.
+  const earliest = new Date(new Date(`${today}T00:00:00.000Z`).getTime()-89*86400000).toISOString().slice(0,10)
+  const dateTo = dateKey(value?.dateTo || value?.to || today) || today
+  const requestedFrom = dateKey(value?.dateFrom || value?.from || dateTo) || dateTo
+  const dateFrom = requestedFrom < earliest && dateTo >= earliest ? earliest : requestedFrom
+  const days = Math.max(1,Math.round((new Date(`${dateTo}T00:00:00.000Z`)-new Date(`${dateFrom}T00:00:00.000Z`))/86400000)+1)
+  return { ...value,dateFrom,dateTo,days,retentionClamped:dateFrom!==requestedFrom,originalDateFrom:value?.originalDateFrom || requestedFrom }
+}
+
 async function advanceStockHistoryTask(connectionId, token, state, { deadlineAt = 0, tokenInfo = null } = {}) {
-  const period = state?.metadata?.period || reportPeriod(90)
+  const phase = String(state?.metadata?.phase || 'create')
+  const savedPeriod = state?.metadata?.period || reportPeriod(90)
+  const period = phase === 'create' ? stockHistoryRetainedPeriod(savedPeriod) : savedPeriod
   const syncId = String(state?.metadata?.syncId || crypto.randomUUID())
   const reportId = String(state?.metadata?.reportId || state?.task_id || crypto.randomUUID())
-  const phase = String(state?.metadata?.phase || 'create')
   const base = 'https://seller-analytics-api.wildberries.ru/api/v2/nm-report/downloads'
   const cooldown = streamCooldownMs('stockHistory',tokenInfo)
 
@@ -6653,6 +6668,7 @@ function analyticsFilterAdvertising(advertising = {}, range = null) {
     campaigns,
     daily,
     totals:analyticsMetrics(loaded),
+    statsAvailable:loaded.length > 0,
     period:{ from:range.from, to:range.to },
     statsLoadedCampaigns:loaded.length,
     statsPendingCampaigns:campaigns.length - loaded.length,

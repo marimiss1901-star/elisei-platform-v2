@@ -13,7 +13,7 @@ import WbExtendedWorkspace from '../components/WbExtendedWorkspace'
 import Product360Drawer from '../components/Product360Drawer'
 import { authApi, businessApi, elApi, wbApi } from '../lib/api'
 
-const ELISEI_CANONICAL_FRONTEND_PATCHES = '5.16.2'
+const ELISEI_CANONICAL_FRONTEND_PATCHES = '5.16.3'
 
 const formatMoney = value => value == null ? 'Не загружено' : `${new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))} ₽`
 const formatNumber = value => value == null ? 'Не загружено' : new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))
@@ -159,6 +159,7 @@ const ANALYTICS_PERIOD_KEY = 'elisei.analytics.period.v2'
 const ANALYTICS_COMPARE_KEY = 'elisei.analytics.compare.v1'
 const WORKSPACE_CACHE_PREFIX = 'elisei.workspace.lastgood.v2.'
 const ANALYTICS_CACHE_PREFIX = 'elisei.analytics.lastgood.v2.'
+const ANALYTICS_LATEST_CACHE_PREFIX = 'elisei.analytics.latest.v3.'
 
 function readSessionJson(key, fallback = null) {
   try {
@@ -173,6 +174,47 @@ function writeSessionJson(key, value) {
 
 const workspaceCacheKey = connectionId => WORKSPACE_CACHE_PREFIX + String(connectionId || 'main')
 const analyticsCacheKey = (connectionId, period) => ANALYTICS_CACHE_PREFIX + [connectionId || 'main', period?.from || '', period?.to || ''].join('|')
+const analyticsLatestCacheKey = connectionId => ANALYTICS_LATEST_CACHE_PREFIX + String(connectionId || 'main')
+const analyticsPeriodsMatch = (left, right) => Boolean(left?.from && left?.to && left.from === right?.from && left.to === right?.to)
+const analyticsPeriodContains = (outer, inner) => Boolean(
+  outer?.from && outer?.to && inner?.from && inner?.to && outer.from <= inner.from && outer.to >= inner.to,
+)
+const analyticsCoreHasRecordedActivity = core => ['revenue','orders','sales','returns']
+  .some(key => Math.abs(Number(core?.summary?.[key] || 0)) > 0)
+const shouldRetainKnownAnalytics = (currentCore, currentPeriod, nextCore, nextPeriod) => Boolean(
+  analyticsCoreHasRecordedActivity(currentCore)
+  && analyticsPeriodContains(nextPeriod,currentPeriod)
+  && !analyticsCoreHasRecordedActivity(nextCore),
+)
+
+function readLatestAnalyticsCache(connectionId) {
+  const direct = readSessionJson(analyticsLatestCacheKey(connectionId), null)
+  if (direct?.core) return direct
+  try {
+    const prefix = `${ANALYTICS_CACHE_PREFIX}${connectionId || 'main'}|`
+    let latest = null
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index)
+      if (!key?.startsWith(prefix)) continue
+      const candidate = readSessionJson(key, null)
+      if (!candidate?.core) continue
+      const suffix = key.slice(prefix.length).split('|')
+      const period = candidate.period || { from:suffix[0] || '',to:suffix[1] || '',preset:'saved' }
+      const savedAt = new Date(candidate.savedAt || 0).getTime()
+      if (!latest || savedAt > latest.savedAtValue) latest = { ...candidate,period,savedAtValue:savedAt }
+    }
+    if (!latest) return null
+    const { savedAtValue, ...result } = latest
+    return result
+  } catch { return null }
+}
+
+function writeAnalyticsCache(connectionId, period, value = {}) {
+  const normalizedPeriod = { from:period?.from || '',to:period?.to || '',preset:period?.preset || 'saved' }
+  const entry = { ...value,period:normalizedPeriod,savedAt:new Date().toISOString() }
+  writeSessionJson(analyticsCacheKey(connectionId,normalizedPeriod),entry)
+  writeSessionJson(analyticsLatestCacheKey(connectionId),entry)
+}
 
 const isoLocalDate = date => {
   const value = date instanceof Date ? date : new Date(date)
@@ -452,6 +494,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const [coreData, setCoreData] = useState(null)
   const [analyticsCore, setAnalyticsCore] = useState(null)
   const [analyticsCompareCore, setAnalyticsCompareCore] = useState(null)
+  const [analyticsVisiblePeriod, setAnalyticsVisiblePeriod] = useState(null)
   const [analyticsLoading, setAnalyticsLoading] = useState(false)
   const [analyticsError, setAnalyticsError] = useState('')
   const [analyticsPeriod, setAnalyticsPeriod] = useState(() => normalizeAnalyticsPeriod(readStoredJson(ANALYTICS_PERIOD_KEY, null)))
@@ -772,20 +815,30 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const requestId = ++analyticsRequestRef.current
     const cacheKey = analyticsCacheKey(connectionId, period)
     const cached = readSessionJson(cacheKey, null)
+    const latestCached = cached?.core ? null : readLatestAnalyticsCache(connectionId)
     const previousKey = analyticsPeriodKeyRef.current
+    let retainedCore = analyticsCore
+    let retainedPeriod = analyticsVisiblePeriod
     setAnalyticsLoading(true)
     setAnalyticsError('')
 
     if (previousKey !== cacheKey) {
-      if (cached?.core) {
+      if (cached?.core && !shouldRetainKnownAnalytics(retainedCore,retainedPeriod,cached.core,period)) {
         setAnalyticsCore(cached.core)
         setCoreData(cached.core)
         setAnalyticsCompareCore(cached.compareCore || null)
+        setAnalyticsVisiblePeriod(cached.period || period)
         analyticsPeriodKeyRef.current = cacheKey
-      } else if (previousKey) {
-        setAnalyticsCore(null)
-        setCoreData(null)
-        setAnalyticsCompareCore(null)
+        retainedCore = cached.core
+        retainedPeriod = cached.period || period
+      } else if (!retainedCore && latestCached?.core) {
+        setAnalyticsCore(latestCached.core)
+        setCoreData(latestCached.core)
+        setAnalyticsCompareCore(latestCached.compareCore || null)
+        setAnalyticsVisiblePeriod(latestCached.period || null)
+        retainedCore = latestCached.core
+        retainedPeriod = latestCached.period || null
+        if (retainedPeriod?.from && retainedPeriod?.to) analyticsPeriodKeyRef.current = analyticsCacheKey(connectionId,retainedPeriod)
       }
     }
 
@@ -793,11 +846,17 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
       const currentResult = await wbApi.core(connectionId,{ from:period.from,to:period.to })
       if (requestId !== analyticsRequestRef.current) return
       const nextCore = currentResult?.core || null
+      if (shouldRetainKnownAnalytics(retainedCore,retainedPeriod,nextCore,period)) {
+        setAnalyticsError('Расчёт широкого периода вернул неполный снимок. ELISEI оставил на экране последние сохранённые цифры и повторит пересчёт позже.')
+        return
+      }
       if (nextCore) {
         setAnalyticsCore(nextCore)
         setCoreData(nextCore)
+        if (previousKey !== cacheKey) setAnalyticsCompareCore(null)
+        setAnalyticsVisiblePeriod(period)
         analyticsPeriodKeyRef.current = cacheKey
-        writeSessionJson(cacheKey,{ core:nextCore, compareCore:cached?.compareCore || null, savedAt:new Date().toISOString() })
+        writeAnalyticsCache(connectionId,period,{ core:nextCore,compareCore:cached?.compareCore || null })
       }
       if (compare && nextCore) {
         const previous = previousPeriodFor(period)
@@ -806,7 +865,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
           if (requestId !== analyticsRequestRef.current) return
           const nextCompareCore = previousResult?.core || null
           setAnalyticsCompareCore(nextCompareCore)
-          writeSessionJson(cacheKey,{ core:nextCore, compareCore:nextCompareCore, savedAt:new Date().toISOString() })
+          writeAnalyticsCache(connectionId,period,{ core:nextCore,compareCore:nextCompareCore })
         } catch (compareError) {
           if (cached?.compareCore) setAnalyticsCompareCore(current => current || cached.compareCore)
         }
@@ -819,6 +878,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
         setAnalyticsCore(current => current || cached.core)
         setCoreData(current => current || cached.core)
         setAnalyticsCompareCore(current => current || cached.compareCore || null)
+        setAnalyticsVisiblePeriod(current => current || cached.period || period)
         analyticsPeriodKeyRef.current = cacheKey
       }
       setAnalyticsError(error.message || 'Не удалось пересчитать аналитику за выбранный период. Показываем последние подтверждённые данные.')
@@ -1152,6 +1212,10 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
 
   const analyticsFilteredProducts = useMemo(() => filterAnalyticsRows(analyticsBaseProducts), [analyticsBaseProducts,query,analyticsBrand,analyticsCategory,analyticsAbc,analyticsXyz,analyticsStock])
   const analyticsFiltersActive = Boolean(query.trim() || analyticsBrand !== 'Все' || analyticsCategory !== 'Все' || analyticsAbc !== 'Все' || analyticsXyz !== 'Все' || analyticsStock !== 'Все')
+  const analyticsUsesPreviousSnapshot = Boolean(analyticsCore && analyticsVisiblePeriod && !analyticsPeriodsMatch(analyticsVisiblePeriod,analyticsPeriod))
+  const analyticsVisiblePeriodLabel = analyticsVisiblePeriod?.from && analyticsVisiblePeriod?.to
+    ? `${formatDate(analyticsVisiblePeriod.from)} — ${formatDate(analyticsVisiblePeriod.to)}`
+    : ''
   const analyticsSummary = useMemo(() => aggregateAnalyticsRows(analyticsFilteredProducts,analyticsCore?.summary || (!connection.connected ? summary : {}),periodDaysBetween(analyticsPeriod),analyticsFiltersActive), [analyticsFilteredProducts,analyticsCore,summary,analyticsPeriod,analyticsFiltersActive,connection.connected])
   const analyticsTrend = useMemo(() => aggregateAnalyticsTrend(analyticsCore || (!connection.connected ? coreData : {}) || {},analyticsFilteredProducts,analyticsFiltersActive), [analyticsCore,coreData,analyticsFilteredProducts,analyticsFiltersActive,connection.connected])
 
@@ -1296,7 +1360,8 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     try {
       await wbApi.disconnect(connection.connectionId)
       setConnection(emptyConnection)
-      setDashboardData(null); setCoreData(null); setAdvertisingSnapshot(null); setLiveProducts([]); setSyncHistory([])
+      setDashboardData(null); setCoreData(null); setAnalyticsCore(null); setAnalyticsCompareCore(null); setAnalyticsVisiblePeriod(null); setAdvertisingSnapshot(null); setLiveProducts([]); setSyncHistory([])
+      analyticsPeriodKeyRef.current = ''
       notify('Wildberries отключён')
     } catch (error) { notify(error.message, 8000) }
   }
@@ -1765,10 +1830,12 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
             <button className="secondary-btn" onClick={()=>setActive('Аналитика')}>Подробнее <ChevronRight size={16}/></button>
           </div>
         </div>
-        {analyticsLoading && !analyticsCore && !readyCore ? <div className="digitization-loading"><RefreshCw className="spin" size={20}/> Пересчитываю выбранный период…</div> : null}
+        {analyticsUsesPreviousSnapshot ? <div className={`digitization-loading saved ${analyticsLoading ? '' : 'warning'}`}>
+          {analyticsLoading ? <RefreshCw className="spin" size={20}/> : <AlertTriangle size={20}/>}<span><strong>{analyticsLoading ? 'Новый период пересчитывается — цифры не скрываем' : 'Новый период пока не пересчитан — цифры сохранены'}</strong><small>Сейчас показаны последние сохранённые данные за {analyticsVisiblePeriodLabel}. После готовности выбранный период заменит их автоматически.</small></span>
+        </div> : analyticsLoading && !analyticsCore && !readyCore ? <div className="digitization-loading"><RefreshCw className="spin" size={20}/> Пересчитываю выбранный период…</div> : null}
         <div className="digitization-metrics">{digitizationMetrics.map(item=><button key={item.label} className="digitization-metric" onClick={()=>setActive(item.onClick)}><span>{item.label}</span><strong>{item.value}</strong><small className={item.tone}>{item.delta || '—'}</small></button>)}</div>
         <div className="digitization-table-card">
-          <div className="digitization-table-head"><div><span>Товары</span><h3>Что формирует результат</h3></div><small>Топ-10 по выручке за выбранный период</small></div>
+          <div className="digitization-table-head"><div><span>Товары</span><h3>Что формирует результат</h3></div><small>{analyticsUsesPreviousSnapshot ? `Топ-10 по выручке за ${analyticsVisiblePeriodLabel}` : 'Топ-10 по выручке за выбранный период'}</small></div>
           {topProducts.length ? <div className="digitization-table-wrap"><div className="digitization-table">
             <div className="digitization-row head"><span>Товар</span><span>Выручка</span><span>Продажи</span><span>Возвраты</span><span>Реклама</span><span>Расходы</span><span>Прибыль</span><span>Остаток сейчас</span></div>
             {topProducts.map(row=><button className="digitization-row" key={row.id || row.key} onClick={()=>openProduct(row)}>
@@ -1841,7 +1908,8 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
           <div className="analytics-filter-result"><span>{formatNumber(filteredCount)} товаров</span>{analyticsFiltersActive && <button onClick={resetAnalyticsFilters}><X size={14}/> Сбросить</button>}</div>
         </div>
 
-        {analyticsLoading && <div className="notice info"><RefreshCw className="spin" size={20}/><div><strong>Пересчитываю выбранный период</strong><p>Выручка, продажи, возвраты, прибыль, ABC/XYZ и график загружаются заново из сохранённых данных WB.</p></div></div>}
+        {analyticsUsesPreviousSnapshot && <div className={`notice ${analyticsLoading ? 'info' : 'warning'}`}>{analyticsLoading ? <RefreshCw className="spin" size={20}/> : <AlertTriangle size={20}/>}<div><strong>{analyticsLoading ? 'Выбранный период пересчитывается — данные остаются на экране' : 'Выбранный период пока не пересчитан'}</strong><p>Сейчас показаны последние сохранённые данные за {analyticsVisiblePeriodLabel}. После готовности они заменятся автоматически.</p></div></div>}
+        {analyticsLoading && !analyticsUsesPreviousSnapshot && <div className="notice info"><RefreshCw className="spin" size={20}/><div><strong>Пересчитываю выбранный период</strong><p>Выручка, продажи, возвраты, прибыль, ABC/XYZ и график загружаются заново из сохранённых данных WB.</p></div></div>}
         {analyticsError && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Период не пересчитан</strong><p>{analyticsError}</p></div><button onClick={() => loadAnalyticsData(connection.connectionId,analyticsPeriod,analyticsCompare)}>Повторить</button></div>}
         {currentCoreReady && (!analyticsAvailability.orders || !analyticsAvailability.sales || !analyticsAvailability.stocks) && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Не все потоки WB загружены</strong><p>{!analyticsAvailability.orders ? 'Заказы — ожидают разрешённого окна. ' : ''}{!analyticsAvailability.sales ? 'Продажи — ожидают разрешённого окна. ' : ''}{!analyticsAvailability.stocks ? 'Остатки — отчёт формируется отдельно. ' : ''}Неполученные значения не подменяются ложными нулями.</p></div><button onClick={() => setActive('Синхронизации')}>Открыть статусы</button></div>}
         {salesCoverageLimited && <div className="notice info"><AlertTriangle size={20}/><div><strong>Выбранный период шире сохранённой истории продаж</strong><p>В базе сейчас есть продажи с {formatDate(salesCoverage.from)} по {formatDate(salesCoverage.to)}. Показатели рассчитаны только по фактически сохранённым строкам; дни вне покрытия не считаются подтверждённым нулём.</p></div><button onClick={() => setActive('Синхронизации')}>Проверить загрузку</button></div>}
@@ -2193,7 +2261,10 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
 
   const renderDocuments = () => {
     const payload=documentsData?.payload || {}
-    const rows=Array.isArray(documentsData?.rows) ? documentsData.rows : (Array.isArray(payload.rows) ? payload.rows : [])
+    const selectedRows=Array.isArray(documentsData?.rows) ? documentsData.rows : []
+    const archivedRows=Array.isArray(payload.rows) ? payload.rows : []
+    const showingSavedDocuments=Boolean(!query.trim() && selectedRows.length === 0 && archivedRows.length > 0)
+    const rows=showingSavedDocuments ? archivedRows : selectedRows
     const state=documentsData?.state || connection.syncStates?.find(item=>item.stage === 'documents') || null
     const summary=payload.summary || {total:documentsData?.total || rows.length,downloadable:rows.filter(row=>row.downloadable).length,categories:0,jamDocuments:0}
     const categories=['Все',...new Set(rows.map(row=>row.category || row.categoryId || 'Без категории'))]
@@ -2204,6 +2275,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
       <div className="page-title"><span>Документы Wildberries</span><h1>Акты, отчёты и подтверждения списаний</h1><p>Категории документов, номера, периоды и безопасное скачивание. Документы «Джем» связываются с финансовым реестром только как подтверждающий источник.</p></div>
       {renderSharedPeriodControls({note:'Список документов ограничивается единым периодом кабинета. Для Базового токена WB может разрешать продолжение списка только после суточной паузы.'})}
       <div className={`notice ${state?.lastSuccessAt || Number(summary.total || 0) > 0 ? 'success' : 'warning'}`}><FileText size={20}/><div><strong>{Number(summary.total || 0) > 0 ? `Найдено документов: ${formatNumber(summary.total)}` : 'Документы пока не подтверждены'}</strong><p>{complete ? 'Проверенный список сохранён в ELISEI.' : `Список загружен частично${nextAttempt ? `; продолжение после ${new Date(nextAttempt).toLocaleString('ru-RU')}` : ''}. Уже сохранённые документы доступны.`}</p></div><button onClick={()=>syncConnection(connection.connectionId,['documents'],{period:analyticsPeriod})} disabled={syncing || (nextAttempt && new Date(nextAttempt).getTime()>Date.now())}>{syncing?'Загрузка':'Обновить документы'}</button></div>
+      {showingSavedDocuments && <div className="notice info"><FileText size={20}/><div><strong>За выбранный день новых документов нет — архив не скрываем</strong><p>Ниже показаны последние сохранённые документы ELISEI. Их даты указаны в каждой строке; выбранный период остаётся без подмены ложным нулём.</p></div></div>}
       <div className="metrics-grid four finance-movement-metrics">
         <MetricCard label="Всего документов" value={formatNumber(summary.total || 0)} delta={complete?'покрытие завершено':'загрузка продолжается'} icon={FileText}/>
         <MetricCard label="Можно скачать" value={formatNumber(summary.downloadable || 0)} delta="через защищённый backend" icon={Download}/>

@@ -3,7 +3,7 @@ import fs from 'node:fs'
 
 const source=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')
 
-assert.match(source,/const ELISEI_CANONICAL_FRONTEND_PATCHES = '5\.16\.2'/,
+assert.match(source,/const ELISEI_CANONICAL_FRONTEND_PATCHES = '5\.16\.3'/,
   'the committed frontend must be canonical so prebuild patches cannot overwrite the fix')
 assert.match(source,/const financeEstimateAvailable = Boolean\(!ledgerHasMovements && salesAvailableForPeriod && businessSummary\.revenue != null\)/,
   'Main must offer an estimate whenever operational sales exist without a closed WB ledger')
@@ -18,4 +18,4 @@ assert.match(source,/financeEstimateAvailable \? 'Предварительный
 assert.match(source,/Подтверждённая детализация заменит оценки автоматически/,
   'the UI must promise automatic replacement only when confirmed WB detail arrives')
 
-console.log('ELISEI 5.16.2 provisional finance visibility regression: OK')
+console.log('ELISEI 5.16.3 provisional finance visibility regression: OK')
