@@ -463,8 +463,13 @@ function formatProfitRevenueGap(data, tone, options = {}) {
   } else {
     lines.push('Расходная детализация за период пока неполная, поэтому я не буду раскладывать разницу выдуманными нулями.');
   }
-  const biggest = [...expenses].sort((a,b) => Math.abs(Number(b[1] || 0))-Math.abs(Number(a[1] || 0)))[0];
-  if (biggest) lines.push(`Первым проверь: ${biggest[0]} — это самый заметный подтверждённый расход в этом ответе.`);
+  const controllable = expenses
+    .filter(([label]) => !['себестоимость','налог'].includes(label))
+    .sort((a,b) => Math.abs(Number(b[1] || 0))-Math.abs(Number(a[1] || 0)));
+  const biggest = controllable[0] || expenses[0];
+  if (biggest) {
+    lines.push(`Первым проверь: ${biggest[0]} — это самый заметный управляемый расход в этом ответе. Себестоимость тоже важна, но её сначала надо сверить по артикулам, а не пытаться “урезать” общей кнопкой.`);
+  }
   return lines.filter(Boolean).join('\n');
 }
 
@@ -956,6 +961,7 @@ async function runElAnalyst(options = {}) {
   if (modules.includes('diagnostics') && decisionRequest) modules = ['diagnostics', 'finance'];
   if (businessPraiseRequest) modules = ['overview', 'finance', 'stocks', 'advertising'];
   if (turnaroundRequest) modules = ['finance', 'advertising', 'pricing', 'procurement'];
+  if (asksProfitRevenueGap(message)) modules = ['finance'];
   const results = await options.dataBridge.getMany(modules, message);
   const sections = [];
   const warnings = [];
