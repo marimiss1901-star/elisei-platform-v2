@@ -129,6 +129,66 @@ function readStoredJson(key, fallback) {
   } catch { return fallback }
 }
 
+function safeSetLocalStorage(key, value) {
+  try {
+    if (value == null) localStorage.removeItem(key)
+    else localStorage.setItem(key, value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function pruneOldElMessageStorage(keepKey = '') {
+  try {
+    const keys = []
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index)
+      if (key?.startsWith(EL_CHAT_MESSAGES_KEY) && key !== keepKey) keys.push(key)
+    }
+    keys.forEach(key => localStorage.removeItem(key))
+  } catch { /* browser storage is best-effort */ }
+}
+
+function compactElMessageForStorage(message) {
+  const normalized = normalizeElChatMessage(message)
+  return {
+    role:normalized.role,
+    text:normalized.text.slice(0,1800),
+    createdAt:normalized.createdAt || null,
+    mode:normalized.mode || null,
+    apiUsed:Boolean(normalized.apiUsed),
+    error:Boolean(normalized.error),
+    usedWeb:Boolean(normalized.usedWeb),
+    reaction:normalized.reaction,
+    modules:asArray(normalized.modules).slice(0,8),
+    modulesUsed:asArray(normalized.modulesUsed).slice(0,8),
+    sources:asArray(normalized.sources).slice(0,6).map(source => ({
+      title:chatText(source.title || source.url).slice(0,120),
+      url:chatText(source.url).slice(0,500),
+    })),
+    grounding:normalized.grounding ? {
+      facts:asArray(normalized.grounding.facts).slice(0,6).map(item=>chatText(item).slice(0,180)),
+      assumptions:asArray(normalized.grounding.assumptions).slice(0,4).map(item=>chatText(item).slice(0,220)),
+    } : null,
+  }
+}
+
+function writeElMessagesStorage(key, messages) {
+  const normalized = asArray(messages).map(compactElMessageForStorage)
+  const attempts = [
+    normalized.slice(-24),
+    normalized.slice(-12).map(item => ({ ...item, text:item.text.slice(0,900), sources:[], grounding:null })),
+    normalized.slice(-4).map(item => ({ role:item.role, text:item.text.slice(0,500), createdAt:item.createdAt })),
+  ]
+  for (const rows of attempts) {
+    if (safeSetLocalStorage(key, JSON.stringify(rows))) return true
+    pruneOldElMessageStorage(key)
+  }
+  try { localStorage.removeItem(key) } catch { /* ignore */ }
+  return false
+}
+
 function readStoredTheme() {
   try {
     const value = localStorage.getItem(UI_THEME_KEY)
@@ -1053,19 +1113,19 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
 
 
   useEffect(() => {
-    localStorage.setItem(elMessagesStorageKey, JSON.stringify(messages.slice(-50).map(normalizeElChatMessage)))
+    writeElMessagesStorage(elMessagesStorageKey, messages)
   }, [elMessagesStorageKey,messages])
 
   useEffect(() => {
-    localStorage.setItem(elConversationStorageKey, elConversationId)
+    safeSetLocalStorage(elConversationStorageKey, elConversationId)
   }, [elConversationId,elConversationStorageKey])
 
   useEffect(() => {
-    localStorage.setItem(elSettingsStorageKey, JSON.stringify(elSettings))
+    safeSetLocalStorage(elSettingsStorageKey, JSON.stringify(elSettings))
   }, [elSettings,elSettingsStorageKey])
 
   useEffect(() => {
-    localStorage.setItem(elModeStorageKey, elMode)
+    safeSetLocalStorage(elModeStorageKey, elMode)
   }, [elMode,elModeStorageKey])
 
   useEffect(() => {
@@ -1217,14 +1277,14 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
       (connection.syncStates || []).map(item=>`${item.stage}:${item.status}:${item.lastSuccessAt || item.nextAllowedAt || ''}:${item.lastCount || 0}`).join('|')])
 
   useEffect(() => {
-    localStorage.setItem(ANALYTICS_PERIOD_KEY, JSON.stringify(analyticsPeriod))
-    localStorage.setItem('elisei.globalPeriod.v3', JSON.stringify(analyticsPeriod))
+    writeSessionJson(ANALYTICS_PERIOD_KEY, analyticsPeriod)
+    writeSessionJson('elisei.globalPeriod.v3', analyticsPeriod)
     window.__ELISEI_PERIOD__ = analyticsPeriod
     window.dispatchEvent(new CustomEvent('elisei:period-change',{ detail:analyticsPeriod }))
   }, [analyticsPeriod])
 
   useEffect(() => {
-    localStorage.setItem(ANALYTICS_COMPARE_KEY, analyticsCompare ? 'true' : 'false')
+    safeSetLocalStorage(ANALYTICS_COMPARE_KEY, analyticsCompare ? 'true' : 'false')
   }, [analyticsCompare])
 
   useEffect(() => {
