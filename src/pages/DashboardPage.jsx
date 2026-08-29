@@ -13,7 +13,7 @@ import WbExtendedWorkspace from '../components/WbExtendedWorkspace'
 import Product360Drawer from '../components/Product360Drawer'
 import { authApi, businessApi, elApi, wbApi } from '../lib/api'
 
-const ELISEI_CANONICAL_FRONTEND_PATCHES = '5.16.4'
+const ELISEI_CANONICAL_FRONTEND_PATCHES = '5.17.0'
 
 const formatMoney = value => value == null ? 'Не загружено' : `${new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))} ₽`
 const formatNumber = value => value == null ? 'Не загружено' : new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))
@@ -281,6 +281,43 @@ const previousPeriodFor = period => {
   return { from:addDays(to,-days+1), to, days }
 }
 
+const annualPeriodFor = year => {
+  const numericYear = Number(year) || new Date().getFullYear()
+  const today = isoLocalDate(new Date())
+  const yearEnd = `${numericYear}-12-31`
+  const completedThrough = numericYear === new Date().getFullYear() ? addDays(today,-1) : yearEnd
+  return { preset:'annual',from:`${numericYear}-01-01`,to:completedThrough,year:numericYear }
+}
+
+const completedThirtyDayPeriod = () => {
+  const to = addDays(isoLocalDate(new Date()),-1)
+  return { preset:'procurement',from:addDays(to,-29),to }
+}
+
+const clampDemandFactor = value => Math.max(.7,Math.min(1.5,Number(value) || 1))
+
+function monthlyAnalyticsRows(core = {}, year = new Date().getFullYear()) {
+  const names = Array.from({length:12},(_,month) => new Date(Number(year),month,1).toLocaleDateString('ru-RU',{month:'long'}))
+  const rows = names.map((name,month) => ({ month,monthKey:`${year}-${String(month+1).padStart(2,'0')}`,date:`${year}-${String(month+1).padStart(2,'0')}-01`,name,revenue:0,orders:0,sales:0,returns:0,days:0 }))
+  for (const item of Array.isArray(core?.dailyTrend) ? core.dailyTrend : []) {
+    const date = String(item?.date || '')
+    if (!date.startsWith(`${year}-`)) continue
+    const month = Number(date.slice(5,7))-1
+    if (month < 0 || month > 11) continue
+    rows[month].revenue += Number(item.revenue || 0)
+    rows[month].orders += Number(item.orders || 0)
+    rows[month].sales += Number(item.sales || 0)
+    rows[month].returns += Number(item.returns || 0)
+    rows[month].days += 1
+  }
+  const coverage = core?.periodCoverage?.sales || {}
+  return rows.map(row => ({
+    ...row,
+    revenue:Math.round(row.revenue),orders:Math.round(row.orders),sales:Math.round(row.sales),returns:Math.round(row.returns),
+    covered:Boolean(coverage.from && coverage.to && row.monthKey >= String(coverage.from).slice(0,7) && row.monthKey <= String(coverage.to).slice(0,7)),
+  }))
+}
+
 const percentChange = (current, previous) => {
   const currentValue = Number(current)
   const previousValue = Number(previous)
@@ -505,6 +542,15 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const [analyticsAbc, setAnalyticsAbc] = useState('Все')
   const [analyticsXyz, setAnalyticsXyz] = useState('Все')
   const [analyticsStock, setAnalyticsStock] = useState('Все')
+  const [annualYear, setAnnualYear] = useState(new Date().getFullYear())
+  const [annualCore, setAnnualCore] = useState(null)
+  const [annualLoading, setAnnualLoading] = useState(false)
+  const [annualError, setAnnualError] = useState('')
+  const [procurementCore, setProcurementCore] = useState(null)
+  const [procurementLoading, setProcurementLoading] = useState(false)
+  const [procurementError, setProcurementError] = useState('')
+  const [procurementLeadDays, setProcurementLeadDays] = useState(21)
+  const [procurementReserveDays, setProcurementReserveDays] = useState(14)
   const [advertisingSnapshot, setAdvertisingSnapshot] = useState(null)
   const [advertisingCoverage, setAdvertisingCoverage] = useState(null)
   const [integrationDiagnostics, setIntegrationDiagnostics] = useState(null)
@@ -547,6 +593,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const syncRevisionRef = useRef('')
   const analyticsRequestRef = useRef(0)
   const analyticsPeriodKeyRef = useRef('')
+  const historicalSyncRef = useRef(new Set())
   const lastBusinessSectionRef = useRef('Главная')
 
   const notify = (text, duration = 4200) => {
@@ -722,7 +769,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     window.setTimeout(async () => {
       const secondary = []
       const secondaryReaders = [
-        () => wbApi.dashboard(connectionId),
+        () => wbApi.dashboard(connectionId,{ from:analyticsPeriod.from,to:analyticsPeriod.to }),
         () => wbApi.syncHistory(connectionId),
         () => wbApi.advertising(connectionId,{ from:analyticsPeriod.from,to:analyticsPeriod.to }),
         () => wbApi.diagnostics(connectionId),
@@ -886,6 +933,51 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     } finally {
       if (requestId === analyticsRequestRef.current) setAnalyticsLoading(false)
     }
+  }
+
+  const loadAnnualData = async (connectionId = connection.connectionId, year = annualYear) => {
+    if (!connectionId) return
+    const period = annualPeriodFor(year)
+    setAnnualLoading(true)
+    setAnnualError('')
+    try {
+      const result = await wbApi.core(connectionId,{ from:period.from,to:period.to })
+      setAnnualCore(result?.core || null)
+    } catch (error) {
+      setAnnualError(error.message || 'Не удалось собрать годовую аналитику.')
+    } finally {
+      setAnnualLoading(false)
+    }
+  }
+
+  const loadProcurementData = async (connectionId = connection.connectionId) => {
+    if (!connectionId) return
+    const period = completedThirtyDayPeriod()
+    setProcurementLoading(true)
+    setProcurementError('')
+    try {
+      const result = await wbApi.core(connectionId,{ from:period.from,to:period.to })
+      setProcurementCore(result?.core || null)
+    } catch (error) {
+      setProcurementError(error.message || 'Не удалось рассчитать закупки.')
+    } finally {
+      setProcurementLoading(false)
+    }
+  }
+
+  const queuePeriodHistory = (period, onReady = null) => {
+    const connectionId = connectionRef.current.connectionId
+    if (!connectionId || !period?.from || !period?.to) return
+    const key = `${connectionId}:${period.from}:${period.to}`
+    if (historicalSyncRef.current.has(key)) return
+    historicalSyncRef.current.add(key)
+    wbApi.sync(connectionId,['orders','sales'],{ period }).then(() => {
+      window.setTimeout(() => onReady?.(),350)
+    }).catch(error => {
+      // A 409 means an automatic sync is already running. Period metadata was
+      // queued before that response and the scheduler will finish it safely.
+      if (Number(error?.status || 0) !== 409) setAnalyticsError(current => current || error.message || 'История периода поставлена в очередь.')
+    })
   }
 
   useEffect(() => {
@@ -1077,6 +1169,28 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   }, [active, connection.connected, connection.connectionId, analyticsPeriod.from, analyticsPeriod.to, analyticsCompare])
 
   useEffect(() => {
+    if (active !== 'Годовая аналитика' || !connection.connected || !connection.connectionId) return undefined
+    const period = annualPeriodFor(annualYear)
+    const timer = window.setTimeout(() => {
+      loadAnnualData(connection.connectionId,annualYear).then(() => {
+        queuePeriodHistory(period,() => loadAnnualData(connection.connectionId,annualYear))
+      })
+    },220)
+    return () => window.clearTimeout(timer)
+  }, [active,annualYear,connection.connected,connection.connectionId])
+
+  useEffect(() => {
+    if (active !== 'Закупки' || !connection.connected || !connection.connectionId) return undefined
+    const period = completedThirtyDayPeriod()
+    const timer = window.setTimeout(() => {
+      loadProcurementData(connection.connectionId).then(() => {
+        queuePeriodHistory(period,() => loadProcurementData(connection.connectionId))
+      })
+    },220)
+    return () => window.clearTimeout(timer)
+  }, [active,connection.connected,connection.connectionId])
+
+  useEffect(() => {
     // Detailed ledger belongs to the Finance page. The main screen uses the core finance summary.
     if (active !== 'Финансы' || !connection.connected || !connection.connectionId) return undefined
     const timer = window.setTimeout(() => {
@@ -1107,7 +1221,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   }, [financeTab,query,analyticsPeriod.from,analyticsPeriod.to])
 
   const nav = [
-    ['Главная', Home], ['Аналитика', BarChart3], ['Товары', PackageSearch], ['Остатки', Boxes], ['История остатков', Warehouse],
+    ['Главная', Home], ['Аналитика', BarChart3], ['Годовая аналитика', TrendingUp], ['Закупки', Calculator], ['Товары', PackageSearch], ['Остатки', Boxes], ['История остатков', Warehouse],
     ['Финансы', WalletCards], ['Документы WB', FileText], ['Цены и акции', Tag], ['Реклама', Megaphone], ['Поисковые запросы', Search], ['Коммуникации', Star],
     ['Сезонность', CalendarDays], ['Отчёты', FileText], ['Импорт данных', Upload], ['AI CRM', UsersRound], ['Спросить ЭЛа', MessageCircle],
     ['Подключения', PlugZap], ['Синхронизации', RefreshCw], ['Настройки', Settings]
@@ -1143,6 +1257,63 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     expenses:p.expenses == null ? null : Number(p.expenses || 0),
     status:p.stockStatus || (p.stock == null ? 'Не загружено' : Number(p.stock || 0) <= 0 ? 'Нет остатка' : Number(p.stock || 0) < 10 ? 'Заканчивается' : 'В наличии')
   })), [coreProducts])
+
+  const annualMonths = useMemo(() => monthlyAnalyticsRows(annualCore,annualYear),[annualCore,annualYear])
+  const annualCoveredMonths = useMemo(() => annualMonths.filter(row => row.covered),[annualMonths])
+  const annualCoverage = annualCore?.periodCoverage?.sales || null
+
+  const procurementDemandFactor = useMemo(() => {
+    const trend = Array.isArray(procurementCore?.dailyTrend) ? procurementCore.dailyTrend : []
+    const recent = trend.slice(-15).reduce((sum,row) => sum + Number(row.sales || 0),0)
+    const previous = trend.slice(-30,-15).reduce((sum,row) => sum + Number(row.sales || 0),0)
+    if (previous > 0) return clampDemandFactor(recent/previous)
+    return recent > 0 ? 1.2 : 1
+  },[procurementCore])
+
+  const procurementObservedDays = useMemo(() => {
+    const coverage = procurementCore?.periodCoverage?.sales
+    const requested = completedThirtyDayPeriod()
+    if (coverage?.from && coverage?.to) {
+      const from = coverage.from > requested.from ? coverage.from : requested.from
+      const to = coverage.to < requested.to ? coverage.to : requested.to
+      const coveredDays = periodDaysBetween({from,to})
+      if (coveredDays > 0) return coveredDays
+    }
+    return Math.max(1,Number(procurementCore?.periodDays || 30))
+  },[procurementCore])
+
+  const procurementRows = useMemo(() => {
+    const horizonDays = Math.max(1,Number(procurementLeadDays || 0)+Number(procurementReserveDays || 0))
+    const stockDetailsConfirmed = procurementCore?.availability?.stockDetails === true
+    const salesHistoryConfirmed = procurementCore?.availability?.sales === true
+    return (Array.isArray(procurementCore?.products) ? procurementCore.products : []).map((product,index) => {
+      const sales = Math.max(0,Number(product.salesCount || 0))
+      const returns = Math.max(0,Number(product.returnsCount || 0))
+      const stockKnown = product.stockAvailable === true || (stockDetailsConfirmed && product.stock != null)
+      const stock = stockKnown ? Math.max(0,Number(product.stock || 0)) : null
+      const dailyDemand = sales/procurementObservedDays*procurementDemandFactor
+      const targetStock = Math.ceil(dailyDemand*horizonDays)
+      const recommended = stockKnown && salesHistoryConfirmed ? Math.max(0,targetStock-stock) : null
+      const returnRate = sales > 0 ? returns/sales*100 : 0
+      return {
+        ...product,
+        id:String(product.key || product.nmID || product.vendorCode || index),
+        article:String(product.vendorCode || product.nmID || '—'),
+        sales,returns,stock,stockKnown,dailyDemand,targetStock,recommended,returnRate,
+        purchaseCost:recommended != null && Number(product.unitCost || 0) > 0 ? recommended*Number(product.unitCost) : null,
+        priority:recommended == null ? 3 : recommended > 0 && stock === 0 && sales > 0 ? 0 : recommended > 0 ? 1 : 2,
+      }
+    }).sort((left,right) => left.priority-right.priority || Number(right.recommended || 0)-Number(left.recommended || 0) || right.sales-left.sales)
+  },[procurementCore,procurementLeadDays,procurementReserveDays,procurementDemandFactor,procurementObservedDays])
+
+  const procurementSummary = useMemo(() => ({
+    units:procurementRows.reduce((sum,row) => sum+Number(row.recommended || 0),0),
+    urgent:procurementRows.filter(row => row.priority === 0).length,
+    planned:procurementRows.filter(row => Number(row.recommended || 0) > 0).length,
+    waiting:procurementRows.filter(row => row.recommended == null).length,
+    budget:procurementRows.reduce((sum,row) => sum+Number(row.purchaseCost || 0),0),
+    budgetKnown:procurementRows.some(row => row.purchaseCost != null && Number(row.recommended || 0) > 0),
+  }),[procurementRows])
 
   const filteredProducts = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -1247,7 +1418,10 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const applyAnalyticsPeriod = () => {
     const nextPeriod = normalizeAnalyticsPeriod(analyticsPeriodDraft)
     setAnalyticsPeriodDraft(nextPeriod)
-    if (!analyticsPeriodsMatch(nextPeriod,analyticsPeriod)) setAnalyticsPeriod(nextPeriod)
+    if (!analyticsPeriodsMatch(nextPeriod,analyticsPeriod)) {
+      setAnalyticsPeriod(nextPeriod)
+      queuePeriodHistory(nextPeriod,() => loadAnalyticsData(connectionRef.current.connectionId,nextPeriod,analyticsCompare))
+    }
   }
 
   const renderSharedPeriodControls = ({ note = '', maxDays = null } = {}) => {
@@ -2399,6 +2573,69 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     return <section className="app-page glass-panel"><div className="page-title"><span>Качество</span><h1>Отзывы и возвраты</h1><p>На этом этапе качество оценивается по возвратам. Тексты отзывов и рейтинг подключаются отдельным разрешённым методом WB.</p></div><div className="metrics-grid"><MetricCard label="Возвраты" value={formatNumber(summary.returns)} delta="за 30 дней" icon={RefreshCw}/><MetricCard label="Доля возвратов" value={formatPercent(summary.returnRate)} delta="от количества продаж" icon={Percent}/><MetricCard label="Товаров в зоне риска" value={formatNumber(qualityRows.filter(p => p.returnRate >= 20).length)} delta="возвраты от 20%" icon={AlertTriangle}/></div><div className="data-table quality-table"><div className="data-row head quality-row"><span>Товар</span><span>Продажи</span><span>Возвраты</span><span>Доля</span><span>Риск</span><span>Рекомендация</span></div>{qualityRows.length ? qualityRows.map(p => <div className="data-row quality-row" key={p.id}><span><strong>{p.title}</strong><small>{p.article}</small></span><span>{formatNumber(p.salesCount)}</span><span>{formatNumber(p.returnsCount)}</span><span>{formatPercent(p.returnRate)}</span><span><b className={`status-badge ${p.returnRate >= 20 ? 'danger' : p.returnRate >= 10 ? 'warning' : 'success'}`}>{p.returnRate >= 20 ? 'Высокий' : p.returnRate >= 10 ? 'Внимание' : 'Норма'}</b></span><span>{p.returnRate >= 20 ? 'Проверить фото, описание, размер/комплектацию и причины возврата' : 'Контролировать динамику'}</span></div>) : <div className="product-empty">Возвраты в загруженных данных не обнаружены.</div>}</div></section>
   }
 
+  const renderAnnualAnalytics = () => {
+    const period = annualPeriodFor(annualYear)
+    const summary = annualCore?.summary || {}
+    const coverageLimited = Boolean(annualCoverage?.from && annualCoverage?.to && (annualCoverage.from > period.from || annualCoverage.to < period.to))
+    const annualDataReady = Boolean(annualCoverage?.from && annualCoverage?.to)
+    const currentYear = new Date().getFullYear()
+    const topProducts = [...(Array.isArray(annualCore?.products) ? annualCore.products : [])].sort((left,right) => Number(right.revenue || 0)-Number(left.revenue || 0)).slice(0,10)
+    return <section className="app-page glass-panel annual-page">
+      <div className="analytics-title-row">
+        <div className="page-title"><span>Динамика бизнеса</span><h1>Годовая аналитика</h1><p>Помесячная выручка, продажи, возвраты и прибыль из сохранённой истории кабинета.</p></div>
+        <div className="annual-year-switch">{[currentYear,currentYear-1,currentYear-2].map(year => <button key={year} className={annualYear===year?'active':''} onClick={()=>setAnnualYear(year)}>{year}</button>)}</div>
+      </div>
+      {annualLoading && <div className="notice info"><RefreshCw className="spin" size={20}/><div><strong>Собираю год</strong><p>Уже сохранённые месяцы остаются доступными; история WB догружается в фоне.</p></div></div>}
+      {annualError && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Год пока собран не полностью</strong><p>{annualError}</p></div><button onClick={()=>loadAnnualData(connection.connectionId,annualYear)}>Повторить</button></div>}
+      {coverageLimited && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Доступна часть года</strong><p>Продажи сохранены с {formatDate(annualCoverage.from)} по {formatDate(annualCoverage.to)}. Остальные месяцы помечены «нет данных» и не считаются нулевыми.</p></div></div>}
+      {!annualDataReady ? (!annualLoading && <div className="empty-state compact-empty"><TrendingUp size={38}/><h3>Годовая история ещё готовится</h3><p>ELISEI сохранит каждый полученный месяц и больше не удалит его при очередном обновлении.</p></div>) : <>
+        <div className="metrics-grid four">
+          <MetricCard label="Выручка" value={formatMoney(summary.revenue)} delta={`${annualCoveredMonths.length} мес. с подтверждёнными данными`} icon={TrendingUp}/>
+          <MetricCard label="Продажи" value={formatNumber(summary.sales)} delta={`${formatNumber(summary.returns)} возвратов`} icon={PackageSearch}/>
+          <MetricCard label="Опер. прибыль" value={formatMoney(summary.operatingProfit)} delta={summary.operatingProfit == null?'Нужна себестоимость':`Маржа ${formatPercent(summary.margin)}`} icon={CircleDollarSign}/>
+          <MetricCard label="Товаров" value={formatNumber(summary.activeProducts)} delta={`Период ${formatDate(period.from)} — ${formatDate(period.to)}`} icon={Boxes}/>
+        </div>
+        <div className="chart-card inner-chart annual-chart"><div className="card-head"><div><span>{annualYear} год</span><h3>Выручка по месяцам</h3></div></div><TrendChart data={annualCoveredMonths} height={270} emptyText="За этот год подтверждённых продаж пока нет"/></div>
+        <div className="section-title-row"><div><span>Месяцы</span><h2>Динамика года</h2></div><small>Пустой месяц не заменяется нулём</small></div>
+        <div className="data-table"><div className="data-row head annual-row"><span>Месяц</span><span>Выручка</span><span>Заказы</span><span>Продажи</span><span>Возвраты</span><span>К прошлому</span></div>{annualMonths.map((row,index) => {
+          const previous = annualMonths[index-1]
+          const change = row.covered && previous?.covered ? percentChange(row.revenue,previous.revenue) : null
+          return <div className="data-row annual-row" key={row.monthKey}><span><strong>{row.name}</strong><small>{row.covered?'подтверждено WB':'нет данных'}</small></span><span>{row.covered?formatMoney(row.revenue):'—'}</span><span>{row.covered?formatNumber(row.orders):'—'}</span><span>{row.covered?formatNumber(row.sales):'—'}</span><span>{row.covered?formatNumber(row.returns):'—'}</span><span className={change==null?'':change>=0?'positive':'negative'}>{change==null?'—':`${change>=0?'+':''}${formatPercent(change)}`}</span></div>
+        })}</div>
+        <div className="section-title-row"><div><span>Ассортимент</span><h2>Лидеры года</h2></div><small>по сохранённой выручке</small></div>
+        <div className="data-table"><div className="data-row head annual-product-row"><span>Товар</span><span>Выручка</span><span>Продажи</span><span>Возвраты</span><span>Прибыль</span></div>{topProducts.map(product => <button className="data-row annual-product-row product-drill-row" key={product.key} onClick={()=>openProduct360(product)}><span><strong>{product.title}</strong><small>{product.vendorCode || product.nmID || '—'}</small></span><span>{formatMoney(product.revenue)}</span><span>{formatNumber(product.salesCount)}</span><span>{formatPercent(product.returnRate)}</span><span>{formatMoney(product.profit)}</span></button>)}</div>
+      </>}
+    </section>
+  }
+
+  const exportProcurement = () => downloadCsv('elisei_procurement',[
+    'Товар','Артикул','Продажи 30 дней','Остаток WB','Спрос в день','Рекомендуемая закупка','Себестоимость закупки','Статус','Возвраты %'
+  ],procurementRows.map(row => [row.title,row.article,row.sales,row.stockKnown?row.stock:'Не подтверждено',row.dailyDemand.toFixed(2),row.recommended ?? 'Ожидает данные',row.purchaseCost ?? '',row.priority===0?'Срочно':row.priority===1?'Запланировать':row.priority===2?'Достаточно':'Ожидает остатки',row.returnRate.toFixed(1)]))
+
+  const renderProcurement = () => {
+    const period = completedThirtyDayPeriod()
+    const confirmedEmpty = procurementCore?.availability?.stockDetails === true && Number(procurementCore?.summary?.stockUnits || 0) === 0
+    const coverage = procurementCore?.periodCoverage?.sales || null
+    const coverageLimited = Boolean(coverage?.from && coverage?.to && (coverage.from > period.from || coverage.to < period.to))
+    return <section className="app-page glass-panel procurement-page">
+      <div className="analytics-title-row"><div className="page-title"><span>Пополнение склада</span><h1>Закупки</h1><p>Рекомендация по каждому товару: продажи за 30 дней × срок поставки и резерв − текущий остаток WB.</p></div><button className="secondary-btn" disabled={!procurementRows.length} onClick={exportProcurement}><Download size={16}/> CSV для закупки</button></div>
+      {confirmedEmpty && <div className="notice warning procurement-zero"><AlertTriangle size={22}/><div><strong>Склад WB подтверждённо пустой</strong><p>Нулевой остаток не считается ошибкой загрузки. Все продававшиеся товары переведены в срочное пополнение.</p></div></div>}
+      {coverageLimited && <div className="notice info"><Info size={20}/><div><strong>Темп рассчитан по {procurementObservedDays} подтверждённым дням</strong><p>История продаж доступна с {formatDate(coverage.from)} по {formatDate(coverage.to)}. ELISEI не делит продажи на отсутствующие дни и догружает остальной период в фоне.</p></div></div>}
+      {procurementLoading && <div className="notice info"><RefreshCw className="spin" size={20}/><div><strong>Обновляю скорость продаж</strong><p>Расчёт использует сохранённые данные за {formatDate(period.from)} — {formatDate(period.to)}.</p></div></div>}
+      {procurementError && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Расчёт не обновлён</strong><p>{procurementError}</p></div><button onClick={()=>loadProcurementData(connection.connectionId)}>Повторить</button></div>}
+      <div className="procurement-settings"><div><Calculator size={22}/><span><strong>Параметры поставки</strong><small>Меняйте — расчёт обновится сразу</small></span></div><label>До поставки, дней<input type="number" min="1" max="180" value={procurementLeadDays} onChange={event=>setProcurementLeadDays(Math.max(1,Math.min(180,Number(event.target.value)||1)))}/></label><label>Резерв, дней<input type="number" min="0" max="90" value={procurementReserveDays} onChange={event=>setProcurementReserveDays(Math.max(0,Math.min(90,Number(event.target.value)||0)))}/></label><div className="demand-factor"><span>Коэффициент спроса</span><strong>× {procurementDemandFactor.toFixed(2)}</strong><small>последние 15 дней к предыдущим 15</small></div></div>
+      <div className="metrics-grid four">
+        <MetricCard label="Закупить" value={`${formatNumber(procurementSummary.units)} шт.`} delta={`${procurementSummary.planned} товаров к пополнению`} icon={Calculator}/>
+        <MetricCard label="Срочно" value={formatNumber(procurementSummary.urgent)} delta="есть продажи, остаток 0" icon={AlertTriangle}/>
+        <MetricCard label="Бюджет" value={procurementSummary.budgetKnown?formatMoney(procurementSummary.budget):'Нужна себестоимость'} delta="по загруженной себестоимости" icon={CircleDollarSign}/>
+        <MetricCard label="Ожидают данные" value={formatNumber(procurementSummary.waiting)} delta={confirmedEmpty?'остаток 0 подтверждён, ждём только историю продаж':'не подменяются нулём'} icon={Warehouse}/>
+      </div>
+      <div className="section-title-row"><div><span>План поставки</span><h2>Что и сколько заказать</h2></div><small>{formatDate(period.from)} — {formatDate(period.to)}</small></div>
+      <div className="data-table"><div className="data-row head procurement-row"><span>Товар</span><span>Продажи</span><span>Остаток WB</span><span>В день</span><span>Цель</span><span>Закупить</span><span>Бюджет</span><span>Статус</span></div>{procurementRows.map(row => <button className={`data-row procurement-row product-drill-row priority-${row.priority}`} key={row.id} onClick={()=>openProduct360(row)}><span><strong>{row.title}</strong><small>{row.article}{row.returnRate>=20?` · возвраты ${formatPercent(row.returnRate)}`:''}</small></span><span>{formatNumber(row.sales)}</span><span>{row.stockKnown?formatNumber(row.stock):'—'}</span><span>{new Intl.NumberFormat('ru-RU',{maximumFractionDigits:1}).format(row.dailyDemand)}</span><span>{formatNumber(row.targetStock)}</span><span><strong>{row.recommended==null?'—':formatNumber(row.recommended)}</strong></span><span>{row.purchaseCost==null?'—':formatMoney(row.purchaseCost)}</span><span><b className={`procurement-status tone-${row.priority}`}>{row.priority===0?'Срочно':row.priority===1?'Заказать':row.priority===2?'Достаточно':'Ожидает данные'}</b></span></button>)}</div>
+      {!procurementRows.length && !procurementLoading && <div className="empty-state compact-empty"><Calculator size={38}/><h3>Продажи за 30 дней ещё загружаются</h3><p>Как только WB отдаст историю, ELISEI рассчитает закупку без ручного ввода продаж.</p></div>}
+    </section>
+  }
+
   const renderSeasonality = () => {
     const month = new Date().getMonth()+1
     const stages = {
@@ -2820,7 +3057,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   }
 
   const renderers = {
-    'Главная':renderHome, 'Аналитика':renderAnalytics, 'Товары':renderProducts, 'Остатки':renderStocks, 'История остатков':renderStockHistory,
+    'Главная':renderHome, 'Аналитика':renderAnalytics, 'Годовая аналитика':renderAnnualAnalytics, 'Закупки':renderProcurement, 'Товары':renderProducts, 'Остатки':renderStocks, 'История остатков':renderStockHistory,
     'Финансы':renderFinance, 'Документы WB':renderDocuments, 'Цены и акции':renderPricing, 'Реклама':renderAdvertising, 'Поисковые запросы':renderSearchQueries, 'Коммуникации':renderCommunications,
     'Сезонность':renderSeasonality, 'Отчёты':renderReports, 'Импорт данных':renderImport, 'AI CRM':renderCrm, 'Спросить ЭЛа':renderChat,
     'Подключения':renderConnections, 'Синхронизации':renderSyncHistory, 'Настройки':renderSettings,
