@@ -189,6 +189,19 @@ function writeElMessagesStorage(key, messages) {
   return false
 }
 
+function friendlyElErrorMessage(error) {
+  const code = String(error?.code || '')
+  const message = String(error?.message || '')
+  if (code === 'EL_STORAGE_RECONNECTING'
+    || /timeout exceeded when trying to connect|connection timeout|database.*reconnect|баз[аы] памяти/i.test(message)) {
+    return 'Эл временно не достучался до базы памяти. Данные кабинета не потеряны: можно повторить вопрос, а я отвечу по текущему экрану и последним сохранённым цифрам.'
+  }
+  if (code === 'REQUEST_TIMEOUT' || code === 'BACKEND_UNAVAILABLE') {
+    return 'Backend отвечает дольше обычного. Последние подтверждённые данные сохранены, повтори вопрос через несколько секунд.'
+  }
+  return message || 'Не удалось получить ответ Эла. Базовый аналитик работает без OpenAI; GPT и Pro требуют подключённой допфункции и активного API-баланса.'
+}
+
 function readStoredTheme() {
   try {
     const value = localStorage.getItem(UI_THEME_KEY)
@@ -1880,7 +1893,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     } catch (error) {
       setMessages(current => [...current.map(normalizeElChatMessage), normalizeElChatMessage({
         role:'el',
-        text:error.message || 'Не удалось получить ответ Эла. Базовый аналитик работает без OpenAI; GPT и Pro требуют подключённой допфункции и активного API-баланса.',
+        text:friendlyElErrorMessage(error),
         error:true,
         reaction:{ mood:'concerned',label:'Нужно проверить' },
         createdAt:new Date().toISOString(),

@@ -26,17 +26,33 @@ const shouldForceSalesModule = typeof conversationContext.shouldForceSalesModule
 
 function asyncRoute(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 
+function isTransientStorageError(error) {
+  return /connection terminated unexpectedly|server closed the connection unexpectedly|database system is in recovery mode|database system is not yet accepting connections|connection reset|connection refused|connection timeout|timeout exceeded when trying to connect|timeout acquiring (?:a )?client|etimedout/i.test(String(error?.message || ''))
+    || ['DATABASE_RECONNECTING','REQUEST_TIMEOUT','BACKEND_UNAVAILABLE'].includes(String(error?.code || ''));
+}
+
 function errorPayload(error) {
   const setup = ['OPENAI_API_KEY_MISSING','ELISEI_AI_MODEL_MISSING'].includes(error?.code);
   const setupMessage = error?.code === 'ELISEI_AI_MODEL_MISSING'
     ? error.message
     : 'Для «Эл GPT» и «Эл Pro» на backend не добавлен OPENAI_API_KEY или закончился баланс API. Базовый «Эл Аналитик» продолжает работать без OpenAI.';
+  const transient = isTransientStorageError(error);
   return {
     ok: false,
-    error: setup ? setupMessage : (error?.message || 'Не удалось получить ответ Эла.'),
-    code: error?.code || 'EL_CHAT_ERROR',
+    error: setup ? setupMessage : (transient
+      ? 'Эл временно не достучался до базы памяти, но данные кабинета не потеряны. Обнови вопрос: базовый аналитик ответит по текущему экрану и последним сохранённым данным.'
+      : (error?.message || 'Не удалось получить ответ Эла.')),
+    code: transient ? 'EL_STORAGE_RECONNECTING' : (error?.code || 'EL_CHAT_ERROR'),
     setupRequired: setup,
   };
+}
+
+async function bestEffort(label, action, fallback) {
+  try { return await action(); }
+  catch (error) {
+    if (isTransientStorageError(error)) return fallback;
+    throw error;
+  }
 }
 
 function upgradeError(mode, plan) {
@@ -122,14 +138,16 @@ function createRouter(express) {
       return res.status(401).json({ ok: false, error: 'Не удалось определить пользователя для изоляции диалога.' });
     }
 
-    const plan = await resolveElPlan(req, identity);
+    const plan = await bestEffort('el-plan', () => resolveElPlan(req, identity), publicPlan({ tier: process.env.ELISEI_EL_DEFAULT_TIER || 'analyst', source:'transient-plan-fallback' }));
     const requestedMode = normalizeMode(body.mode || 'analyst');
     const memoryStore = createMemoryStore(req.app?.locals?.elMemoryStore);
-    const storedProfile = typeof memoryStore.getProfile === 'function' ? await memoryStore.getProfile(identity) : null;
+    const storedProfile = typeof memoryStore.getProfile === 'function'
+      ? await bestEffort('el-profile', () => memoryStore.getProfile(identity), null)
+      : null;
     const personality = mergeElProfiles(storedProfile || DEFAULT_EL_PROFILE, body.personality || {});
     if (personality.preferredName) identity.userName = personality.preferredName;
     const conversationId = String(body.conversationId || crypto.randomUUID()).slice(0, 100);
-    const serverHistory = await memoryStore.loadConversation(identity, conversationId);
+    const serverHistory = await bestEffort('el-conversation', () => memoryStore.loadConversation(identity, conversationId), []);
     const history = serverHistory.length ? serverHistory : body.history;
     const clock = {
       localDate: body?.clientContext?.localDate || body?.screenContext?.localDate,
@@ -156,7 +174,7 @@ function createRouter(express) {
 
     if (!canUseMode(plan, effectiveMode)) throw upgradeError(effectiveMode, plan);
 
-    const memories = await memoryStore.listMemories(identity);
+    const memories = await bestEffort('el-memories', () => memoryStore.listMemories(identity), []);
     const temporalIntent = parseElTemporalRange(message, clock);
     const effectivePeriod = temporalIntent
       ? { from:temporalIntent.from, to:temporalIntent.to, days:temporalIntent.days }
@@ -166,7 +184,7 @@ function createRouter(express) {
     context.temporalIntent = temporalIntent;
     context.conversationFollowup = conversationFollowup;
     const dataBridge = createBusinessDataBridge({ req, identity, period: effectivePeriod, question: message });
-    const prefetched = await dataBridge.prefetchForQuestion(message);
+    const prefetched = await bestEffort('el-prefetch', () => dataBridge.prefetchForQuestion(message), { detectedModules: classification.modules || [], data: {} });
     context.moduleCoverage = { detected: prefetched.detectedModules, prefetched: prefetched.data };
 
     try {
@@ -195,10 +213,10 @@ function createRouter(express) {
       }
 
       const analysisContext = buildAnalysisContext({ period:effectivePeriod,modules:answer.modulesUsed || classification.modules,message,followup:conversationFollowup });
-      await memoryStore.appendMessages(identity, conversationId, [
+      await bestEffort('el-save-conversation', () => memoryStore.appendMessages(identity, conversationId, [
         { role: 'user', content: message, mode: effectiveMode, resolvedPeriod:effectivePeriod, temporalIntent:temporalIntent?.kind || null, createdAt: new Date().toISOString() },
         { role: 'assistant', content: answer.text, mode: effectiveMode, sources: answer.sources, modulesUsed: answer.modulesUsed, resolvedPeriod:effectivePeriod, analysisContext, reaction:answer.reaction, answerKind:answer.answerKind, grounding:answer.grounding, createdAt: new Date().toISOString() },
-      ]);
+      ]), null);
       res.json({
         ok: true,
         conversationId,
