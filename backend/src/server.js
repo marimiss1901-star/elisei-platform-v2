@@ -139,6 +139,7 @@ async function initializeDatabaseWithRetry(reason = 'startup') {
       databaseState.attempts = 0
       console.log(`Database initialized (${reason})`)
       setTimeout(() => kickBackgroundWorkers('database-ready'), 1500).unref?.()
+      scheduleFinanceLedgerBackfill(30000)
       return true
     } catch (error) {
       databaseState.ready = false
@@ -418,6 +419,10 @@ const backgroundWorkerState = {
 }
 
 function kickBackgroundWorkers(reason = 'timer') {
+  // The HTTP server comes up before PostgreSQL initialization completes. Do not
+  // let an open browser tab consume the second pool connection while schema
+  // checks or a database restart are still in progress; login must stay first.
+  if (!pool || !databaseState.ready) return Promise.resolve(false)
   if (backgroundWorkerState.running && backgroundWorkerState.promise) return backgroundWorkerState.promise
   backgroundWorkerState.running = true
   backgroundWorkerState.lastStartedAt = new Date().toISOString()
@@ -683,17 +688,6 @@ async function initDatabase() {
   await ensureSnapshotSchema(pool)
   await ensureStreamSchema(pool)
   await ensureFinanceLedgerSchema(pool)
-  const ledgerBackfillConnections = await pool.query(`SELECT id FROM marketplace_connections WHERE marketplace='wildberries' AND status='connected' ORDER BY updated_at DESC LIMIT 100`)
-  for (const connection of ledgerBackfillConnections.rows) {
-    try {
-      const repaired = await backfillFinanceLedgerFromStreamItems(pool,{connectionId:connection.id,limitPerStream:100000})
-      if (repaired.processedStreams || repaired.movements) {
-        console.log('[ELISEI 5.15.6] Finance ledger backfill:',{connectionId:connection.id,...repaired})
-      }
-    } catch (error) {
-      console.warn('[ELISEI 5.15.6] Finance ledger backfill skipped:',connection.id,error.message)
-    }
-  }
   await ensureDailyReadySchema()
   await migrateLegacyWbTokens()
   await ensurePrimaryTokens()
@@ -706,6 +700,46 @@ async function initDatabase() {
   await recoverLegacyFinanceCooldowns()
   await recoverLegacyRuntimeRateWindows()
   await recoverLegacySearchQueryBindings()
+}
+
+let financeLedgerBackfillTimer = null
+let financeLedgerBackfillRunning = false
+
+function scheduleFinanceLedgerBackfill(delayMs = 30000) {
+  if (!pool || financeLedgerBackfillTimer || financeLedgerBackfillRunning) return
+  financeLedgerBackfillTimer = setTimeout(async () => {
+    financeLedgerBackfillTimer = null
+    if (!databaseState.ready || backgroundWorkerState.running) {
+      scheduleFinanceLedgerBackfill(30000)
+      return
+    }
+    financeLedgerBackfillRunning = true
+    let retryRequested = false
+    try {
+      const connections = await pool.query(`SELECT id FROM marketplace_connections WHERE marketplace='wildberries' AND status='connected' ORDER BY updated_at DESC LIMIT 100`)
+      for (const connection of connections.rows) {
+        if (!databaseState.ready || backgroundWorkerState.running) {
+          retryRequested = true
+          break
+        }
+        try {
+          const repaired = await backfillFinanceLedgerFromStreamItems(pool,{connectionId:connection.id,limitPerStream:100000})
+          if (repaired.processedStreams || repaired.movements) {
+            console.log('[ELISEI 5.16.1] Deferred finance ledger backfill:',{connectionId:connection.id,...repaired})
+          }
+        } catch (error) {
+          console.warn('[ELISEI 5.16.1] Deferred finance ledger backfill skipped:',connection.id,error.message)
+        }
+      }
+    } catch (error) {
+      console.warn('[ELISEI 5.16.1] Deferred finance ledger backfill scan failed:',error.message)
+      retryRequested = true
+    } finally {
+      financeLedgerBackfillRunning = false
+      if (retryRequested) scheduleFinanceLedgerBackfill(30000)
+    }
+  },Math.max(1000,delayMs))
+  financeLedgerBackfillTimer.unref?.()
 }
 
 function requireBackendConfig() {
@@ -5791,7 +5825,17 @@ app.post('/api/auth/login', async (req, res) => {
     const user = result.rows[0]
     if (!user || !(await bcrypt.compare(password, user.password_hash))) return res.status(401).json({ error: 'Неверная почта или пароль' })
     res.json({ token: signToken(user), user: publicUser(user) })
-  } catch (error) { res.status(error.status || 500).json({ error: error.message }) }
+  } catch (error) {
+    const code=String(error?.code || '').trim().toUpperCase()
+    const message=String(error?.message || error || '')
+    const databaseUnavailable=['57P01','57P02','57P03','08000','08003','08006','08001','08004','08P01','ECONNRESET','ECONNREFUSED','ETIMEDOUT'].includes(code)
+      || /database system is not yet accepting connections|timeout exceeded when trying to connect|timeout acquiring (?:a )?client|connection terminated unexpectedly|server closed the connection unexpectedly|connection reset|connection refused|connection timeout|etimedout/i.test(message)
+    if (databaseUnavailable) {
+      res.setHeader('Retry-After','3')
+      return res.status(503).json({ error:'База ELISEI перезапускается. Данные сохранены — повторите вход через несколько секунд.',code:'DATABASE_RECONNECTING',retryAfterSeconds:3 })
+    }
+    return res.status(error.status || 500).json({ error:error.message })
+  }
 })
 
 app.get('/api/auth/me', authRequired, async (req, res) => {
