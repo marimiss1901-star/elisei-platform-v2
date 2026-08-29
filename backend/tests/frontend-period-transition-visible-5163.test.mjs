@@ -3,7 +3,7 @@ import fs from 'node:fs'
 
 const source=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')
 
-assert.match(source,/const ELISEI_CANONICAL_FRONTEND_PATCHES = '5\.16\.3'/,
+assert.match(source,/const ELISEI_CANONICAL_FRONTEND_PATCHES = '5\.16\.4'/,
   'the canonical frontend marker must protect the period visibility fix from legacy prebuild patches')
 assert.doesNotMatch(source,/else if \(previousKey\) \{\s*setAnalyticsCore\(null\)/,
   'switching to an uncached period must never erase the visible analytics snapshot')
@@ -18,4 +18,4 @@ assert.match(source,/Новый период пересчитывается — 
 assert.match(source,/Сейчас показаны последние сохранённые данные за \{analyticsVisiblePeriodLabel\}/,
   'retained values must be labelled with their real source period')
 
-console.log('ELISEI 5.16.3 period transition visibility regression: OK')
+console.log('ELISEI 5.16.4 period transition visibility regression: OK')

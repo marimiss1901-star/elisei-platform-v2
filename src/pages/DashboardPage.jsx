@@ -13,7 +13,7 @@ import WbExtendedWorkspace from '../components/WbExtendedWorkspace'
 import Product360Drawer from '../components/Product360Drawer'
 import { authApi, businessApi, elApi, wbApi } from '../lib/api'
 
-const ELISEI_CANONICAL_FRONTEND_PATCHES = '5.16.3'
+const ELISEI_CANONICAL_FRONTEND_PATCHES = '5.16.4'
 
 const formatMoney = value => value == null ? 'Не загружено' : `${new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))} ₽`
 const formatNumber = value => value == null ? 'Не загружено' : new Intl.NumberFormat('ru-RU').format(Math.round(Number(value || 0)))
@@ -498,6 +498,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const [analyticsLoading, setAnalyticsLoading] = useState(false)
   const [analyticsError, setAnalyticsError] = useState('')
   const [analyticsPeriod, setAnalyticsPeriod] = useState(() => normalizeAnalyticsPeriod(readStoredJson(ANALYTICS_PERIOD_KEY, null)))
+  const [analyticsPeriodDraft, setAnalyticsPeriodDraft] = useState(analyticsPeriod)
   const [analyticsCompare, setAnalyticsCompare] = useState(() => localStorage.getItem(ANALYTICS_COMPARE_KEY) === 'true')
   const [analyticsBrand, setAnalyticsBrand] = useState('Все')
   const [analyticsCategory, setAnalyticsCategory] = useState('Все')
@@ -1241,24 +1242,31 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     setAnalyticsStock('Все')
   }
 
-  const setAnalyticsPreset = preset => setAnalyticsPeriod(periodPresetValue(preset))
+  const analyticsPeriodPending = !analyticsPeriodsMatch(analyticsPeriodDraft,analyticsPeriod)
+  const setAnalyticsPreset = preset => setAnalyticsPeriodDraft(periodPresetValue(preset))
+  const applyAnalyticsPeriod = () => {
+    const nextPeriod = normalizeAnalyticsPeriod(analyticsPeriodDraft)
+    setAnalyticsPeriodDraft(nextPeriod)
+    if (!analyticsPeriodsMatch(nextPeriod,analyticsPeriod)) setAnalyticsPeriod(nextPeriod)
+  }
 
   const renderSharedPeriodControls = ({ note = '', maxDays = null } = {}) => {
-    const selectedDays = periodDaysBetween(analyticsPeriod)
+    const selectedDays = periodDaysBetween(analyticsPeriodDraft)
     const limited = maxDays && selectedDays > maxDays
     return <div className="workspace-period-controls">
       <div className="analytics-control-panel workspace-period-panel">
         <div className="analytics-period-head">
-          <div><CalendarDays size={18}/><span>Единый период</span><strong>{formatDate(analyticsPeriod.from)} — {formatDate(analyticsPeriod.to)}</strong><small>{selectedDays} дн.</small></div>
+          <div><CalendarDays size={18}/><span>Единый период</span><strong>{formatDate(analyticsPeriodDraft.from)} — {formatDate(analyticsPeriodDraft.to)}</strong><small>{selectedDays} дн.{analyticsPeriodPending ? ' · не применён' : ''}</small></div>
           <small className="workspace-period-global">Применяется ко всему кабинету</small>
         </div>
         <div className="analytics-presets">
-          {[['yesterday','Вчера'],['7','7 дней'],['30','30 дней'],['90','90 дней'],['month','Этот месяц'],['prevMonth','Прошлый месяц'],['year','Этот год']].map(([key,label]) => <button key={key} className={analyticsPeriod.preset===key?'active':''} onClick={() => setAnalyticsPreset(key)}>{label}</button>)}
+          {[['yesterday','Вчера'],['7','7 дней'],['30','30 дней'],['90','90 дней'],['month','Этот месяц'],['prevMonth','Прошлый месяц'],['year','Этот год']].map(([key,label]) => <button key={key} className={analyticsPeriodDraft.preset===key?'active':''} onClick={() => setAnalyticsPreset(key)}>{label}</button>)}
         </div>
         <div className="analytics-date-range">
-          <label><span>С</span><input type="date" value={analyticsPeriod.from} min={addDays(analyticsPeriod.to,-365)} max={analyticsPeriod.to} onChange={event => setAnalyticsPeriod(current => ({ ...current,preset:'custom',from:event.target.value }))}/></label>
+          <label><span>С</span><input type="date" value={analyticsPeriodDraft.from} min={addDays(analyticsPeriodDraft.to,-365)} max={analyticsPeriodDraft.to} onChange={event => setAnalyticsPeriodDraft(current => ({ ...current,preset:'custom',from:event.target.value }))}/></label>
           <span className="analytics-date-arrow">→</span>
-          <label><span>По</span><input type="date" value={analyticsPeriod.to} min={analyticsPeriod.from} max={earlierIsoDate(isoLocalDate(new Date()),addDays(analyticsPeriod.from,365))} onChange={event => setAnalyticsPeriod(current => ({ ...current,preset:'custom',to:event.target.value }))}/></label>
+          <label><span>По</span><input type="date" value={analyticsPeriodDraft.to} min={analyticsPeriodDraft.from} max={earlierIsoDate(isoLocalDate(new Date()),addDays(analyticsPeriodDraft.from,365))} onChange={event => setAnalyticsPeriodDraft(current => ({ ...current,preset:'custom',to:event.target.value }))}/></label>
+          <button type="button" className={`period-apply-btn ${analyticsPeriodPending ? 'ready' : ''}`} disabled={!analyticsPeriodPending} onClick={applyAnalyticsPeriod}><CheckCircle2 size={16}/>{analyticsPeriodPending ? 'Применить период' : 'Период применён'}</button>
         </div>
       </div>
       {(note || limited) && <div className={`workspace-period-note ${limited ? 'warning' : ''}`}><Info size={17}/><span>{limited ? `WB ограничивает один запрос этого раздела периодом ${maxDays} дн. ELISEI покажет фактическое покрытие и не подставит нули за недоступные даты.` : note}</span></div>}
@@ -1826,11 +1834,12 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
         <div className="digitization-head">
           <div><span>Оцифровка кабинета</span><h2>Весь бизнес на одном экране</h2><p>{periodLabel} · {periodDays} дн. {compareReady ? '· сравнение с предыдущим равным периодом' : '· сравнение загружается'}</p></div>
           <div className="digitization-actions">
-            <div className="digitization-presets">{[['yesterday','Вчера'],['7','7 дней'],['30','30 дней'],['month','Месяц']].map(([key,label])=><button key={key} className={analyticsPeriod.preset===key?'active':''} onClick={()=>setAnalyticsPreset(key)}>{label}</button>)}</div>
+            <div className="digitization-presets">{[['yesterday','Вчера'],['7','7 дней'],['30','30 дней'],['month','Месяц']].map(([key,label])=><button key={key} className={analyticsPeriodDraft.preset===key?'active':''} onClick={()=>setAnalyticsPreset(key)}>{label}</button>)}</div>
+            <button type="button" className={`period-apply-btn compact ${analyticsPeriodPending ? 'ready' : ''}`} disabled={!analyticsPeriodPending} onClick={applyAnalyticsPeriod}><CheckCircle2 size={15}/>{analyticsPeriodPending ? 'Применить' : 'Применено'}</button>
             <button className="secondary-btn" onClick={()=>setActive('Аналитика')}>Подробнее <ChevronRight size={16}/></button>
           </div>
         </div>
-        {analyticsUsesPreviousSnapshot ? <div className={`digitization-loading saved ${analyticsLoading ? '' : 'warning'}`}>
+        {analyticsPeriodPending ? <div className="digitization-loading saved pending"><CalendarDays size={20}/><span><strong>Период выбран, но ещё не применён</strong><small>{formatDate(analyticsPeriodDraft.from)} — {formatDate(analyticsPeriodDraft.to)}. Нажмите «Применить» — до этого текущие цифры останутся без изменений.</small></span></div> : analyticsUsesPreviousSnapshot ? <div className={`digitization-loading saved ${analyticsLoading ? '' : 'warning'}`}>
           {analyticsLoading ? <RefreshCw className="spin" size={20}/> : <AlertTriangle size={20}/>}<span><strong>{analyticsLoading ? 'Новый период пересчитывается — цифры не скрываем' : 'Новый период пока не пересчитан — цифры сохранены'}</strong><small>Сейчас показаны последние сохранённые данные за {analyticsVisiblePeriodLabel}. После готовности выбранный период заменит их автоматически.</small></span>
         </div> : analyticsLoading && !analyticsCore && !readyCore ? <div className="digitization-loading"><RefreshCw className="spin" size={20}/> Пересчитываю выбранный период…</div> : null}
         <div className="digitization-metrics">{digitizationMetrics.map(item=><button key={item.label} className="digitization-metric" onClick={()=>setActive(item.onClick)}><span>{item.label}</span><strong>{item.value}</strong><small className={item.tone}>{item.delta || '—'}</small></button>)}</div>
@@ -1865,6 +1874,10 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const selectedDays = periodDaysBetween(analyticsPeriod)
     const selectedPeriodLabel = `${formatDate(analyticsPeriod.from)} — ${formatDate(analyticsPeriod.to)}`
     const comparisonPeriodLabel = `${formatDate(previousPeriod.from)} — ${formatDate(previousPeriod.to)}`
+    const draftPreviousPeriod = previousPeriodFor(analyticsPeriodDraft)
+    const draftPeriodDays = periodDaysBetween(analyticsPeriodDraft)
+    const draftPeriodLabel = `${formatDate(analyticsPeriodDraft.from)} — ${formatDate(analyticsPeriodDraft.to)}`
+    const draftComparisonPeriodLabel = `${formatDate(draftPreviousPeriod.from)} — ${formatDate(draftPreviousPeriod.to)}`
     const filteredCount = analyticsFilteredProducts.length
     const currentCoreReady = Boolean(analyticsCore || (!connection.connected && coreData))
     const periodCoverage = analyticsCore?.periodCoverage || null
@@ -1885,16 +1898,17 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
       {requireConnection(<>
         <div className="analytics-control-panel">
           <div className="analytics-period-head">
-            <div><CalendarDays size={18}/><span>Период</span><strong>{selectedPeriodLabel}</strong><small>{selectedDays} дн.</small></div>
-            <label className="analytics-compare-toggle"><input type="checkbox" checked={analyticsCompare} onChange={event => setAnalyticsCompare(event.target.checked)}/><span>Сравнить</span><small>{analyticsCompare ? comparisonPeriodLabel : 'выключено'}</small></label>
+            <div><CalendarDays size={18}/><span>Период</span><strong>{draftPeriodLabel}</strong><small>{draftPeriodDays} дн.{analyticsPeriodPending ? ' · не применён' : ''}</small></div>
+            <label className="analytics-compare-toggle"><input type="checkbox" checked={analyticsCompare} onChange={event => setAnalyticsCompare(event.target.checked)}/><span>Сравнить</span><small>{analyticsCompare ? draftComparisonPeriodLabel : 'выключено'}</small></label>
           </div>
           <div className="analytics-presets">
-            {[['yesterday','Вчера'],['7','7 дней'],['30','30 дней'],['90','90 дней'],['month','Этот месяц'],['prevMonth','Прошлый месяц'],['year','Этот год']].map(([key,label]) => <button key={key} className={analyticsPeriod.preset===key?'active':''} onClick={() => setAnalyticsPreset(key)}>{label}</button>)}
+            {[['yesterday','Вчера'],['7','7 дней'],['30','30 дней'],['90','90 дней'],['month','Этот месяц'],['prevMonth','Прошлый месяц'],['year','Этот год']].map(([key,label]) => <button key={key} className={analyticsPeriodDraft.preset===key?'active':''} onClick={() => setAnalyticsPreset(key)}>{label}</button>)}
           </div>
           <div className="analytics-date-range">
-            <label><span>С</span><input type="date" value={analyticsPeriod.from} min={addDays(analyticsPeriod.to,-365)} max={analyticsPeriod.to} onChange={event => setAnalyticsPeriod(current => ({ ...current,preset:'custom',from:event.target.value }))}/></label>
+            <label><span>С</span><input type="date" value={analyticsPeriodDraft.from} min={addDays(analyticsPeriodDraft.to,-365)} max={analyticsPeriodDraft.to} onChange={event => setAnalyticsPeriodDraft(current => ({ ...current,preset:'custom',from:event.target.value }))}/></label>
             <span className="analytics-date-arrow">→</span>
-            <label><span>По</span><input type="date" value={analyticsPeriod.to} min={analyticsPeriod.from} max={earlierIsoDate(isoLocalDate(new Date()),addDays(analyticsPeriod.from,365))} onChange={event => setAnalyticsPeriod(current => ({ ...current,preset:'custom',to:event.target.value }))}/></label>
+            <label><span>По</span><input type="date" value={analyticsPeriodDraft.to} min={analyticsPeriodDraft.from} max={earlierIsoDate(isoLocalDate(new Date()),addDays(analyticsPeriodDraft.from,365))} onChange={event => setAnalyticsPeriodDraft(current => ({ ...current,preset:'custom',to:event.target.value }))}/></label>
+            <button type="button" className={`period-apply-btn ${analyticsPeriodPending ? 'ready' : ''}`} disabled={!analyticsPeriodPending} onClick={applyAnalyticsPeriod}><CheckCircle2 size={16}/>{analyticsPeriodPending ? 'Применить период' : 'Период применён'}</button>
           </div>
         </div>
 
@@ -1908,6 +1922,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
           <div className="analytics-filter-result"><span>{formatNumber(filteredCount)} товаров</span>{analyticsFiltersActive && <button onClick={resetAnalyticsFilters}><X size={14}/> Сбросить</button>}</div>
         </div>
 
+        {analyticsPeriodPending && <div className="notice info"><CalendarDays size={20}/><div><strong>Период выбран, но ещё не применён</strong><p>{draftPeriodLabel}. Нажмите «Применить период» — до этого на экране остаются данные за {selectedPeriodLabel}.</p></div><button onClick={applyAnalyticsPeriod}>Применить период</button></div>}
         {analyticsUsesPreviousSnapshot && <div className={`notice ${analyticsLoading ? 'info' : 'warning'}`}>{analyticsLoading ? <RefreshCw className="spin" size={20}/> : <AlertTriangle size={20}/>}<div><strong>{analyticsLoading ? 'Выбранный период пересчитывается — данные остаются на экране' : 'Выбранный период пока не пересчитан'}</strong><p>Сейчас показаны последние сохранённые данные за {analyticsVisiblePeriodLabel}. После готовности они заменятся автоматически.</p></div></div>}
         {analyticsLoading && !analyticsUsesPreviousSnapshot && <div className="notice info"><RefreshCw className="spin" size={20}/><div><strong>Пересчитываю выбранный период</strong><p>Выручка, продажи, возвраты, прибыль, ABC/XYZ и график загружаются заново из сохранённых данных WB.</p></div></div>}
         {analyticsError && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Период не пересчитан</strong><p>{analyticsError}</p></div><button onClick={() => loadAnalyticsData(connection.connectionId,analyticsPeriod,analyticsCompare)}>Повторить</button></div>}

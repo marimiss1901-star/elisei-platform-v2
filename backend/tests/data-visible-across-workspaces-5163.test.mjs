@@ -19,4 +19,4 @@ assert.match(page,/const showingSavedDocuments=Boolean\(!query\.trim\(\) && sele
 assert.match(page,/За выбранный день новых документов нет — архив не скрываем/,
   'the document fallback must be clearly labelled instead of presented as current-period data')
 
-console.log('ELISEI 5.16.3 cross-workspace data visibility regression: OK')
+console.log('ELISEI 5.16.4 cross-workspace data visibility regression: OK')
