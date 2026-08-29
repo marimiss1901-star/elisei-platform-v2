@@ -11,8 +11,16 @@ const summary = {
   cogs:29138,commission:21851,logistics:0,advertising:8907,storage:0,acquiring:0,
   penalties:0,deductions:0,tax:8924,fixed:0,operatingProfit:44139,margin:40.4,
 };
+const negativeSummary = {
+  revenue:740492,orders:403,sales:1104,returns:11,returnRate:1,
+  cogs:291380,commission:201997,logistics:151188,advertising:83091,storage:5180,acquiring:32840,
+  penalties:1947,deductions:0,tax:89246,fixed:0,operatingProfit:-120550,margin:-16.3,
+};
 const financeRows = [
   {nmID:2505,vendorCode:'2505',title:'Удлинитель 3м',revenue:109257,sales:164,returns:4,advertising:8907,commission:21851,logistics:0,acquiring:0,storage:0,expenses:65118,profit:44139,margin:40.4,financeSource:'wb_finance_api'},
+];
+const lossRows = [
+  {nmID:360,vendorCode:'360',title:'Кабель 360',revenue:311647,sales:491,returns:3,advertising:34818,commission:85000,logistics:67000,acquiring:12000,storage:5180,expenses:360000,profit:-48353,margin:-15.5,financeSource:'wb_finance_api'},
 ];
 const baseData = {
   overview:{ok:true,data:{available:true,period,summary,criticalProducts:[],topRecommendations:[{title:'Проверить рекламу 2505'}]}},
@@ -74,5 +82,27 @@ const praise = await ask('Похвали меня по делу: что в ка�
 assert.match(praise.text,/по делу/);
 assert.match(praise.text,/подтвержд/);
 assert.match(praise.text,/выручка|продажи|остатки|реклама/);
+
+const turnaround = await runElAnalyst({
+  message:'Эл пишет что кабинет в минусе. Найди решения, чтобы вытянуть кабинет в плюс, но учитывай жесткую конкуренцию.',
+  history:[],
+  context:{ period,screen:{ period,summary:negativeSummary } },
+  identity:{userId:'u1',userName:'Мария'},
+  personality:{character:'insider',humor:'off',support:true,celebrations:true,address:'informal'},
+  classification:{modules:detectModules('кабинет в минусе вытянуть в плюс жесткая конкуренция',4),reason:'cabinet-question'},
+  dataBridge:{ async getMany(requested) {
+    const data = {
+      finance:{ok:true,data:{available:true,period,summary:negativeSummary,productPnlRows:lossRows,lossMakingProducts:lossRows,missingCostProducts:[]}},
+      advertising:{ok:true,data:{available:true,period,summary:{spend:83091,operatingProfit:-120550,margin:-16.3},advertising:{period,statsAvailable:true,totals:{spend:83091,revenue:740492,orders:1104},campaigns:[{advertId:360,name:'Поиск 360',spend:34818,revenue:311647,orders:491,clicks:900},{advertId:77,name:'Слив бюджета',spend:22000,revenue:0,orders:0,clicks:1200}]},productsWithAds:lossRows}},
+      pricing:{ok:true,data:{available:true,period,lossMakingProducts:lossRows,pricingProducts:lossRows}},
+      procurement:{ok:true,data:{available:true,period,candidates:[],exclusions:lossRows,recommendations:[]}},
+    };
+    return Object.fromEntries(requested.map(module => [module, data[module] || {ok:false,warning:`Нет тестовых данных ${module}`}]));
+  }},
+});
+assert.match(turnaround.text,/кабинет в минусе/);
+assert.match(turnaround.text,/План выхода в плюс/);
+assert.match(turnaround.text,/жестк|конкур/i);
+assert.match(turnaround.text,/Рекламу не выключать всю/);
 
 console.log('ELISEI El chat suggestion regression tests passed');
