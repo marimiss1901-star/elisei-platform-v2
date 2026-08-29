@@ -1597,8 +1597,8 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     if (!analyticsFilteredProducts.length) return notify('По выбранному периоду и фильтрам нет товаров для выгрузки.')
     downloadCsv(
       `elisei_analytics_${analyticsPeriod.from}_${analyticsPeriod.to}`,
-      ['Период с','Период по','Артикул WB','Артикул продавца','Товар','Бренд','Категория','ABC','XYZ','Выручка','Заказы','Продажи','Возвраты','Доля возвратов','Остаток сейчас','Дней запаса','Операционная прибыль','Маржа'],
-      analyticsFilteredProducts.map(row => [analyticsPeriod.from,analyticsPeriod.to,row.nmID,row.vendorCode,row.title,row.brand,row.category,row.abc,row.xyz,row.revenue,row.ordersCount,row.salesCount,row.returnsCount,row.returnRate,row.stock,row.stockCoverDays,row.profit,row.margin]),
+      ['Период с','Период по','Артикул WB','Артикул продавца','Товар','Бренд','Категория','ABC','XYZ','Выручка','Заказы','Продажи','Возвраты','Доля возвратов','Остаток сейчас','Дней запаса','Себестоимость','Комиссия WB','Логистика','Реклама','Эквайринг','Хранение','Платная приёмка','Штрафы','Удержания','Доплаты/компенсации','Налог','Постоянные расходы','Все затраты','Операционная прибыль','Маржа'],
+      analyticsFilteredProducts.map(row => [analyticsPeriod.from,analyticsPeriod.to,row.nmID,row.vendorCode,row.title,row.brand,row.category,row.abc,row.xyz,row.revenue,row.ordersCount,row.salesCount,row.returnsCount,row.returnRate,row.stock,row.stockCoverDays,row.cogs,row.commission,row.logistics,row.advertising,row.acquiring,row.storage,row.acceptance,row.penalties,row.deductions,row.additionalPayment,row.tax,row.fixedExpenses,row.expenses,row.profit,row.margin]),
     )
   }
 
@@ -2124,6 +2124,22 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
             <div><span>Без движения</span><strong>{analyticsSummary.slowStock ?? '—'}</strong><small>нужно решение</small></div>
             <div><span>Возвраты</span><strong>{formatPercent(analyticsSummary.returnRate)}</strong><small>{formatNumber(analyticsSummary.returns)} шт.</small></div>
           </div></div>
+        </div>
+
+        <div className="section-title-row"><div><span>Товарный P&amp;L</span><h2>Деньги по каждому артикулу</h2></div><small>{selectedPeriodLabel}</small></div>
+        <div className="data-table compact-table product-pnl-table"><div className="data-row head product-pnl-row"><span>Товар</span><span>Выручка / продажи</span><span>Реклама</span><span>Комиссия WB</span><span>Логистика</span><span>Эквайринг</span><span>Хранение</span><span>Штрафы / удержания</span><span>Все затраты</span><span>Прибыль</span></div>
+          {analyticsFilteredProducts.length ? analyticsFilteredProducts.map(p => <button className="data-row product-pnl-row product-drill-row" key={`pnl-${p.id}`} onClick={()=>openProduct360(p)}>
+            <span><strong>{p.title}</strong><small>{p.article} · nmID {p.nmID || '—'}{p.brand ? ` · ${p.brand}` : ''}</small></span>
+            <span><strong>{formatMoney(p.revenue)}</strong><small>{formatNumber(p.salesCount)} продаж · {formatNumber(p.returnsCount)} возвратов</small></span>
+            <span>{formatMoney(p.advertising)}<small>{Array.isArray(p.adCampaignIds) && p.adCampaignIds.length ? `${p.adCampaignIds.length} камп.` : p.advertisingSource || ''}</small></span>
+            <span>{formatMoney(p.commission)}<small>{p.financeSource === 'wb_finance_api' ? 'WB финансы' : 'резервный расчёт'}</small></span>
+            <span>{formatMoney(p.logistics)}</span>
+            <span>{formatMoney(p.acquiring)}<small>{p.acquiringSource === 'not_loaded' ? 'ожидает WB' : ''}</small></span>
+            <span>{formatMoney(p.storage)}<small>{p.acceptance ? `приёмка ${formatMoney(p.acceptance)}` : ''}</small></span>
+            <span>{formatMoney(Number(p.penalties || 0)+Number(p.deductions || 0))}<small>{p.additionalPayment ? `доплаты ${formatMoney(p.additionalPayment)}` : ''}</small></span>
+            <span>{formatMoney(p.expenses)}<small>{p.cogs != null ? `себестоимость ${formatMoney(p.cogs)}` : 'нужна себестоимость'}</small></span>
+            <span className={p.profit != null && p.profit < 0 ? 'negative' : 'positive'}><strong>{p.profit == null ? 'Нужна себестоимость' : formatMoney(p.profit)}</strong><small>{p.margin == null ? 'маржа не рассчитана' : `маржа ${formatPercent(p.margin)}`}</small></span>
+          </button>) : <div className="product-empty">По выбранному периоду нет товарных строк для P&amp;L.</div>}
         </div>
 
         <div className="section-title-row"><div><span>ABC/XYZ</span><h2>Приоритет товаров</h2></div><small>{formatNumber(filteredCount)} из {formatNumber(analyticsBaseProducts.length)}</small></div>
