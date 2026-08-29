@@ -2,6 +2,7 @@ import fs from 'node:fs'
 
 const file='src/pages/DashboardPage.jsx'
 let source=fs.readFileSync(file,'utf8')
+if (source.includes('ELISEI_CANONICAL_FRONTEND_PATCHES')) process.exit(0)
 
 function replaceOnce(oldText,newText,label){
   if(source.includes(newText)) return
@@ -12,7 +13,8 @@ function replaceOnce(oldText,newText,label){
 replaceOnce(
 `    const sellerPayableAvailable = financeAvailableForPeriod && (financeMovementsInPeriod > 0 || snapshotFinanceState === 'ready')
     const digitizationMetrics = [`,
-`    const sellerPayableAvailable = financeAvailableForPeriod && (financeMovementsInPeriod > 0 || snapshotFinanceState === 'ready')
+`    const sellerPayableAvailable = Boolean(financeAvailableForPeriod && (financeMovementsInPeriod > 0 || snapshotFinanceState === 'ready' || financeEstimateAvailable))
+    const financeMetricNote = financeEstimateAvailable ? 'предварительно · резервные параметры' : 'финансовая детализация WB'
     const wbBalance = analyticsCore?.finance?.balance && typeof analyticsCore.finance.balance === 'object' ? analyticsCore.finance.balance : null
     const moneyOrNull = value => value === null || value === undefined || value === '' ? null : Number.isFinite(Number(value)) ? Number(value) : null
     const wbCurrentBalance = moneyOrNull(wbBalance?.current)
@@ -23,7 +25,7 @@ replaceOnce(
 
 replaceOnce(
 `      { label:'К перечислению',value:sellerPayableAvailable && !(financePartial && Number(ledgerSummary.sellerPayable || 0) === 0) ? formatMoney(ledgerSummary.sellerPayable || 0) : financeHasAnyProgress ? 'Уточняется…' : 'Ожидается',delta:sellerPayableAvailable ? (financePartial ? 'предварительно · финансы догружаются' : 'подтверждено финансовым реестром WB') : financeHasAnyProgress ? 'часть финансов уже сохранена' : 'ожидаем финансовые данные',tone:'',onClick:'Финансы' },`,
-`      { label:'К перечислению',value:sellerPayableAvailable && !(financePartial && Number(ledgerSummary.sellerPayable || 0) === 0) ? formatMoney(ledgerSummary.sellerPayable || 0) : financeHasAnyProgress ? 'Уточняется…' : 'Ожидается',delta:sellerPayableAvailable ? (financePartial ? 'предварительно · финансы догружаются' : 'подтверждено финансовым реестром WB') : financeHasAnyProgress ? 'часть финансов уже сохранена' : 'ожидаем финансовые данные',tone:'',onClick:'Финансы' },
+`      { label:'К перечислению',value:sellerPayableAvailable ? formatMoney(ledgerSummary.sellerPayable || 0) : financeHasAnyProgress ? 'Уточняется…' : 'Ожидается',delta:financeEstimateAvailable ? 'предварительно по оперативным продажам' : sellerPayableAvailable ? (financePartial ? 'предварительно · финансы догружаются' : 'подтверждено финансовым реестром WB') : financeHasAnyProgress ? 'часть финансов уже сохранена' : 'ожидаем финансовые данные',tone:'',onClick:'Финансы' },
       { label:'Доступно к выводу',value:wbForWithdraw == null ? 'Ожидается' : formatMoney(wbForWithdraw),delta:wbForWithdraw == null ? 'ночной снимок баланса WB ещё не загружен' : \`текущий баланс ${'${wbCurrentBalance == null ? "—" : formatMoney(wbCurrentBalance)}'}${'${wbBalanceUpdatedAt ? ` · ${formatLocalDateTime(wbBalanceUpdatedAt)}` : ""}'}\`,tone:'',onClick:'Финансы' },`,
 'home withdraw metric')
 

@@ -2,6 +2,7 @@ import fs from 'node:fs'
 
 const file='src/pages/DashboardPage.jsx'
 let source=fs.readFileSync(file,'utf8')
+if (source.includes('ELISEI_CANONICAL_FRONTEND_PATCHES')) process.exit(0)
 
 const oldText="  if (preset === '7') return { preset, from:addDays(to,-6), to }"
 const newText="  if (preset === '7') {\n    const completedTo = addDays(to,-1)\n    return { preset, from:addDays(completedTo,-6), to:completedTo }\n  }"

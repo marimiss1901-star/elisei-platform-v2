@@ -2,6 +2,7 @@ import fs from 'node:fs'
 
 const file = 'src/pages/DashboardPage.jsx'
 let source = fs.readFileSync(file, 'utf8')
+if (source.includes('ELISEI_CANONICAL_FRONTEND_PATCHES')) process.exit(0)
 
 function replaceOnce(oldText, newText, label) {
   if (source.includes(newText)) return
@@ -56,9 +57,15 @@ replaceOnce(
     const snapshotFinance = readyCore?.finance?.summary || {}
     const loadedLedgerSummary = financeLedger?.summary || {}
     const coreFinanceSummary = analyticsCore?.finance?.summary || {}
-    const ledgerSummary = Number(snapshotFinance?.movements || 0) > 0
+    const sourceLedgerSummary = Number(snapshotFinance?.movements || 0) > 0
       ? snapshotFinance
       : Number(loadedLedgerSummary?.movements || 0) > 0 ? loadedLedgerSummary : coreFinanceSummary
+    // Statistics sales expose the seller amount before the weekly realization
+    // detail is ready. Keep that safe estimate visible instead of rendering an
+    // empty settlement card for an otherwise fully loaded period.
+    const ledgerSummary = Number(sourceLedgerSummary?.movements || 0) > 0
+      ? sourceLedgerSummary
+      : { ...sourceLedgerSummary,sellerPayable:businessSummary.revenue == null ? 0 : Number(businessSummary.revenue || 0) }
     const periodLabel = \`${'${formatDate(analyticsPeriod.from)}'} — ${'${formatDate(analyticsPeriod.to)}'}\`
     const periodDays = periodDaysBetween(analyticsPeriod)
 `,
@@ -88,7 +95,7 @@ const replacements = [
   ["partial:statePartial(snapshotSalesState,!analyticsAvailability.sales && Boolean(syncStateFor('sales')))", "partial:statePartial(snapshotSalesState,!analyticsAvailability.sales && Boolean(syncStateFor('sales')),persistedAvailability.sales)"],
   ["partial:statePartial(snapshotOrdersState,!analyticsAvailability.orders && Boolean(syncStateFor('orders')))", "partial:statePartial(snapshotOrdersState,!analyticsAvailability.orders && Boolean(syncStateFor('orders')),persistedAvailability.orders)"],
   ["partial:statePartial(snapshotAdvertisingState,!analyticsAvailability.advertising && Boolean(syncStateFor('advertising')))", "partial:statePartial(snapshotAdvertisingState,!analyticsAvailability.advertising && Boolean(syncStateFor('advertising')),persistedAvailability.advertising)"],
-  ["const financeMetricPartial = statePartial(snapshotFinanceState,financePartial)", "const financeMetricPartial = statePartial(snapshotFinanceState,financePartial,persistedAvailability.finance)"],
+  ["const financeMetricPartial = statePartial(snapshotFinanceState,financePartial)", "const financeMetricPartial = Boolean(statePartial(snapshotFinanceState,financePartial,persistedAvailability.finance) || financeEstimateAvailable)"],
 ]
 for (const [oldText,newText] of replacements) {
   if (source.includes(newText)) continue

@@ -8,6 +8,7 @@ export const WB_STREAMS = Object.freeze([
   'sellerStocks',
   'advertising',
   'finance',
+  'balance',
   'paidStorage',
   'acceptance',
   'acquiring',
@@ -31,7 +32,7 @@ export const WB_STREAMS = Object.freeze([
   'chats',
 ])
 
-const OBJECT_STREAMS = new Set(['advertising', 'finance', 'acquiring', 'financeReports', 'acquiringReports', 'fbsArchive', 'measurementPenalties', 'deductionsReport', 'warehouseMeasurements', 'antifraudRetention', 'labelingRetention', 'goodsReturns', 'tariffs', 'funnel', 'documents', 'jamSubscription', 'searchQueries', 'stockHistory', 'reviews', 'questions', 'chats'])
+const OBJECT_STREAMS = new Set(['advertising', 'finance', 'balance', 'acquiring', 'financeReports', 'acquiringReports', 'fbsArchive', 'measurementPenalties', 'deductionsReport', 'warehouseMeasurements', 'antifraudRetention', 'labelingRetention', 'goodsReturns', 'tariffs', 'funnel', 'documents', 'jamSubscription', 'searchQueries', 'stockHistory', 'reviews', 'questions', 'chats'])
 
 function checksum(payload) {
   return crypto.createHash('sha256').update(JSON.stringify(payload ?? null)).digest('hex')
@@ -39,6 +40,7 @@ function checksum(payload) {
 
 export function streamCount(stream, payload) {
   if (stream === 'advertising') return Array.isArray(payload?.campaigns) ? payload.campaigns.length : 0
+  if (stream === 'balance') return payload && (payload.current != null || payload.for_withdraw != null) ? 1 : 0
   if (OBJECT_STREAMS.has(stream)) return Number(payload?.totalRows ?? (Array.isArray(payload?.rows) ? payload.rows.length : 0)) || 0
   return Array.isArray(payload) ? payload.length : 0
 }
@@ -53,6 +55,11 @@ export function normalizeStreamPayload(stream, payload) {
     return payload && typeof payload === 'object' && !Array.isArray(payload)
       ? { rows: [], totals: {}, modeTotals: {}, period: null, balance: null, complete: true, ...payload }
       : { rows: [], totals: {}, modeTotals: {}, period: null, balance: null, complete: true }
+  }
+  if (stream === 'balance') {
+    return payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? { currency:'RUB', current:null, for_withdraw:null, updatedAt:null, complete:true, ...payload }
+      : { currency:'RUB', current:null, for_withdraw:null, updatedAt:null, complete:false }
   }
   if (stream === 'acquiring') {
     return payload && typeof payload === 'object' && !Array.isArray(payload)
@@ -82,7 +89,7 @@ export async function ensureStreamSchema(db) {
     );
     ALTER TABLE wb_stream_data DROP CONSTRAINT IF EXISTS wb_stream_data_stream_check;
     ALTER TABLE wb_stream_data ADD CONSTRAINT wb_stream_data_stream_check
-      CHECK (stream IN ('products','orders','sales','stocks','sellerStocks','advertising','finance','paidStorage','acceptance','acquiring','financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','goodsReturns','tariffs','funnel','documents','jamSubscription','searchQueries','stockHistory','reviews','questions','chats'));
+      CHECK (stream IN ('products','orders','sales','stocks','sellerStocks','advertising','finance','balance','paidStorage','acceptance','acquiring','financeReports','acquiringReports','fbsArchive','measurementPenalties','deductionsReport','warehouseMeasurements','antifraudRetention','labelingRetention','goodsReturns','tariffs','funnel','documents','jamSubscription','searchQueries','stockHistory','reviews','questions','chats'));
     CREATE INDEX IF NOT EXISTS wb_stream_data_updated_idx
       ON wb_stream_data(connection_id, updated_at DESC);
     CREATE TABLE IF NOT EXISTS wb_stream_items (

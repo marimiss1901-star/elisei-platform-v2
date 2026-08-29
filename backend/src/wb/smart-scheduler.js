@@ -4,6 +4,7 @@ const PRIORITY = Object.freeze({
   sales: 20,
   sellerStocks: 30,
   stocks: 35,
+  balance: 38,
   finance: 40,
   advertising: 45,
   funnel: 50,
@@ -40,7 +41,7 @@ const GROUP = Object.freeze({
   deductionsReport:'analytics', warehouseMeasurements:'analytics', antifraudRetention:'analytics',
   labelingRetention:'analytics', goodsReturns:'analytics', funnel:'analytics', searchQueries:'analytics', stockHistory:'analytics',
   advertising:'promotion',
-  finance:'finance', acquiring:'finance', financeReports:'finance', acquiringReports:'finance', jamSubscription:'finance',
+  balance:'finance', finance:'finance', acquiring:'finance', financeReports:'finance', acquiringReports:'finance', jamSubscription:'finance',
   documents:'documents',
   reviews:'feedbacks', questions:'feedbacks', chats:'feedbacks',
 })
