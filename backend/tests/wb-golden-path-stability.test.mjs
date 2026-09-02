@@ -20,7 +20,7 @@ assert.ok(server.includes('expiresAt:Date.now()+5000'),'Canonical WB hydration m
 
 // One browser entry must preserve last-known-good data and avoid duplicate heavy reads.
 assert.ok(dashboard.includes("const raw = localStorage.getItem(key)"),'Workspace last-known-good cache must survive refresh/new tab')
-assert.ok(dashboard.includes("localStorage.getItem(ANALYTICS_COMPARE_KEY) === 'true'"),'Previous-period comparison must be opt-in')
+assert.ok(dashboard.includes("safeGetLocalStorage(ANALYTICS_COMPARE_KEY) === 'true'"),'Previous-period comparison must be opt-in')
 assert.ok(dashboard.includes("const currentResult = await wbApi.core(connectionId,{ from:period.from,to:period.to })"),'Current period core must be loaded before optional comparison')
 assert.ok(dashboard.includes('setCoreData(nextCore)'),'Successful selected-period core must drive the main screen too')
 assert.ok(dashboard.includes("if (active !== 'Финансы'"),'Detailed finance ledger must not load during main-screen bootstrap')
