@@ -58,6 +58,41 @@ assert.match(moneyAds.text,/Кампании, которые сейчас тащ
 assert.match(moneyAds.text,/Поиск 2505/);
 assert.match(moneyAds.text,/ДРР|ROMI/);
 
+const snapshotMoneyAds = await runElAnalyst({
+  message:'Какие рекламы тащат бабки?',
+  history:[],
+  context:{ period,screen:{ period,summary } },
+  identity:{userId:'u1',userName:'Мария'},
+  personality:{character:'insider',humor:'off',support:true,celebrations:true,address:'informal'},
+  classification:{modules:detectModules('Какие рекламы тащат бабки?',4),reason:'cabinet-question'},
+  dataBridge:{ async getMany(requested) {
+    const partialAdvertising = {
+      ok:true,
+      data:{
+        available:true,
+        period,
+        summary:{spend:83091,operatingProfit:-120550,margin:-16.3},
+        advertising:{
+          period:{from:'2026-08-01',to:'2026-08-29'},
+          statsAvailable:false,
+          snapshotFallback:true,
+          totals:{spend:83091,revenue:311647,orders:491},
+          campaigns:[
+            {advertId:360,name:'Поиск 360',spend:34818,revenue:311647,orders:491,clicks:900,statsStatus:'loaded'},
+            {advertId:77,name:'Слив бюджета',spend:22000,revenue:0,orders:0,clicks:1200,statsStatus:'period_not_loaded'},
+          ],
+        },
+        warning:'Точного рекламного среза за выбранный период пока нет; использован последний сохранённый снимок кампаний WB.',
+      },
+    };
+    return Object.fromEntries(requested.map(module => [module, module === 'advertising' ? partialAdvertising : baseData[module] || {ok:false,warning:`Нет тестовых данных ${module}`}]));
+  }},
+});
+assert.match(snapshotMoneyAds.text,/последний сохранённый снимок кампаний/);
+assert.match(snapshotMoneyAds.text,/Кампании, которые сейчас тащат деньги/);
+assert.match(snapshotMoneyAds.text,/Поиск 360/);
+assert.doesNotMatch(snapshotMoneyAds.text,/Данные раздела «Реклама и продвижение» пока недоступны/);
+
 const decision = await ask('Что изменилось за выбранный период, почему и что мне сделать первым?');
 assert.match(decision.text,/Сравнил/);
 assert.match(decision.text,/Одно главное действие/);

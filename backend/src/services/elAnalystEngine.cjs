@@ -317,6 +317,7 @@ function formatAdvertising(data, tone, options = {}) {
   const lines = [
     `Реклама за ${ads.period?.from && ads.period?.to ? `${ads.period.from} — ${ads.period.to}` : periodLabel(data)}: расходы ${money(totals.spend ?? s.spend)}, рекламная выручка ${money(totals.revenue)}, заказы ${number(totals.orders)}, ДРР ${percent(totalDrr)}.`,
   ];
+  if (ads.snapshotFallback) lines.push('Точного рекламного среза за выбранный период пока нет, поэтому беру последний сохранённый снимок кампаний и не выдаю его за полный факт периода.');
   if (!ads.statsAvailable) lines.push('Статистика кампаний WB ещё не загружена полностью — выводы по эффективности ограничены.');
   if (asksWinners) {
     if (winners.length) {

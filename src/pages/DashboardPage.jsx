@@ -129,6 +129,14 @@ function readStoredJson(key, fallback) {
   } catch { return fallback }
 }
 
+function safeGetLocalStorage(key, fallback = '') {
+  try {
+    return localStorage.getItem(key) || fallback
+  } catch {
+    return fallback
+  }
+}
+
 function safeSetLocalStorage(key, value) {
   try {
     if (value == null) localStorage.removeItem(key)
@@ -144,7 +152,7 @@ function pruneOldElMessageStorage(keepKey = '') {
     const keys = []
     for (let index = 0; index < localStorage.length; index += 1) {
       const key = localStorage.key(index)
-      if (key?.startsWith(EL_CHAT_MESSAGES_KEY) && key !== keepKey) keys.push(key)
+      if ((key?.startsWith(EL_CHAT_MESSAGES_KEY) && key !== keepKey) || key?.startsWith('elisei_read_cache_v1:')) keys.push(key)
     }
     keys.forEach(key => localStorage.removeItem(key))
   } catch { /* browser storage is best-effort */ }
@@ -180,6 +188,7 @@ function writeElMessagesStorage(key, messages) {
     normalized.slice(-24),
     normalized.slice(-12).map(item => ({ ...item, text:item.text.slice(0,900), sources:[], grounding:null })),
     normalized.slice(-4).map(item => ({ role:item.role, text:item.text.slice(0,500), createdAt:item.createdAt })),
+    normalized.slice(-2).map(item => ({ role:item.role, text:item.text.slice(0,240), createdAt:item.createdAt })),
   ]
   for (const rows of attempts) {
     if (safeSetLocalStorage(key, JSON.stringify(rows))) return true
@@ -637,7 +646,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const [uiTheme, setUiTheme] = useState(readStoredTheme)
   const [chat, setChat] = useState('')
   const [chatBusy, setChatBusy] = useState(false)
-  const [elConversationId, setElConversationId] = useState(() => localStorage.getItem(elConversationStorageKey) || createElConversationId())
+  const [elConversationId, setElConversationId] = useState(() => safeGetLocalStorage(elConversationStorageKey) || createElConversationId())
   const [elSettings, setElSettings] = useState(() => normalizeElSettings(readStoredJson(elSettingsStorageKey, {})))
   const preferredElName = elSettings.preferredName || displayName
   const preferredProfileInitial = preferredElName ? preferredElName.slice(0,1).toUpperCase() : profileInitial
@@ -646,7 +655,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const [elProfileSaving, setElProfileSaving] = useState(false)
   const [showElPersonality, setShowElPersonality] = useState(false)
   const [elMood, setElMood] = useState('happy')
-  const [elMode, setElMode] = useState(() => localStorage.getItem(elModeStorageKey) || 'analyst')
+  const [elMode, setElMode] = useState(() => safeGetLocalStorage(elModeStorageKey, 'analyst') || 'analyst')
   const [messages, setMessages] = useState(() => {
     const stored = readStoredJson(elMessagesStorageKey, [])
     const storedSettings = normalizeElSettings(readStoredJson(elSettingsStorageKey, {}))
@@ -680,7 +689,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const [analyticsError, setAnalyticsError] = useState('')
   const [analyticsPeriod, setAnalyticsPeriod] = useState(() => normalizeAnalyticsPeriod(readStoredJson(ANALYTICS_PERIOD_KEY, null)))
   const [analyticsPeriodDraft, setAnalyticsPeriodDraft] = useState(analyticsPeriod)
-  const [analyticsCompare, setAnalyticsCompare] = useState(() => localStorage.getItem(ANALYTICS_COMPARE_KEY) === 'true')
+  const [analyticsCompare, setAnalyticsCompare] = useState(() => safeGetLocalStorage(ANALYTICS_COMPARE_KEY) === 'true')
   const [analyticsBrand, setAnalyticsBrand] = useState('Все')
   const [analyticsCategory, setAnalyticsCategory] = useState('Все')
   const [analyticsAbc, setAnalyticsAbc] = useState('Все')
