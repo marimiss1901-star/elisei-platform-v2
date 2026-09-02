@@ -126,6 +126,10 @@ export function normalizeFinanceLedgerRows(stream, row = {}, sourceRowKey = '', 
   if (stream === 'finance') {
     const sign = rowSign(row)
     const mode = id.fulfillmentMode || 'FBO'
+    // Realization rows without an explicit warehouse marker are WB-warehouse
+    // operations (FBO). Persist the resolved mode on every generated movement;
+    // previously it was used only in the label, leaving FBS/FBO filters empty.
+    base.fulfillmentMode = mode
     const gross = sign * Math.abs(money(row,['retailAmount','retail_amount','retailPriceWithDiscRub','retail_price_withdisc_rub','retailPriceWithDisc'],0))
     const sellerPayable = sign * Math.abs(money(row,['forPay','for_pay','ppvzForPay','ppvz_for_pay'],0))
     const vw = money(row,['vw','ppvzVw','ppvz_vw'],Number.NaN)

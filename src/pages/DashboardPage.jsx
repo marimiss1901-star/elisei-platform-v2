@@ -2479,13 +2479,15 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const ledgerRows = Array.isArray(ledger.rows) ? ledger.rows : []
     const rawLedgerSummary = ledger.summary || {}
     const ledgerHasMovements = Number(rawLedgerSummary.movements || 0) > 0
-    const financeEstimateAvailable = Boolean(!ledgerHasMovements && basePeriodFinanceSummary.revenue != null)
+    const financeScopeFiltered = ['fbs','fbo','penalties','compensations','subscriptions','promotionCharges'].includes(financeTab) || Boolean(financeProductNeedle)
+    const financeScopeLabel = ({ fbs:'FBS',fbo:'FBO',penalties:'Удержания и штрафы',compensations:'Компенсации',subscriptions:'Подписки и Джем',promotionCharges:'Списания рекламы' })[financeTab] || 'выбранному фильтру'
+    const financeEstimateAvailable = Boolean(!ledgerHasMovements && !financeScopeFiltered && basePeriodFinanceSummary.revenue != null)
     const provisionalWbExpenses = [
       basePeriodFinanceSummary.commission,basePeriodFinanceSummary.logistics,basePeriodFinanceSummary.storage,
       basePeriodFinanceSummary.acceptance,basePeriodFinanceSummary.acquiring,basePeriodFinanceSummary.penalties,
       basePeriodFinanceSummary.deductions,
     ].reduce((total,value)=>total+Number(value || 0),0)
-    const ledgerSummary = ledgerHasMovements ? rawLedgerSummary : {
+    const ledgerSummary = ledgerHasMovements || financeScopeFiltered ? rawLedgerSummary : {
       ...rawLedgerSummary,
       sellerPayable:Number(basePeriodFinanceSummary.revenue || 0),
       expenses:provisionalWbExpenses,
@@ -2501,7 +2503,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const selectedPeriodCovered = Boolean(ledger.coverage?.selectedPeriod?.covered)
     const financeReady = Boolean(ledgerHasMovements || selectedPeriodCovered || (!ledger.coverage?.selectedPeriod && (ledger.coverage?.financeReady || coreData?.availability?.finance)))
     const financePartial = Boolean(ledger.coverage?.financePartial)
-    const financeEvidenceMissing = Number(basePeriodFinanceSummary?.revenue || 0) > 0 && !ledgerHasMovements
+    const financeEvidenceMissing = !financeScopeFiltered && Number(basePeriodFinanceSummary?.revenue || 0) > 0 && !ledgerHasMovements
     const financeComplete = financeReady && !financePartial && !financeEvidenceMissing
     const ledgerAmount = (key, fallbackKey = key) => {
       if (ledgerHasMovements) {
@@ -2578,14 +2580,16 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
       if (item.vendorCode) productMap.set(`vendor:${item.vendorCode}`,item)
     })
     const titleForLedger = row => productMap.get(`nm:${row.nmId}`)?.title || productMap.get(`vendor:${row.vendorCode}`)?.title || 'Финансовая операция'
-    const statusText = financeComplete
+    const statusText = financeScopeFiltered && !ledgerHasMovements
+      ? `По фильтру «${financeScopeLabel}» подтверждённых операций пока нет. Итоги всего кабинета сюда не подставляются.`
+      : financeComplete
       ? `Финансовая детализация WB завершена. ${formatNumber(ledgerSummary.movements || 0)} движений за ${formatDate(analyticsPeriod.from)} — ${formatDate(analyticsPeriod.to)}.`
       : financeReady
         ? `Финансовая детализация загружается частями. Уже подтверждено ${formatNumber(ledgerSummary.movements || 0)} движений; отсутствующие суммы до завершения не считаются нулём.`
         : financeEstimateAvailable
           ? 'Показан предварительный P&L по оперативным продажам и резервным параметрам. После получения детализации WB ELISEI автоматически заменит оценки подтверждёнными суммами.'
           : 'Финансовый отчёт WB ещё не начат или не сохранил первую страницу. Нули не считаются подтверждёнными.'
-    const financeValue = value => financeComplete || ledgerHasMovements || financeEstimateAvailable || Number(value || 0) !== 0 ? formatMoney(value) : 'Ожидает WB'
+    const financeValue = value => financeScopeFiltered && !ledgerHasMovements ? 'Нет операций' : financeComplete || ledgerHasMovements || financeEstimateAvailable || Number(value || 0) !== 0 ? formatMoney(value) : 'Ожидает WB'
     const reportNumber = (row, aliases = []) => {
       for (const key of aliases) {
         const value = Number(String(row?.[key] ?? '').replace(',','.'))

@@ -11,7 +11,7 @@ assert.match(source,/showProvisionalZero:financeEstimateAvailable/,
   'a valid provisional zero must remain visible instead of becoming “Уточняется”')
 assert.match(source,/предварительно по оперативным продажам/,
   'seller payable fallback must be visibly marked as provisional')
-assert.match(source,/const financeEstimateAvailable = Boolean\(!ledgerHasMovements && basePeriodFinanceSummary\.revenue != null\)/,
+assert.match(source,/const financeEstimateAvailable = Boolean\(!ledgerHasMovements && !financeScopeFiltered && basePeriodFinanceSummary\.revenue != null\)/,
   'Finance page must calculate a provisional P&L while the WB ledger is not closed')
 assert.match(source,/financeEstimateAvailable \? 'Предварительный расчёт доступен'/,
   'Finance page must explain that its reserve calculation is provisional')
