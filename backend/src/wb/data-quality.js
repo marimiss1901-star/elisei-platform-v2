@@ -211,6 +211,51 @@ function severityRank(value){ return ({critical:0,warning:1,info:2})[value] ?? 3
 
 function issue(id,severity,title,text,action,stage=null,extra={}){ return {id,severity,title,text,action,stage,...extra} }
 
+function clientReadinessStatus({byStage={},finance={},productDiagnostics={},score=0}={}) {
+  const stageUsable = stage => ['ready','stale','partial'].includes(String(byStage?.[stage]?.status || '')) && Number(byStage?.[stage]?.rowCount || 0) > 0
+  const operationalReady = stageUsable('orders') && stageUsable('sales')
+  const financeReady = Number(finance?.movements || 0) > 0
+  const advertisingReady = stageUsable('advertising')
+  const stocksReady = ['ready','stale','partial'].includes(String(byStage?.stocks?.status || '')) || ['ready','stale','partial'].includes(String(byStage?.sellerStocks?.status || ''))
+  const products = Number(productDiagnostics?.products || 0)
+  const mapped = Number(productDiagnostics?.withMappedStock || 0)
+  const stockMappingRatio = products > 0 ? mapped / products : null
+  const blockers = []
+  if (!operationalReady) blockers.push('продажи и заказы ещё не дают рабочую динамику')
+  if (!financeReady) blockers.push('финансовый реестр не подтверждает прибыль')
+  if (!advertisingReady) blockers.push('реклама не даёт ответ по кампаниям')
+  if (stockMappingRatio != null && stockMappingRatio < .75) blockers.push('не все остатки сопоставлены с карточками')
+
+  const status = operationalReady && financeReady && score >= 82
+    ? 'business_ready'
+    : operationalReady && (financeReady || advertisingReady || stocksReady)
+      ? 'usable_snapshot'
+      : 'loading_core'
+  const label = status === 'business_ready'
+    ? 'Кабинет готов для рабочих решений'
+    : status === 'usable_snapshot'
+      ? 'Рабочий снимок доступен, точность растёт'
+      : 'Кабинет собирает базовую картину'
+  const text = status === 'business_ready'
+    ? 'Клиент может смотреть продажи, расходы, P&L и товарные сигналы без ожидания новых запросов WB.'
+    : status === 'usable_snapshot'
+      ? 'Показываем последние сохранённые цифры сразу; фоновые потоки заменят их, когда данные станут точнее.'
+      : 'ELISEI не должен показывать ложные нули: сначала нужны продажи/заказы, затем финансы и реклама.'
+
+  return {
+    status,label,text,
+    score,
+    canShowDashboard:operationalReady || financeReady || stocksReady,
+    canAnswerEl:operationalReady || financeReady || advertisingReady,
+    financeReady,
+    advertisingReady,
+    stocksReady,
+    operationalReady,
+    stockMappingRatio,
+    blockers:blockers.slice(0,4),
+  }
+}
+
 function financeCheck(financeSummary = {},financeStream,requested) {
   const movements=Number(financeSummary.movements||0)
   const difference=Number(financeSummary.reconciliationDifference||0)
@@ -285,10 +330,11 @@ export function buildDataQualityReport({states=[],streamRows=[],requestedPeriod=
       : {status:'unavailable',label:'Прибыль ожидает данные',text:'До загрузки финансового реестра итог не подменяется нулём.'}
 
   const overall=criticalCount>0?'critical':warningCount>0||score<90?'warning':'healthy'
+  const competitiveReadiness=clientReadinessStatus({byStage,finance,productDiagnostics,score})
   return {
     generatedAt:new Date(now).toISOString(),requestedPeriod:requested,score,overall,
     summary:{ready:readyCount,partial:partialCount,critical:criticalCount,warnings:warningCount,total:stages.length},
-    confirmedPeriod,profitConfidence,finance,
+    confirmedPeriod,profitConfidence,finance,competitiveReadiness,
     productDiagnostics:{products,withBarcodes,withMappedStock,barcodeRatio,stockMappingRatio,missingBarcodesCount,unmatchedStockCount,missingBarcodes,unmatchedStock},
     streams:stages,
     issues:issues.sort((a,b)=>severityRank(a.severity)-severityRank(b.severity)||a.title.localeCompare(b.title,'ru')),

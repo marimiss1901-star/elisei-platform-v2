@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import { buildDataQualityReport, extractStreamCoverage } from '../src/wb/data-quality.js'
 
 const now=new Date('2026-08-04T14:38:00Z').getTime()
@@ -62,5 +63,16 @@ assert.equal(report.productDiagnostics.unmatchedStock.length,1)
 assert.equal(report.productDiagnostics.unmatchedStockCount,1)
 assert.equal(report.productDiagnostics.missingBarcodes.length,1)
 assert.equal(report.productDiagnostics.missingBarcodesCount,1)
+assert.equal(report.competitiveReadiness.status,'usable_snapshot')
+assert.equal(report.competitiveReadiness.canShowDashboard,true)
+assert.equal(report.competitiveReadiness.canAnswerEl,true)
+assert.equal(report.competitiveReadiness.financeReady,true)
+assert.equal(report.competitiveReadiness.blockers.includes('реклама не даёт ответ по кампаниям'),true)
+
+const frontend=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')
+const styles=fs.readFileSync(new URL('../../src/styles/app.css',import.meta.url),'utf8')
+assert.match(frontend,/Клиентский режим/)
+assert.match(frontend,/competitiveReadiness\.label/)
+assert.match(styles,/quality-client-readiness/)
 
 console.log('wb-data-quality-592: ok')

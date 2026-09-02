@@ -3122,6 +3122,20 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
         <div><span>Критично</span><strong>{dataQuality ? formatNumber(dataQuality?.summary?.critical ?? 0) : '—'}</strong></div>
         <div><span>Предупреждения</span><strong>{dataQuality ? formatNumber(dataQuality?.summary?.warnings ?? 0) : '—'}</strong></div>
       </div>
+      {dataQuality?.competitiveReadiness && <div className={`quality-client-readiness ${dataQuality.competitiveReadiness.status}`}>
+        <div>
+          <span>Клиентский режим</span>
+          <strong>{dataQuality.competitiveReadiness.label}</strong>
+          <p>{dataQuality.competitiveReadiness.text}</p>
+        </div>
+        <div className="quality-client-flags">
+          <b className={dataQuality.competitiveReadiness.operationalReady?'ok':'wait'}>продажи</b>
+          <b className={dataQuality.competitiveReadiness.financeReady?'ok':'wait'}>финансы</b>
+          <b className={dataQuality.competitiveReadiness.advertisingReady?'ok':'wait'}>реклама</b>
+          <b className={dataQuality.competitiveReadiness.stocksReady?'ok':'wait'}>остатки</b>
+        </div>
+        {dataQuality.competitiveReadiness.blockers?.length > 0 && <small>{dataQuality.competitiveReadiness.blockers.join(' · ')}</small>}
+      </div>}
       <div className="quality-tabs">
         <button className={qualityView==='problems'?'active':''} onClick={()=>setQualityView('problems')}>Проблемы и действия</button>
         <button className={qualityView==='streams'?'active':''} onClick={()=>setQualityView('streams')}>Паспорта потоков</button>
