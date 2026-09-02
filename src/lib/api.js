@@ -268,7 +268,14 @@ export const wbApi = {
       ...(params?.to ? { to:String(params.to).slice(0,10) } : {}),
     }
     const suffix = querySuffix(clean)
-    return cachedRead(`core:${connectionId}:${clean.from || 'all'}:${clean.to || 'all'}`, `/api/wb/core/${encodeURIComponent(connectionId)}${suffix}`)
+    // A cold period miss builds and persists a server-side mart. Keep that first
+    // request alive long enough to finish instead of aborting at the generic
+    // 15-second GET limit; subsequent reads are served from the mart quickly.
+    return cachedRead(
+      `core:${connectionId}:${clean.from || 'all'}:${clean.to || 'all'}`,
+      `/api/wb/core/${encodeURIComponent(connectionId)}${suffix}`,
+      { signal:AbortSignal.timeout(110000) },
+    )
   },
   product360: (connectionId, productKey, params = {}) => {
     const query = new URLSearchParams({ productKey:String(productKey || '') })
