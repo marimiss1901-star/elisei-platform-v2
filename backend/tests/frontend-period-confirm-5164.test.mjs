@@ -17,7 +17,7 @@ assert.match(source,/Применить период/,
   'all full period controls must expose an explicit apply button')
 assert.match(source,/Период выбран, но ещё не применён/,
   'the UI must explain why the previously applied figures remain visible')
-assert.match(source,/localStorage\.setItem\(ANALYTICS_PERIOD_KEY, JSON\.stringify\(analyticsPeriod\)\)/,
-  'only the applied period may be persisted for the next login')
+assert.match(source,/writeSessionJson\(ANALYTICS_PERIOD_KEY, analyticsPeriod\)/,
+  'only the applied period may be persisted for the next login through quota-safe storage')
 
 console.log('ELISEI 5.16.4 explicit period confirmation regression: OK')
