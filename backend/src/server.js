@@ -546,11 +546,14 @@ const backgroundWorkerState = {
   lastError: null,
 }
 
+const foregroundReadState = { active:0 }
+
 function kickBackgroundWorkers(reason = 'timer') {
   // The HTTP server comes up before PostgreSQL initialization completes. Do not
   // let an open browser tab consume the second pool connection while schema
   // checks or a database restart are still in progress; login must stay first.
   if (!pool || !databaseState.ready) return Promise.resolve(false)
+  if (foregroundReadState.active > 0 && ['timer','interval'].includes(String(reason || ''))) return Promise.resolve(false)
   if (backgroundWorkerState.running && backgroundWorkerState.promise) return backgroundWorkerState.promise
   backgroundWorkerState.running = true
   backgroundWorkerState.lastStartedAt = new Date().toISOString()
@@ -592,6 +595,22 @@ app.use('/api', (req, res, next) => {
   // databaseState is observability only. Never reject every API request merely
   // because one background probe is degraded. The route performs the real query;
   // db-resilience-preload converts an actual transient PostgreSQL failure to 503.
+  next()
+})
+
+// Foreground analytics wins over the periodic worker on a small PostgreSQL
+// pool. Existing work is allowed to finish; no new interval cycle starts while
+// a user is waiting for a period mart.
+app.use('/api/wb/core/:id', (req,res,next) => {
+  foregroundReadState.active += 1
+  let released=false
+  const release=() => {
+    if (released) return
+    released=true
+    foregroundReadState.active=Math.max(0,foregroundReadState.active-1)
+  }
+  res.once('finish',release)
+  res.once('close',release)
   next()
 })
 
