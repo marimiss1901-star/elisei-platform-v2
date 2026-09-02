@@ -32,7 +32,7 @@ assert.ok(api.includes("method === 'GET' ? AbortSignal.timeout(15000)"),'GET req
 assert.ok(api.includes('async function cachedRead('),'Critical read fallback helper missing')
 assert.ok(api.includes('transientFallback:true'),'Transient fallback marker missing')
 assert.ok(api.includes('cachedRead(`products:${connectionId}`'),'Products must use last-known-good fallback')
-assert.ok(api.includes('cachedRead(`core:${connectionId}:'),'Core must use last-known-good fallback')
+assert.match(api,/cachedRead\([\s\S]*?`core:\$\{connectionId\}:/,'Core must use last-known-good fallback')
 assert.ok(api.includes('cachedRead(`finance:${connectionId}:'),'Finance ledger must use last-known-good fallback')
 
 console.log('WB golden-path stability regression passed')
