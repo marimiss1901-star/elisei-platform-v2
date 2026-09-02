@@ -10,7 +10,7 @@ const styles = fs.readFileSync(new URL('../../src/styles/app.css', import.meta.u
 for (const marker of [
   'function boundedSyncPeriod',
   "if (stage==='stockHistory') return boundedSyncPeriod(range,90)",
-  "if (stage==='advertising') return boundedSyncPeriod(range,31)",
+  "if (stage==='advertising') return boundedSyncPeriod(range,92)",
   "if (stage==='searchQueries') return boundedSyncPeriod(range,365)",
   "allRequestedStages.filter(item => ['orders','sales','advertising','searchQueries','stockHistory','finance','acquiring','documents'].includes(item))",
   'function extendedSqlFilter',
@@ -30,7 +30,7 @@ for (const marker of [
 
 for (const marker of [
   'renderSharedPeriodControls',
-  "['Главная','Аналитика','Остатки','Финансы'].includes(active)",
+  "['Главная','Аналитика','Остатки','Финансы','Налоговая'].includes(active)",
   "active !== 'Реклама'",
   'period={analyticsPeriod}',
   'query={query} onQueryChange={setQuery}',

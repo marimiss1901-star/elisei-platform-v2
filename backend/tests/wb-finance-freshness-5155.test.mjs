@@ -16,7 +16,7 @@ for(const marker of [
   'financePeriodTo<targetDate',
   'financePayload?.complete!==true',
   "console.log('[ELISEI 5.15.5] Finance freshness repair queued:'",
-  'nightlyReadyVersion:2',
+  'nightlyReadyVersion:3',
 ]) assert.ok(server.includes(marker),`server.js must contain ${marker}`)
 
 console.log('ELISEI 5.15.5 finance freshness regression: OK')
