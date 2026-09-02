@@ -747,6 +747,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const analyticsRequestRef = useRef(0)
   const analyticsPeriodKeyRef = useRef('')
   const analyticsRetryRef = useRef(new Map())
+  const analyticsWarmRef = useRef(new Set())
   const historicalSyncRef = useRef(new Set())
   const lastBusinessSectionRef = useRef('Главная')
 
@@ -1012,6 +1013,25 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     setAdvertisingCoverage(result.coverage || null)
   }
 
+  const warmCommonAnalyticsPeriods = async (connectionId, selectedPeriod) => {
+    if (!connectionId) return
+    const revisionKey = `${connectionId}:${connectionRef.current.lastSync || 'initial'}:${isoLocalDate(new Date())}`
+    if (analyticsWarmRef.current.has(revisionKey)) return
+    analyticsWarmRef.current.add(revisionKey)
+    const selectedKey = `${selectedPeriod?.from || ''}:${selectedPeriod?.to || ''}`
+    const periods = ['yesterday','7','30','month']
+      .map(periodPresetValue)
+      .filter(period => `${period.from}:${period.to}` !== selectedKey)
+      .filter((period,index,rows) => rows.findIndex(item => item.from === period.from && item.to === period.to) === index)
+    for (const period of periods) {
+      if (document.visibilityState === 'hidden' || connectionRef.current.connectionId !== connectionId) break
+      await new Promise(resolve => window.setTimeout(resolve,1500))
+      try {
+        await wbApi.core(connectionId,{ from:period.from,to:period.to,warm:true })
+      } catch { /* background warming is best-effort; foreground reads keep their own retry path */ }
+    }
+  }
+
   const loadAnalyticsData = async (connectionId, period = analyticsPeriod, compare = analyticsCompare) => {
     if (!connectionId || !period?.from || !period?.to) return
     const requestId = ++analyticsRequestRef.current
@@ -1062,6 +1082,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
         setAnalyticsVisiblePeriod(period)
         analyticsPeriodKeyRef.current = cacheKey
         writeAnalyticsCache(connectionId,period,{ core:nextCore,compareCore:cached?.compareCore || null })
+        void warmCommonAnalyticsPeriods(connectionId,period)
       }
       if (compare && nextCore) {
         const previous = previousPeriodFor(period)

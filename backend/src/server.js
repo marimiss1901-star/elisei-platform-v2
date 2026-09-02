@@ -602,6 +602,7 @@ app.use('/api', (req, res, next) => {
 // pool. Existing work is allowed to finish; no new interval cycle starts while
 // a user is waiting for a period mart.
 app.use('/api/wb/core/:id', (req,res,next) => {
+  if (String(req.query?.warm || '') === '1') return next()
   foregroundReadState.active += 1
   let released=false
   const release=() => {

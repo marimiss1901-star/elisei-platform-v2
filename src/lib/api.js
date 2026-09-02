@@ -266,6 +266,7 @@ export const wbApi = {
     const clean = {
       ...(params?.from ? { from:String(params.from).slice(0,10) } : {}),
       ...(params?.to ? { to:String(params.to).slice(0,10) } : {}),
+      ...(params?.warm ? { warm:'1' } : {}),
     }
     const suffix = querySuffix(clean)
     // A cold period miss builds and persists a server-side mart. Keep that first
