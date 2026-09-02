@@ -61,6 +61,7 @@ import {
 import { buildElEngagementData } from './services/elEngagement.js'
 import elDecisionEngine from './services/elDecisionEngine.cjs'
 import { loadCurrentWbStocks } from './wb/current-stocks.js'
+import { ensureCoreMartSchema, coreMartRevision, loadCoreMart, saveCoreMart } from './wb/core-mart.js'
 
 const { buildDecisionAnalysis, previousEqualPeriod } = elDecisionEngine
 
@@ -809,6 +810,7 @@ async function initDatabase() {
   await ensureStreamSchema(pool)
   await ensureFinanceLedgerSchema(pool)
   await ensureDailyReadySchema()
+  await ensureCoreMartSchema(pool)
   await migrateLegacyWbTokens()
   await ensurePrimaryTokens()
   await migrateAutomaticRefreshSettings()
@@ -6796,11 +6798,23 @@ app.get('/api/wb/dashboard/:id', authRequired, async (req, res) => {
 app.get('/api/wb/core/:id', authRequired, async (req, res) => {
   const connection = await getConnection(req.auth.sub, req.params.id)
   if (!connection) return res.status(404).json({ error: 'Подключение не найдено' })
-  const [{ data, sources, recovered, recoveryQueued }, settings] = await Promise.all([
-    canonicalConnectionData(connection),
-    getBusinessSettings(req.auth.sub),
-  ])
   const range = analyticsPeriodRange(req.query)
+  const [settings,states] = await Promise.all([
+    getBusinessSettings(req.auth.sub),
+    range ? getSyncStates(connection.id) : Promise.resolve([]),
+  ])
+  const martRevision = range ? coreMartRevision(states,settings) : ''
+  const cachedMart = range ? await loadCoreMart(pool,{
+    connectionId:connection.id,from:range.from,to:range.to,revision:martRevision,
+  }) : null
+  if (cachedMart?.payload) {
+    res.setHeader('Server-Timing','elisei-core-mart;desc="hit";dur=0')
+    return res.json({
+      ...cachedMart.payload,
+      mart:{ hit:true,source:'wb_core_marts',generatedAt:cachedMart.generated_at || null,revision:martRevision },
+    })
+  }
+  const { data, sources, recovered, recoveryQueued } = await canonicalConnectionData(connection)
   const ledgerFinanceRows = range
     ? await queryFinanceCoreRows(pool,{ connectionId:connection.id,from:range.from,to:range.to })
     : []
@@ -6831,12 +6845,19 @@ app.get('/api/wb/core/:id', authRequired, async (req, res) => {
       selectedPeriod:{from:range.from,to:range.to,covered:periodCovered},
     }
   }
-  res.json({
+  const payload = {
     core,
     period:range ? { from:range.from, to:range.to, days:range.days } : null,
     financeSource:ledgerFinanceRows.length ? { source:'wb_finance_ledger',rows:ledgerFinanceRows.length } : { source:'stream_snapshot',rows:0 },
     dataSources:sources, recovered, recoveryQueued, lastSync: connection.last_sync_at || null,
-  })
+  }
+  if (range) {
+    await saveCoreMart(pool,{
+      connectionId:connection.id,from:range.from,to:range.to,revision:martRevision,payload,
+    }).catch(error=>console.warn('WB core mart save failed:',error.message))
+  }
+  res.setHeader('Server-Timing','elisei-core-mart;desc="miss"')
+  res.json({ ...payload, mart:{ hit:false,source:'computed',revision:martRevision || null } })
 })
 
 
