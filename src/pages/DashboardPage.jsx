@@ -746,6 +746,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
   const syncRevisionRef = useRef('')
   const analyticsRequestRef = useRef(0)
   const analyticsPeriodKeyRef = useRef('')
+  const analyticsRetryRef = useRef(new Map())
   const historicalSyncRef = useRef(new Set())
   const lastBusinessSectionRef = useRef('Главная')
 
@@ -1052,6 +1053,9 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
         return
       }
       if (nextCore) {
+        const pendingRetry = analyticsRetryRef.current.get(cacheKey)
+        if (pendingRetry?.timer) window.clearTimeout(pendingRetry.timer)
+        analyticsRetryRef.current.delete(cacheKey)
         setAnalyticsCore(nextCore)
         setCoreData(nextCore)
         if (previousKey !== cacheKey) setAnalyticsCompareCore(null)
@@ -1082,7 +1086,23 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
         setAnalyticsVisiblePeriod(current => current || cached.period || period)
         analyticsPeriodKeyRef.current = cacheKey
       }
-      setAnalyticsError(error.message || 'Не удалось пересчитать аналитику за выбранный период. Показываем последние подтверждённые данные.')
+      const transient = ['REQUEST_TIMEOUT','BACKEND_UNAVAILABLE','DATABASE_RECONNECTING'].includes(String(error?.code || '')) || Number(error?.status || 0) >= 500
+      const retryState = analyticsRetryRef.current.get(cacheKey) || { attempt:0,timer:null }
+      if (transient && retryState.attempt < 4) {
+        const attempt = retryState.attempt+1
+        const delay = [7000,12000,20000,30000][attempt-1]
+        if (retryState.timer) window.clearTimeout(retryState.timer)
+        const timer = window.setTimeout(() => {
+          const current = connectionRef.current
+          if (!current?.connectionId || current.connectionId !== connectionId) return
+          loadAnalyticsData(connectionId,period,compare).catch(()=>{})
+        },delay)
+        analyticsRetryRef.current.set(cacheKey,{attempt,timer})
+        setAnalyticsError(`Новый период готовится на сервере. Цифры сохранены — ELISEI автоматически проверит готовность через ${Math.ceil(delay/1000)} сек., повторно нажимать не нужно.`)
+      } else {
+        analyticsRetryRef.current.delete(cacheKey)
+        setAnalyticsError(error.message || 'Не удалось пересчитать аналитику за выбранный период. Показываем последние подтверждённые данные.')
+      }
     } finally {
       if (requestId === analyticsRequestRef.current) setAnalyticsLoading(false)
     }
