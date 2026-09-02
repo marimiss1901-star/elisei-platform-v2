@@ -2089,6 +2089,16 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const homeMargin = homeOperatingProfit != null && Number(businessSummary.revenue || 0) > 0
       ? homeOperatingProfit/Number(businessSummary.revenue)*100
       : businessSummary.margin
+    const profitAuditReady = homeOperatingProfit != null && businessSummary.revenue != null && businessSummary.cogs != null && homeWbExpenses != null && homeAdvertising != null
+    const profitAuditRows = profitAuditReady ? [
+      ['Выручка',Number(businessSummary.revenue || 0),'plus'],
+      ['Себестоимость',Number(businessSummary.cogs || 0),'minus'],
+      ['Все расходы WB',Number(homeWbExpenses || 0),'minus'],
+      ['Реклама',Number(homeAdvertising || 0),'minus'],
+      ['Налог',Number(businessSummary.tax || 0),'minus'],
+      ['Постоянные',Number(businessSummary.fixed || 0),'minus'],
+      ['Доплаты / компенсации',Number(ledgerSummary.compensations || 0),'plus'],
+    ] : []
     const stateAvailable = (name, fallback) => snapshotMode ? ['ready','partial'].includes(name) || Boolean(fallback) : Boolean(fallback)
     const statePartial = (name, fallback, persistedReady = false) => snapshotMode ? name === 'partial' && !Boolean(persistedReady) : Boolean(fallback)
     const metric = (label,value,current,previous,{ money=true,lowerIsBetter=false,note='',onClick='Аналитика',available=true,partial=false,showProvisionalZero=false }={}) => {
@@ -2116,6 +2126,7 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
     const financeMetricNote = financeEstimateAvailable ? 'предварительно · резервные параметры' : 'финансовая детализация WB'
     const wbBalance = analyticsCore?.finance?.balance && typeof analyticsCore.finance.balance === 'object' ? analyticsCore.finance.balance : null
     const moneyOrNull = value => value === null || value === undefined || value === '' ? null : Number.isFinite(Number(value)) ? Number(value) : null
+    const reconciliationDifference = moneyOrNull(ledgerSummary.reconciliationDifference)
     const wbCurrentBalance = moneyOrNull(wbBalance?.current)
     const wbForWithdraw = moneyOrNull(wbBalance?.for_withdraw)
     const wbBalanceUpdatedAt = wbBalance?.updatedAt || wbBalance?.updated_at || null
@@ -2195,6 +2206,11 @@ export default function DashboardPage({ onNavigate, onLogout, user, onUserUpdate
           {analyticsLoading ? <RefreshCw className="spin" size={20}/> : <AlertTriangle size={20}/>}<span><strong>{analyticsLoading ? 'Новый период пересчитывается — цифры не скрываем' : 'Новый период пока не пересчитан — цифры сохранены'}</strong><small>Сейчас показаны последние сохранённые данные за {analyticsVisiblePeriodLabel}. После готовности выбранный период заменит их автоматически.</small></span>
         </div> : analyticsLoading && !analyticsCore && !readyCore ? <div className="digitization-loading"><RefreshCw className="spin" size={20}/> Пересчитываю выбранный период…</div> : null}
         <div className="digitization-metrics">{digitizationMetrics.map(item=><button key={item.label} className="digitization-metric" onClick={()=>setActive(item.onClick)}><span>{item.label}</span><strong>{item.value}</strong><small className={item.tone}>{item.delta || '—'}</small></button>)}</div>
+        {profitAuditReady && <button type="button" className="profit-audit" onClick={()=>setActive('Финансы')}>
+          <span className="profit-audit-title"><ShieldCheck size={17}/><span><strong>Почему прибыль {formatMoney(homeOperatingProfit)}</strong><small>Полная формула без скрытых расходов</small></span></span>
+          <span className="profit-audit-formula">{profitAuditRows.map(([label,value,sign],index)=><span className={`profit-audit-part ${sign}`} key={label}>{index>0 && <i>{sign==='plus'?'+':'−'}</i>}<small>{label}</small><b>{formatMoney(value)}</b></span>)}<span className="profit-audit-equals"><i>=</i><small>Прибыль</small><b className={homeOperatingProfit<0?'negative':'positive'}>{formatMoney(homeOperatingProfit)}</b></span></span>
+          <span className={`profit-audit-check ${reconciliationDifference != null && Math.abs(reconciliationDifference)>1?'warning':'ok'}`}><small>Сверка с WB</small><b>{reconciliationDifference == null?'открыть':Math.abs(reconciliationDifference)<=1?'сошлось':`разница ${formatMoney(reconciliationDifference)}`}</b></span>
+        </button>}
         <div className="digitization-table-card">
           <div className="digitization-table-head"><div><span>Товары</span><h3>Что формирует результат</h3></div><small>{analyticsUsesPreviousSnapshot ? `Топ-10 по выручке за ${analyticsVisiblePeriodLabel}` : 'Топ-10 по выручке за выбранный период'}</small></div>
           {topProducts.length ? <div className="digitization-table-wrap"><div className="digitization-table">
