@@ -57,8 +57,8 @@ assert.deepEqual(stableA,stableB,'movement identity must not depend on page-loca
 
 const source=fs.readFileSync(new URL('../src/wb/finance-ledger.js',import.meta.url),'utf8')
 for(const marker of [
-  'normalization_version=4',
-  'normalization_version<4',
+  'normalization_version=5',
+  'normalization_version<5',
   'COUNT(DISTINCT row_key)',
   'COUNT(DISTINCT source_row_key)',
   'DELETE FROM wb_finance_ledger',
