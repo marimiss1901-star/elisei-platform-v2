@@ -39,7 +39,7 @@ const db={
 const repaired=await backfillFinanceLedgerFromStreamItems(db,{connectionId:'22222222-2222-4222-8222-222222222222'})
 assert.equal(repaired.processedStreams,1,'finance stream must be processed when stored source rows are missing from ledger')
 assert.ok(repaired.movements>=1,'saved finance row must create ledger movements')
-assert.equal(repaired.normalizationVersion,4)
+assert.equal(repaired.normalizationVersion, 5)
 assert.equal(calls.some(call=>call.text.includes('DELETE FROM wb_finance_ledger')),true,'old finance normalization must be removed before authoritative rebuild')
 assert.equal(calls.some(call=>call.text.includes('COUNT(*)::int AS count FROM wb_finance_ledger WHERE connection_id=$1')),false,'backfill must not abort merely because another ledger movement exists')
 
