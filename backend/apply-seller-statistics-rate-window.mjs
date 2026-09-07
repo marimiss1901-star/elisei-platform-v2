@@ -74,5 +74,14 @@ replaceOnce(
   'shared seller statistics window',
 )
 
+// Daily Ready has a second recovery lane after the generic scheduler. It must
+// consume the already seller-filtered rows, otherwise it can re-add every
+// duplicate connection and bypass the shared WB account window we just built.
+replaceOnce(
+  "  const recoveryOrder = new Map([['orders',0],['sales',1]])\n  const byConnection = new Map()\n  for (const row of dueRows) {",
+  "  const recoveryOrder = new Map([['orders',0],['sales',1]])\n  const byConnection = new Map()\n  for (const row of normalDueRows) {",
+  'daily ready seller window',
+)
+
 fs.writeFileSync(file,source)
 console.log('Seller-level WB Statistics rate window applied')
