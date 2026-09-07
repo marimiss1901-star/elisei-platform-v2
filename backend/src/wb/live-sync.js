@@ -3,10 +3,12 @@ const DEFAULT_TIME_ZONE = 'Europe/Moscow'
 // Seller-day policy: use the proven Statistics API readers for orders and sales
 // until WB Order Feed is verified against a real ELISEI cabinet. Operational
 // seller-day data is intentionally calm: orders, sales and both stock contours
-// refresh no more often than once every two hours.
+// refresh no more often than once every two hours. Advertising is refreshed
+// hourly during the active day so current DRR/spend do not lag a full day.
 const STAGE_DEFAULTS = Object.freeze({
   orders: 7200,
   sales: 7200,
+  advertising: 3600,
   stocks: 7200,
   sellerStocks: 7200,
 })
@@ -16,6 +18,7 @@ const STAGE_DEFAULTS = Object.freeze({
 const MIN_INTERVALS = Object.freeze({
   orders: 7200,
   sales: 7200,
+  advertising: 3600,
   stocks: 7200,
   sellerStocks: 7200,
 })
@@ -23,6 +26,7 @@ const MIN_INTERVALS = Object.freeze({
 const OVERNIGHT_MULTIPLIERS = Object.freeze({
   orders: 2,
   sales: 2,
+  advertising: 2,
   stocks: 2,
   sellerStocks: 2,
 })
@@ -32,6 +36,7 @@ const WEBHOOK_FALLBACK_MULTIPLIERS = Object.freeze({})
 const LIVE_PRIORITY = Object.freeze({
   orders: 10,
   sales: 20,
+  advertising: 25,
   sellerStocks: 30,
   stocks: 40,
 })
