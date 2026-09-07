@@ -4,6 +4,7 @@ import fs from 'node:fs'
 const server=fs.readFileSync(new URL('../src/server.js',import.meta.url),'utf8')
 const pkg=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8'))
 
+assert.ok(server.includes('AUTOMATIC_REFRESH_INTERVALS_SECONDS, DAILY_READY_HEAVY_INTERVALS_SECONDS, DEFAULT_DAILY_READY_TIMEZONE'),'server must import the heavy interval table used by the memory guard')
 assert.ok(server.includes("const financeRepairWindow=['overnight','preopen'].includes(slot)"),'finance freshness repair must run only in the business-night window')
 assert.ok(server.includes('const financeSpreadSeconds=2*60+(cabinetHash%(45*60))'),'finance repair must be spread across cabinets instead of stampeding at the same minute')
 assert.ok(server.includes('const heavyBusy=repairedHeavyStages.size>0 || states.some'),'nightly scheduler must detect an existing heavy continuation per cabinet')
