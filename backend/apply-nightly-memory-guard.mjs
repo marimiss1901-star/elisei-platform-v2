@@ -11,6 +11,13 @@ let server = fs.readFileSync(serverFile, 'utf8')
 
 server = replaceOnce(
   server,
+  `  AUTOMATIC_REFRESH_INTERVALS_SECONDS, DEFAULT_DAILY_READY_TIMEZONE,`,
+  `  AUTOMATIC_REFRESH_INTERVALS_SECONDS, DAILY_READY_HEAVY_INTERVALS_SECONDS, DEFAULT_DAILY_READY_TIMEZONE,`,
+  'import heavy interval table',
+)
+
+server = replaceOnce(
+  server,
   `      const repairedHeavyStages=new Set()\n      const financeCurrent=states.find(item=>item.stage==='finance') || null`,
   `      const repairedHeavyStages=new Set()\n      const cabinetHash=[...String(row.id || '')].reduce((sum,char)=>((sum*31)+char.charCodeAt(0))>>>0,7)\n      const financeCurrent=states.find(item=>item.stage==='finance') || null`,
   'define cabinet spread before finance repair',
