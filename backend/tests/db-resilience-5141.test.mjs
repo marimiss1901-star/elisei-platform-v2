@@ -6,7 +6,8 @@ const backendPackage = JSON.parse(fs.readFileSync(new URL('../package.json', imp
 const frontendPackage = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
 
 assert.equal(frontendPackage.version, '5.15.9')
-assert.equal(backendPackage.version, '2.27.8')
+const backendVersion = backendPackage.version.split('.').map(Number)
+assert.ok(backendVersion[0] > 2 || (backendVersion[0] === 2 && backendVersion[1] >= 27), 'DB resilience regression must remain enabled on backend 2.27+')
 assert.match(backendPackage.scripts.start, /db-resilience-preload\.mjs/)
 assert.match(preload, /Express 4 does not automatically forward rejected async route promises/)
 assert.match(preload, /DATABASE_RECONNECTING/)
