@@ -13,6 +13,7 @@ const due=dueLiveStages({
   states:[
     {stage:'orders',status:'error',last_attempt_at:'2026-08-26T08:00:00Z',updated_at:'2026-08-26T08:00:00Z'},
     {stage:'sales',status:'success',last_success_at:'2026-08-26T04:00:00Z'},
+    {stage:'advertising',status:'success',last_success_at:'2026-08-26T10:30:00Z'},
     {stage:'stocks',status:'success',last_success_at:'2026-08-26T03:00:00Z'},
     {stage:'sellerStocks',status:'success',last_success_at:'2026-08-26T05:00:00Z'},
   ],
@@ -29,6 +30,7 @@ const blocked=dueLiveStages({
   states:[
     {stage:'orders',status:'rate_limited',next_allowed_at:'2026-08-26T12:00:00Z'},
     {stage:'sales',status:'success',last_success_at:'2026-08-26T04:00:00Z'},
+    {stage:'advertising',status:'success',last_success_at:'2026-08-26T10:30:00Z'},
     {stage:'stocks',status:'success',last_success_at:'2026-08-26T10:30:00Z'},
     {stage:'sellerStocks',status:'success',last_success_at:'2026-08-26T10:30:00Z'},
   ],
@@ -44,6 +46,7 @@ const normal=dueLiveStages({
   states:[
     {stage:'orders',status:'success',last_success_at:'2026-08-26T08:30:00Z'},
     {stage:'sales',status:'success',last_success_at:'2026-08-26T04:00:00Z'},
+    {stage:'advertising',status:'success',last_success_at:'2026-08-26T10:30:00Z'},
     {stage:'stocks',status:'success',last_success_at:'2026-08-26T08:45:00Z'},
     {stage:'sellerStocks',status:'success',last_success_at:'2026-08-26T08:45:00Z'},
   ],
