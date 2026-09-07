@@ -62,6 +62,10 @@ const GROUP_GAP_MS = Object.freeze({
 })
 
 export const SMART_SCHEDULER_INITIAL_GAP_MS = 5000
+// A lower-priority WB stream must never be postponed forever by a constantly
+// replenished higher-priority stream in the same API group. Once a due state
+// has waited this long, fairness is based on the oldest due time first.
+export const SMART_SCHEDULER_STARVATION_MS = 10 * 60 * 1000
 
 export function stagePriority(stage) {
   return Number(PRIORITY[String(stage)] ?? 150)
@@ -104,19 +108,54 @@ function bootstrapPriority(row = {}) {
   return Number.isFinite(value) ? value : null
 }
 
+function schedulerDueTime(row = {}) {
+  const value = Date.parse(row?.next_allowed_at || row?.nextAllowedAt || '')
+  return Number.isFinite(value) ? value : null
+}
+
+function isStarvedSchedulerRow(row = {}, now = Date.now()) {
+  const due = schedulerDueTime(row)
+  return due != null && due <= now - SMART_SCHEDULER_STARVATION_MS
+}
+
+function continuationScore(row = {}) {
+  let score = 0
+  if (row?.task_id || row?.taskId) score += 4
+  if (String(row?.status || '') === 'pending') score += 2
+  const count = Number(row?.last_count ?? row?.lastCount ?? row?.metadata?.persistedCount ?? 0)
+  if (Number.isFinite(count) && count > 0) score += 1
+  return score
+}
+
 export function compareSchedulerRows(a = {}, b = {}) {
+  const now = Date.now()
+  const starvedA = isStarvedSchedulerRow(a,now)
+  const starvedB = isStarvedSchedulerRow(b,now)
+  const dueA = schedulerDueTime(a)
+  const dueB = schedulerDueTime(b)
+
+  // Fairness guard: an overdue stage (for example a partially persisted
+  // stockHistory report) must not lose forever to fresher analytics work.
+  if (starvedA !== starvedB) return starvedA ? -1 : 1
+  if (starvedA && starvedB && dueA !== dueB) return dueA - dueB
+
+  const continuationA = continuationScore(a)
+  const continuationB = continuationScore(b)
+  if (continuationA !== continuationB) return continuationB - continuationA
+
   const explicitA = bootstrapPriority(a)
   const explicitB = bootstrapPriority(b)
-
   const taskBoostA = a?.task_id || a?.taskId ? -20 : 0
   const taskBoostB = b?.task_id || b?.taskId ? -20 : 0
   const pendingBoostA = String(a?.status || '') === 'pending' ? -10 : 0
   const pendingBoostB = String(b?.status || '') === 'pending' ? -10 : 0
-  const pa = (explicitA ?? stagePriority(a?.stage)) + taskBoostA + pendingBoostA
-  const pb = (explicitB ?? stagePriority(b?.stage)) + taskBoostB + pendingBoostB
+  const partialBoostA = Number(a?.last_count ?? a?.lastCount ?? a?.metadata?.persistedCount ?? 0) > 0 ? -5 : 0
+  const partialBoostB = Number(b?.last_count ?? b?.lastCount ?? b?.metadata?.persistedCount ?? 0) > 0 ? -5 : 0
+  const pa = (explicitA ?? stagePriority(a?.stage)) + taskBoostA + pendingBoostA + partialBoostA
+  const pb = (explicitB ?? stagePriority(b?.stage)) + taskBoostB + pendingBoostB + partialBoostB
   if (pa !== pb) return pa - pb
-  const ta = Date.parse(a?.next_allowed_at || a?.nextAllowedAt || a?.updated_at || '') || 0
-  const tb = Date.parse(b?.next_allowed_at || b?.nextAllowedAt || b?.updated_at || '') || 0
+  const ta = dueA ?? (Date.parse(a?.updated_at || '') || 0)
+  const tb = dueB ?? (Date.parse(b?.updated_at || '') || 0)
   if (ta !== tb) return ta - tb
   return String(a?.stage || '').localeCompare(String(b?.stage || ''))
 }
