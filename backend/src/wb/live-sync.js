@@ -1,23 +1,26 @@
 const DEFAULT_TIME_ZONE = 'Europe/Moscow'
 
 // Seller-day policy: use the proven Statistics API readers for orders and sales
-// until WB Order Feed is verified against a real ELISEI cabinet. Operational
-// seller-day data is intentionally calm: orders, sales and both stock contours
-// refresh no more often than once every two hours.
+// until WB Order Feed is verified against a real ELISEI cabinet.
+//
+// ELISEI cloud currently accepts Basic WB tokens before Service/OAuth rollout.
+// Since 30.03.2026 WB limits Basic Statistics API tokens much more strictly:
+// orders — one request per 3 hours, sales — one request per 2 hours. Never queue
+// these readers faster than WB can legally accept them.
 const STAGE_DEFAULTS = Object.freeze({
-  orders: 7200,
-  sales: 7200,
-  stocks: 7200,
-  sellerStocks: 7200,
+  orders: 3 * 60 * 60,
+  sales: 2 * 60 * 60,
+  stocks: 2 * 60 * 60,
+  sellerStocks: 2 * 60 * 60,
 })
 
-// Existing cabinets are migrated upward automatically: old 30/60-minute
-// settings cannot keep polling WB too aggressively.
+// Existing cabinets are migrated upward automatically: an old 2-hour orders
+// setting cannot keep polling a Basic token faster than its WB limit.
 const MIN_INTERVALS = Object.freeze({
-  orders: 7200,
-  sales: 7200,
-  stocks: 7200,
-  sellerStocks: 7200,
+  orders: 3 * 60 * 60,
+  sales: 2 * 60 * 60,
+  stocks: 2 * 60 * 60,
+  sellerStocks: 2 * 60 * 60,
 })
 
 const OVERNIGHT_MULTIPLIERS = Object.freeze({
