@@ -6,7 +6,8 @@ const patch=fs.readFileSync(new URL('../apply-nightly-load-policy.mjs',import.me
 const rollback=fs.readFileSync(new URL('../apply-legacy-orders-production-rollback.mjs',import.meta.url),'utf8')
 
 for(const stage of ['orders','sales','stocks','sellerStocks']) assert.ok(live.includes(`${stage}:`),`seller-day lane must include ${stage}`)
-assert.ok(live.includes('orders: 7200')&&live.includes('sales: 7200'),'orders and sales must use the calm two-hour production cadence')
+assert.ok(live.includes('orders: 3 * 60 * 60'),'orders must respect the WB Basic three-hour Statistics cadence')
+assert.ok(live.includes('sales: 2 * 60 * 60'),'sales must respect the WB Basic two-hour Statistics cadence')
 assert.ok(patch.includes("DAILY_READY_OPERATIONAL_RECOVERY_STAGES = Object.freeze(['orders','sales'])"),'Daily Ready must repair proven orders and sales independently')
 for(const stage of ['products','advertising','reviews','questions','chats','financeReports','acquiringReports','jamSubscription']) {
   assert.ok(patch.includes(`${stage}: 24 * 60 * 60`),`nightly policy must include ${stage}`)
