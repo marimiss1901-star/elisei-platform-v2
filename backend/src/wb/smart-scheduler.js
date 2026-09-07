@@ -124,6 +124,13 @@ function continuationScore(row = {}) {
   if (String(row?.status || '') === 'pending') score += 2
   const count = Number(row?.last_count ?? row?.lastCount ?? row?.metadata?.persistedCount ?? 0)
   if (Number.isFinite(count) && count > 0) score += 1
+
+  // Acquiring is derived from the finance ledger. When it explicitly says it is
+  // waiting for finance, treating its already-persisted rows as a continuation
+  // used to let acquiring beat the due finance refresh forever after both rows
+  // crossed the starvation threshold. A blocked dependent is not executable
+  // progress, so keep it behind its prerequisite until finance advances.
+  if (String(row?.stage || '') === 'acquiring' && row?.metadata?.waitingForFinance === true) score -= 10
   return score
 }
 
