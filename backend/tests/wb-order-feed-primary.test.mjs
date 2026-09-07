@@ -58,13 +58,15 @@ assert.equal(orderFeedRateLimitSeconds({typeId:1,serviceSecretReady:false}),1080
 assert.equal(WB_API_POLICY.orderFeed.scope,'analytics')
 assert.equal(WB_API_POLICY.orderFeed.maxPeriodDays,31)
 
-// Production remains on the proven Statistics API path.
+// Production orders/sales remain on the proven Statistics API path. Advertising
+// is a separate hourly live stream and does not alter the Order Feed shadow contract.
 assert.equal(schedulerGroup('orders'),'statistics')
 assert.equal(schedulerGroup('sales'),'statistics')
 const defaults=defaultLiveSyncSettings()
-assert.deepEqual(LIVE_SYNC_STAGES,['orders','sales','stocks','sellerStocks'])
+assert.deepEqual(LIVE_SYNC_STAGES,['orders','sales','advertising','stocks','sellerStocks'])
 assert.equal(defaults.intervals.orders,7200)
 assert.equal(defaults.intervals.sales,7200)
+assert.equal(defaults.intervals.advertising,3600)
 assert.equal(normalizeLiveSyncSettings({intervals:{orders:1800,sales:1800}}).intervals.orders,7200)
 assert.equal(normalizeLiveSyncSettings({intervals:{orders:1800,sales:1800}}).intervals.sales,7200)
 assert.deepEqual(DAILY_READY_OPERATIONAL_RECOVERY_STAGES,['orders','sales'])

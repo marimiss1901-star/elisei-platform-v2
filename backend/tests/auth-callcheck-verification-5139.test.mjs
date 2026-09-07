@@ -7,7 +7,8 @@ const frontendPackage = JSON.parse(fs.readFileSync(new URL('../../package.json',
 const registerPage = fs.readFileSync(new URL('../../src/pages/RegisterPage.jsx', import.meta.url), 'utf8')
 const loginPage = fs.readFileSync(new URL('../../src/pages/LoginPage.jsx', import.meta.url), 'utf8')
 
-assert.equal(backendPackage.version, '2.27.8')
+const backendVersion = backendPackage.version.split('.').map(Number)
+assert.ok(backendVersion[0] > 2 || (backendVersion[0] === 2 && backendVersion[1] >= 27), 'callcheck regression must remain enabled on backend 2.27+')
 assert.equal(frontendPackage.version, '5.15.9')
 assert.match(backendPackage.scripts.start, /callcheck-auth-preload\.mjs/)
 assert.match(preload, /\/callcheck\/add/)
