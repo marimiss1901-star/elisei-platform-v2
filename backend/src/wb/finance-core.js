@@ -5,13 +5,8 @@ const number = value => {
 }
 
 export const FINANCE_METHOD_LIMITS = Object.freeze({
-  // Current POST /api/finance/v1/sales-reports/detailed period endpoint:
-  // official WB documentation exposes one request per minute. The previous
-  // 12-hour Base-token cooldown belonged to the older throttling model and
-  // must not be carried into this endpoint.
   baseDetailIntervalMs: 61 * 1000,
   baseBalanceIntervalMs: 24 * 60 * 60 * 1000,
-  // Documents remain a separate endpoint with their own token-dependent rules.
   baseDocumentsIntervalMs: 24 * 60 * 60 * 1000,
   fastDetailIntervalMs: 61 * 1000,
   documentsFastIntervalMs: 11 * 1000,
@@ -27,9 +22,6 @@ export function hasFastFinanceRate(tokenInfo = {}) {
 }
 
 export function financePageCooldownMs(tokenInfo = {}) {
-  // The period-detail endpoint itself is one request/minute in current WB docs.
-  // Keep tokenInfo in the signature because other finance methods still differ
-  // by token type and callers already provide it.
   void tokenInfo
   return FINANCE_METHOD_LIMITS.fastDetailIntervalMs
 }
@@ -55,8 +47,6 @@ export function financeContinuation({ incomingRows = [], previousRrdId = '0' } =
   if (!/^\d+$/.test(nextRrdId) || nextRrdId === previous) {
     return { complete:true, nextRrdId:previous, reason:'cursor_missing_or_repeated' }
   }
-  // WB explicitly recommends continuing until a 204 response. A short page is not
-  // treated as proof of completion because rows can be streamed in uneven chunks.
   return { complete:false, nextRrdId, reason:'continue_until_204' }
 }
 
@@ -159,21 +149,38 @@ export function deriveAcquiringFromLedgerRows(rows = []) {
   return result
 }
 
+function jamFinanceText(row = {}) {
+  return [
+    row?.operationCode,row?.operationGroup,row?.operationName,row?.sellerOperation,row?.bonusType,
+    row?.documentType,row?.serviceName,row?.service_name,row?.name,row?.title,row?.subjectName,row?.subject_name,
+    row?.supplierOperName,row?.supplier_oper_name,row?.sellerOperName,row?.seller_oper_name,
+    row?.bonusTypeName,row?.bonus_type_name,row?.paymentProcessing,row?.payment_processing,
+    row?.sourceField,row?.note,row?.sourcePayload,row?.source_payload,
+  ].map(value => typeof value === 'object' ? JSON.stringify(value) : text(value)).join(' ').toLowerCase()
+}
+
 export function jamEvidenceFromFinanceRows(rows = []) {
   const matches = []
   let amount = 0
+  const seen = new Set()
   for (const row of Array.isArray(rows) ? rows : []) {
-    const code = text(row?.operationCode)
-    if (code !== 'jam_subscription') continue
-    const value = Math.abs(number(row?.amount))
+    const isJamCode = text(row?.operationCode) === 'jam_subscription'
+    const isJamText = /(?:^|[^a-zа-яё])(джем|jam)(?:[^a-zа-яё]|$)/i.test(jamFinanceText(row))
+    if (!isJamCode && !isJamText) continue
+    if (row?.detailOnly) continue
+    const value = Math.abs(number(row?.amount ?? row?.deduction ?? row?.additionalPayment ?? row?.additional_payment))
+    if (!value) continue
+    const identity = text(row?.movementKey || row?.rrdId || row?.rrd_id || `${row?.operationDate || ''}:${row?.operationName || ''}:${value}`)
+    if (identity && seen.has(identity)) continue
+    if (identity) seen.add(identity)
     amount += value
     matches.push({
-      date:row?.operationDate || null,
+      date:row?.operationDate || row?.rrDt || row?.rr_dt || null,
       amount:value,
-      name:row?.operationName || 'Подписка «Джем»',
-      reportId:row?.reportId || null,
-      rrdId:row?.rrdId || null,
-      source:'finance',
+      name:row?.operationName || row?.bonusType || row?.sellerOperation || 'Подписка «Джем»',
+      reportId:row?.reportId || row?.report_id || null,
+      rrdId:row?.rrdId || row?.rrd_id || null,
+      source:isJamCode ? 'finance-ledger' : 'finance-text-match',
     })
   }
   return { confirmed:matches.length > 0, amount:Math.round(amount*100)/100, operations:matches.slice(0,100) }

@@ -36,6 +36,13 @@ export const WB_API_POLICY = Object.freeze({
       'GET /api/v1/supplier/sales',
     ]),
   }),
+  fbsShipping: Object.freeze({
+    requiredFrom:'2026-10-01T00:00:00+03:00',
+    shippingPointsEndpoint:'https://marketplace-api.wildberries.ru/api/marketplace/v3/fbs/shipping-points',
+    shippingMethodEndpoint:'https://marketplace-api.wildberries.ru/api/marketplace/v3/fbs/supplies/shipping-method',
+    deliverPath:'/api/v3/supplies/{supplyId}/deliver',
+    etrnRequiredForTransportCompany:true,
+  }),
 })
 
 function requestMethod(options = {}) {
@@ -69,6 +76,42 @@ export function buildOrderMetaDetailsRequest(model, orderIds = []) {
     headers: { 'Content-Type':'application/json' },
     body: JSON.stringify({ orders:ids }),
   }
+}
+
+export function fbsShippingReadiness(value = {}, now = new Date()) {
+  const activeFrom = Date.parse(WB_API_POLICY.fbsShipping.requiredFrom)
+  const active = Number.isFinite(activeFrom) && new Date(now).getTime() >= activeFrom
+  const method = String(value?.shippingMethod || value?.method || '').trim()
+  const date = String(value?.shippingDate || value?.date || '').trim()
+  const pointId = String(value?.shippingPointId || value?.pointId || '').trim()
+  const etrnId = String(value?.etrnId || value?.eTrnId || value?.transportDocumentId || '').trim()
+  const transportCompany = Boolean(value?.transportCompany) || /transport|carrier|тк|транспорт/i.test(method)
+  const missing = []
+  if (!method) missing.push('shippingMethod')
+  if (!date) missing.push('shippingDate')
+  if (!pointId) missing.push('shippingPointId')
+  if (transportCompany && !etrnId) missing.push('etrnId')
+  return {
+    active,
+    ready:!active || missing.length === 0,
+    missing,
+    transportCompany,
+    etrnRequired:transportCompany,
+    requiredFrom:WB_API_POLICY.fbsShipping.requiredFrom,
+  }
+}
+
+export function assertFbsSupplyReadyForDelivery(value = {}, now = new Date()) {
+  const readiness = fbsShippingReadiness(value,now)
+  if (!readiness.ready) {
+    throw Object.assign(new Error(`FBS-поставка не готова к передаче в доставку: не заполнено ${readiness.missing.join(', ')}.`), {
+      status:409,
+      code:'WB_FBS_SHIPPING_METADATA_REQUIRED',
+      missing:readiness.missing,
+      requiredFrom:readiness.requiredFrom,
+    })
+  }
+  return readiness
 }
 
 export function assertWbApiRequestAllowed(url, options = {}, now = new Date()) {
@@ -108,6 +151,12 @@ export function assertWbApiRequestAllowed(url, options = {}, now = new Date()) {
         status:409, code:'WB_WAREHOUSE_CARGO_TYPE_REQUIRED',
       })
     }
+  }
+
+  if (method === 'PATCH' && /^\/api\/v3\/supplies\/[^/]+\/deliver$/.test(path)) {
+    const body = requestBody(options) || {}
+    const shipping = options.fbsShipping || body.fbsShipping || body.shipping || body
+    assertFbsSupplyReadyForDelivery(shipping,now)
   }
   return true
 }
