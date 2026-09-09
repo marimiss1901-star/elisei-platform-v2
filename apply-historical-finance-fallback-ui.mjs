@@ -10,9 +10,9 @@ function replaceOnce(before,after,label){
 }
 
 replaceOnce(
-`            <span>{formatMoney(p.logistics)}</span>
+`            <span>{formatMoney(p.logistics)}<small>{p.logisticsSource === 'not_loaded' ? 'ожидает WB' : p.logisticsSource === 'manual' ? 'резервный расчёт' : p.logisticsSource === 'wb_api' ? 'WB финансы' : ''}</small></span>
             <span>{formatMoney(p.acquiring)}<small>{p.acquiringSource === 'not_loaded' ? 'ожидает WB' : ''}</small></span>`,
-`            <span>{formatMoney(p.logistics)}<small>{p.logisticsSource === 'historical_finance' ? 'оценка по истории WB' : p.logisticsSource === 'manual' ? 'ручной резерв' : p.logisticsSource === 'not_loaded' ? 'ожидает WB' : ''}</small></span>
+`            <span>{formatMoney(p.logistics)}<small>{p.logisticsSource === 'historical_finance' ? 'оценка по истории WB' : p.logisticsSource === 'manual' ? 'ручной резерв' : p.logisticsSource === 'not_loaded' ? 'ожидает WB' : p.logisticsSource === 'wb_api' ? 'WB финансы' : ''}</small></span>
             <span>{formatMoney(p.acquiring)}<small>{p.acquiringSource === 'historical_finance' ? 'оценка по истории WB' : p.acquiringSource === 'not_loaded' ? 'ожидает WB' : ''}</small></span>`,
 'product P&L historical labels')
 
