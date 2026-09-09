@@ -14,12 +14,12 @@ if (!source.includes(periodAfter)) {
   source = source.replace(periodBefore, periodAfter)
 }
 
-const requestBefore = `  const params = new URLSearchParams()\n  if (period) { params.set('dateFrom',period.dateFrom); params.set('dateTo',period.dateTo) }\n  const endpoint = \`${'${definition.endpoint}'}${'${params.size ? `?${params.toString()}` : ``}'}\`\n  const payload = await wbFetch(endpoint,token,{\n    label:definition.label,timeoutMs:45000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,\n  })`
-const requestAfter = `  const params = new URLSearchParams()\n  if (period) { params.set('dateFrom',period.dateFrom); params.set('dateTo',period.dateTo) }\n  if (stage === 'labelingRetention') {\n    const safeTo=String(period?.dateTo || new Date().toISOString().slice(0,10)).slice(0,10)\n    const safeEndMs=Date.parse(\`${'${safeTo}'}T00:00:00.000Z\`)\n    const safeFrom=new Date(safeEndMs-29*86400000).toISOString().slice(0,10)\n    params.set('dateFrom',safeFrom)\n    params.set('dateTo',safeTo)\n  }\n  const endpoint = \`${'${definition.endpoint}'}${'${params.size ? `?${params.toString()}` : ``}'}\`\n  let payload\n  try {\n    payload = await wbFetch(endpoint,token,{\n      label:definition.label,timeoutMs:45000,maxAttempts:1,maxRetryDelayMs:0,deadlineAt,\n    })\n  } catch (error) {\n    if (stage === 'labelingRetention') {\n      error.details={...(error.details || {}),requestDateFrom:params.get('dateFrom'),requestDateTo:params.get('dateTo'),requestWindowDays:30}\n    }\n    throw error\n  }`
+const paramsBefore = `  const params = new URLSearchParams()\n  if (period) { params.set('dateFrom',period.dateFrom); params.set('dateTo',period.dateTo) }`
+const paramsAfter = `  const params = new URLSearchParams()\n  if (period) { params.set('dateFrom',period.dateFrom); params.set('dateTo',period.dateTo) }\n  if (stage === 'labelingRetention') {\n    const safeTo=String(period?.dateTo || new Date().toISOString().slice(0,10)).slice(0,10)\n    const safeEndMs=Date.parse(\`${'${safeTo}'}T00:00:00.000Z\`)\n    const safeFrom=new Date(safeEndMs-29*86400000).toISOString().slice(0,10)\n    params.set('dateFrom',safeFrom)\n    params.set('dateTo',safeTo)\n  }`
 
-if (!source.includes(requestAfter)) {
-  if (!source.includes(requestBefore)) throw new Error('ELISEI 5.19.11 labelingRetention request marker not found')
-  source = source.replace(requestBefore, requestAfter)
+if (!source.includes(paramsAfter)) {
+  if (!source.includes(paramsBefore)) throw new Error('ELISEI 5.19.11 labelingRetention params marker not found')
+  source = source.replace(paramsBefore, paramsAfter)
 }
 
 fs.writeFileSync(serverUrl, source)
