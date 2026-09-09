@@ -32,8 +32,8 @@ assert.match(page,/Number\(ledgerSummary\.expenses \|\| 0\) - Number\(ledgerSumm
   'ledger total must exclude advertising when campaign spend is used, preventing double count')
 assert.match(page,/pnlRevenue - pnlCogs - wbExpensesExAdvertising - pnlAdvertising - pnlFixed - pnlTax \+ Number\(pnlCompensations \|\| 0\)/,
   'operating profit must be rebuilt from ledger-backed WB expenses')
-assert.match(page,/старый баланс скрыт/,
-  'an outdated balance from a mismatched analytics period must be hidden')
+assert.match(page,/const financeBalance = rawFinanceLedger\?\.balance \|\| analyticsCore\?\.finance\?\.balance \|\| null/,
+  'current account balance stays independent from the selected P&L period and prefers the dedicated Finance response')
 assert.doesNotMatch(page,/const periodFinanceSummary = analyticsCore\?\.summary \|\| summary\n/,
   'P&L must not read the old analytics summary directly')
 
