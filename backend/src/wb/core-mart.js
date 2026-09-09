@@ -1,6 +1,6 @@
 import crypto from 'node:crypto'
 
-const CORE_MART_VERSION = 1
+const CORE_MART_VERSION = 2
 
 export async function ensureCoreMartSchema(pool) {
   if (!pool) return
@@ -56,4 +56,3 @@ export async function saveCoreMart(pool, { connectionId, from, to, revision, pay
   `,[connectionId,from,to,revision,JSON.stringify(payload)])
   return result.rows[0] || null
 }
-
