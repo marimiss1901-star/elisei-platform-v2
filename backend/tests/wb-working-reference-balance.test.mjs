@@ -23,6 +23,9 @@ for(const marker of [
   'for_withdraw:money(raw?.for_withdraw)',
   "stage === 'balance'",
   'balance: accountBalanceData',
+  "const supportingStreams = ['finance','balance'",
+  'const dedicatedBalancePayload = payloadByStream.balance?.payload',
+  'balance:currentBalancePayload',
 ]) assert.ok(server.includes(marker),`server balance integration must contain ${marker}`)
 
 const quality=fs.readFileSync(new URL('../src/wb/data-quality.js',import.meta.url),'utf8')
@@ -31,10 +34,13 @@ assert.ok(quality.includes("balance:{ label:'Баланс WB'"),'data quality mu
 const dashboard=fs.readFileSync(new URL('../../src/pages/DashboardPage.jsx',import.meta.url),'utf8')
 for(const marker of [
   "label:'Доступно к выводу'",
-  'analyticsCore?.finance?.balance?.for_withdraw',
+  'rawFinanceLedger?.balance || analyticsCore?.finance?.balance || null',
   'label="Баланс WB"',
   "stage:'balance', title:'Баланс WB'",
   'не зависит от выбранного периода',
 ]) assert.ok(dashboard.includes(marker),`dashboard must keep period payable separate from current balance: ${marker}`)
+
+const api=fs.readFileSync(new URL('../../src/lib/api.js',import.meta.url),'utf8')
+assert.ok(api.includes('{ signal:AbortSignal.timeout(45000) }'),'Finance ledger read must not abort at the generic 15-second GET timeout')
 
 console.log('WB working-reference current balance regression passed')
