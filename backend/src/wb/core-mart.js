@@ -1,6 +1,6 @@
 import crypto from 'node:crypto'
 
-const CORE_MART_VERSION = 2
+const CORE_MART_VERSION = 3
 
 export async function ensureCoreMartSchema(pool) {
   if (!pool) return
