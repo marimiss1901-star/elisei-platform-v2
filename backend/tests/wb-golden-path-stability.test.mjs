@@ -33,6 +33,7 @@ assert.ok(api.includes('async function cachedRead('),'Critical read fallback hel
 assert.ok(api.includes('transientFallback:true'),'Transient fallback marker missing')
 assert.ok(api.includes('cachedRead(`products:${connectionId}`'),'Products must use last-known-good fallback')
 assert.match(api,/cachedRead\([\s\S]*?`core:\$\{connectionId\}:/,'Core must use last-known-good fallback')
-assert.ok(api.includes('cachedRead(`finance:${connectionId}:'),'Finance ledger must use last-known-good fallback')
+assert.match(api,/cachedRead\([\s\S]*?`finance:\$\{connectionId\}:/,'Finance ledger must use last-known-good fallback regardless of call formatting')
+assert.ok(api.includes('{ signal:AbortSignal.timeout(45000) }'),'Heavy Finance read must have its dedicated timeout without removing stale-while-revalidate')
 
 console.log('WB golden-path stability regression passed')
