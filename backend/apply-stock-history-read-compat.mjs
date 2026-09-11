@@ -14,9 +14,9 @@ const anchor=`export function normalizeStreamPayload(stream, payload) {
 const helper=`function legacyStockHistoryDateKey(key) {
   const value=String(key || '').trim()
   const iso=value.match(/^(\\d{4})[-/.](\\d{2})[-/.](\\d{2})(?:$|\\s|T)/)
-  if (iso) return \\`${'${iso[1]}-${iso[2]}-${iso[3]}'}\\`
+  if (iso) return iso[1]+'-'+iso[2]+'-'+iso[3]
   const ru=value.match(/^(\\d{2})[./-](\\d{2})[./-](\\d{4})(?:$|\\s)/)
-  if (ru) return \\`${'${ru[3]}-${ru[2]}-${ru[1]}'}\\`
+  if (ru) return ru[3]+'-'+ru[2]+'-'+ru[1]
   return null
 }
 
