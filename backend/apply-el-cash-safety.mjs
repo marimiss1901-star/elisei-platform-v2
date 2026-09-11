@@ -34,7 +34,7 @@ if (!server.includes('balance: core?.finance?.balance || null,')) {
 fs.writeFileSync(serverPath, server)
 
 let engine = fs.readFileSync(enginePath, 'utf8')
-if (!engine.includes('function asksCashSafety(message = \'\')')) {
+if (!engine.includes("function asksCashSafety(message = '')")) {
   const helpers = String.raw`
 function asksCashSafety(message = '') {
   return /(?:вывест|вывод|вывел|вывели|забра|снял|снять|вытащ).{0,45}(?:ден|млн|миллион|лям|тыс|оборот)|(?:сколько|можно|опасно|безопасно).{0,35}(?:вывест|забрать|снять)|оборотк|оборотн\w*\s+капитал|кассов\w*\s+разрыв|хватит\s+денег|сколько\s+(?:дней|месяц\w*).*(?:хватит|прожив)|проеда\w*\s+капитал|бизнесу\s+(?:пизд|конец)|денежн\w*\s+поток\s+собствен/i.test(String(message || ''));
@@ -123,7 +123,7 @@ function formatCashSafety({ financeData, stocksData, syncData, context = {}, his
   const period = financeData?.period || context?.period || context?.screen?.period || {};
   const periodText = formatRuPeriod(period);
   const name = String(identity?.userName || '').trim().split(/\s+/)[0];
-  const prefix = name ? `${name}, ` : '';
+  const prefix = name ? name + ', ' : '';
   const revenue = firstFinite(summary.revenue);
   const profit = firstFinite(summary.operatingProfit);
   const margin = firstFinite(summary.margin);
@@ -137,46 +137,47 @@ function formatCashSafety({ financeData, stocksData, syncData, context = {}, his
   const runwayDays = dailyLoss && cash.balance != null && cash.balance > 0 ? cash.balance / dailyLoss : null;
   const financeWarning = coverageWarnings(financeData)[0] || null;
   const syncWarning = coverageWarnings(syncData)[0] || null;
-  const lines = [`${prefix}кассовая безопасность за ${periodText}:`];
-  lines.push(`• P&L: выручка ${money(revenue)}, операционная прибыль ${money(profit)}, маржа ${percent(margin)}.`);
+  const lines = [prefix + 'кассовая безопасность за ' + periodText + ':'];
+  lines.push('• P&L: выручка ' + money(revenue) + ', операционная прибыль ' + money(profit) + ', маржа ' + percent(margin) + '.');
   if (cash.balance != null || cash.forWithdraw != null) {
-    lines.push(`• Деньги WB сейчас: баланс ${money(cash.balance)}${cash.forWithdraw != null ? `; доступно к выводу ${money(cash.forWithdraw)}` : ''}. Баланс WB не считаю прибылью или свободной обороткой.`);
+    const withdrawPart = cash.forWithdraw != null ? '; доступно к выводу ' + money(cash.forWithdraw) : '';
+    lines.push('• Деньги WB сейчас: баланс ' + money(cash.balance) + withdrawPart + '. Баланс WB не считаю прибылью или свободной обороткой.');
   }
-  if (requestedWithdrawal != null) lines.push(`• Вывод собственника из вопроса: ${money(requestedWithdrawal)}.`);
-  if (processingCash != null && (requestedWithdrawal == null || Math.abs(processingCash-requestedWithdrawal) > 1)) lines.push(`• По последним сообщениям в обработке/к выводу: ${money(processingCash)}.`);
+  if (requestedWithdrawal != null) lines.push('• Вывод собственника из вопроса: ' + money(requestedWithdrawal) + '.');
+  if (processingCash != null && (requestedWithdrawal == null || Math.abs(processingCash-requestedWithdrawal) > 1)) lines.push('• По последним сообщениям в обработке/к выводу: ' + money(processingCash) + '.');
   if (noSupplierDebt) lines.push('• По последним сообщениям: долгов поставщикам нет. Это снижает риск, но не заменяет резерв на налоги, зарплаты, рекламу, логистику и закупки.');
 
   let risk = 'ТРЕБУЕТ РЕЗЕРВА';
   if (Number.isFinite(profit) && profit < 0 && requestedWithdrawal != null && requestedWithdrawal > 0) risk = 'ВЫСОКИЙ';
   else if (requestedWithdrawal != null && cash.balance != null && requestedWithdrawal > cash.balance) risk = 'ВЫСОКИЙ';
   else if (Number.isFinite(profit) && profit < 0) risk = 'ВЫСОКИЙ';
-  lines.push(`Риск вывода денег: ${risk}.`);
+  lines.push('Риск вывода денег: ' + risk + '.');
 
   if (Number.isFinite(profit) && profit < 0) {
-    lines.push(`Причина: бизнес за период не создаёт свободную прибыль, а теряет ${money(Math.abs(profit))}. Поэтому любой вывод собственника в этот момент уменьшает накопленную ликвидность/оборотный капитал, если его не компенсирует отдельный приток денег.`);
+    lines.push('Причина: бизнес за период не создаёт свободную прибыль, а теряет ' + money(Math.abs(profit)) + '. Поэтому любой вывод собственника в этот момент уменьшает накопленную ликвидность/оборотный капитал, если его не компенсирует отдельный приток денег.');
     if (requestedWithdrawal != null && requestedWithdrawal > 0) {
-      lines.push(`Если ${money(requestedWithdrawal)} были выведены именно в этом же периоде, вывод + операционный убыток дают около ${money(requestedWithdrawal + Math.abs(profit))} уменьшения денежного капитала до учёта внешних пополнений.`);
+      lines.push('Если ' + money(requestedWithdrawal) + ' были выведены именно в этом же периоде, вывод + операционный убыток дают около ' + money(requestedWithdrawal + Math.abs(profit)) + ' уменьшения денежного капитала до учёта внешних пополнений.');
     }
   } else if (Number.isFinite(profit) && requestedWithdrawal != null && requestedWithdrawal > Math.max(0,profit)) {
-    lines.push(`Вывод ${money(requestedWithdrawal)} больше операционной прибыли периода ${money(profit)}. Разница берётся не из заработанной прибыли этого периода, а из ранее накопленных денег/оборотного капитала.`);
+    lines.push('Вывод ' + money(requestedWithdrawal) + ' больше операционной прибыли периода ' + money(profit) + '. Разница берётся не из заработанной прибыли этого периода, а из ранее накопленных денег/оборотного капитала.');
   }
 
   if (runwayDays != null) {
-    lines.push(`Грубый стресс-тест: при темпе убытка этого периода около ${money(dailyLoss)} в день текущего баланса WB ${money(cash.balance)} хватило бы примерно на ${number(runwayDays)} дн. Это не полный runway: банковский счёт, налоги, зарплаты, закупки и будущие выплаты WB сюда не добавлены.`);
+    lines.push('Грубый стресс-тест: при темпе убытка этого периода около ' + money(dailyLoss) + ' в день текущего баланса WB ' + money(cash.balance) + ' хватило бы примерно на ' + number(runwayDays) + ' дн. Это не полный runway: банковский счёт, налоги, зарплаты, закупки и будущие выплаты WB сюда не добавлены.');
   }
 
   const stockUnits = firstFinite(stocksData?.summary?.stockUnits);
-  if (stockUnits != null) lines.push(`Остаток товара: ${number(stockUnits)} шт. Товар — актив бизнеса, но не считаю его живыми деньгами, пока он не продан.`);
+  if (stockUnits != null) lines.push('Остаток товара: ' + number(stockUnits) + ' шт. Товар — актив бизнеса, но не считаю его живыми деньгами, пока он не продан.');
   if (requestedWithdrawal == null) {
     lines.push('Точную «безопасную сумму к выводу» не называю без денежного резерва бизнеса: нужно знать ближайшие налоги, зарплаты/постоянные расходы, закупки и деньги на рекламу/логистику. Баланс WB сам по себе не является суммой, которую можно забрать без риска.');
   }
   lines.push('Одно главное действие: до следующего вывода зафиксировать минимальный денежный резерв бизнеса. Эл должен считать свободными только деньги сверх этого резерва и подтверждённой прибыли, а не весь баланс WB.');
   const warning = financeWarning || syncWarning;
-  if (warning) lines.push(`Ограничение данных: ${warning}`);
+  if (warning) lines.push('Ограничение данных: ' + warning);
   return lines.join('\n');
 }
 `
-  engine = replaceOnce(engine, "function asksTurnaroundPlan(message = '') {", `${helpers}\nfunction asksTurnaroundPlan(message = '') {`, 'cash safety helpers')
+  engine = replaceOnce(engine, "function asksTurnaroundPlan(message = '') {", helpers + "\nfunction asksTurnaroundPlan(message = '') {", 'cash safety helpers')
 }
 
 if (!engine.includes('const cashSafetyRequest = asksCashSafety(message);')) {
@@ -199,24 +200,7 @@ if (!engine.includes('sections.push(formatCashSafety({')) {
   engine = replaceOnce(
     engine,
     "  const sections = [];\n  const warnings = [];\n  if (turnaroundRequest) {",
-    `  const sections = [];
-  const warnings = [];
-  if (cashSafetyRequest) {
-    const financeData = moduleData(results.finance);
-    const stocksData = moduleData(results.stocks);
-    const syncData = moduleData(results.sync);
-    sections.push(formatCashSafety({
-      financeData:results.finance?.ok ? financeData : null,
-      stocksData:results.stocks?.ok ? stocksData : null,
-      syncData:results.sync?.ok ? syncData : null,
-      context:options.context,
-      history:options.history,
-      message,
-      identity:options.identity,
-    }));
-    warnings.push(...coverageWarnings(financeData),...coverageWarnings(stocksData),...coverageWarnings(syncData));
-  }
-  if (turnaroundRequest) {`,
+    "  const sections = [];\n  const warnings = [];\n  if (cashSafetyRequest) {\n    const financeData = moduleData(results.finance);\n    const stocksData = moduleData(results.stocks);\n    const syncData = moduleData(results.sync);\n    sections.push(formatCashSafety({\n      financeData:results.finance?.ok ? financeData : null,\n      stocksData:results.stocks?.ok ? stocksData : null,\n      syncData:results.sync?.ok ? syncData : null,\n      context:options.context,\n      history:options.history,\n      message,\n      identity:options.identity,\n    }));\n    warnings.push(...coverageWarnings(financeData),...coverageWarnings(stocksData),...coverageWarnings(syncData));\n  }\n  if (turnaroundRequest) {",
     'cash safety response block',
   )
 }
