@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import { LIVE_SYNC_STAGES, dueLiveStages } from '../src/wb/live-sync.js'
 import { DAILY_READY_OPERATIONAL_RECOVERY_STAGES, dailyHeavyStagePlan } from '../src/wb/daily-ready.js'
 
-assert.deepEqual(LIVE_SYNC_STAGES,['orders','sales','advertising','stocks','sellerStocks'],
-  'seller-day recurring lane must contain proven orders/sales, advertising and WB/FBS stocks')
+assert.deepEqual(LIVE_SYNC_STAGES,['orders','balance','sales','advertising','stocks','sellerStocks'],
+  'seller-day recurring lane must contain proven orders/sales, current balance, advertising and WB/FBS stocks')
 assert.deepEqual(DAILY_READY_OPERATIONAL_RECOVERY_STAGES,['orders','sales'],
   'closed-day orders and sales recover independently; advertising keeps its live cadence and nightly catch-up')
 
@@ -13,6 +13,7 @@ const night=Date.parse('2026-08-25T00:00:00Z') // 03:00 Moscow
 const stale='2026-08-17T00:00:00Z'
 const states=[
   {stage:'orders',status:'success',last_success_at:stale},
+  {stage:'balance',status:'success',last_success_at:stale},
   {stage:'sales',status:'success',last_success_at:stale},
   {stage:'stocks',status:'success',last_success_at:stale},
   {stage:'sellerStocks',status:'success',last_success_at:stale},
@@ -29,14 +30,14 @@ const states=[
 ]
 
 const dayDue=dueLiveStages({settings:{enabled:true},states,now:day,timeZone:timezone})
-assert.deepEqual(new Set(dayDue),new Set(['orders','sales','advertising','stocks','sellerStocks']))
+assert.deepEqual(new Set(dayDue),new Set(['orders','balance','sales','advertising','stocks','sellerStocks']))
 
 const dayHeavy=dailyHeavyStagePlan({states,now:day,timeZone:timezone})
 assert.deepEqual(dayHeavy,[],'non-operational refreshes must not start during seller day')
 
 const nightHeavy=dailyHeavyStagePlan({states,now:night,timeZone:timezone})
-for(const stage of ['products','advertising','finance','paidStorage','acceptance','acquiring','reviews','questions','chats','searchQueries']) {
+for(const stage of ['products','balance','advertising','finance','paidStorage','acceptance','acquiring','reviews','questions','chats','searchQueries']) {
   assert.ok(nightHeavy.includes(stage),`stale ${stage} must be eligible for the next nightly pass`)
 }
 
-console.log('Proven orders/sales/advertising seller-day/night load policy regression passed')
+console.log('Proven orders/sales/balance/advertising seller-day/night load policy regression passed')
