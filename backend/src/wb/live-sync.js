@@ -5,8 +5,11 @@ const DEFAULT_TIME_ZONE = 'Europe/Moscow'
 // seller-day data is intentionally calm: orders, sales and both stock contours
 // refresh no more often than once every two hours. Advertising is refreshed
 // hourly during the active day so current DRR/spend do not lag a full day.
+// Current WB balance is a single light finance call and is refreshed every four
+// hours so the dashboard never carries a multi-day-old cash snapshot.
 const STAGE_DEFAULTS = Object.freeze({
   orders: 7200,
+  balance: 4 * 60 * 60,
   sales: 7200,
   advertising: 3600,
   stocks: 7200,
@@ -14,9 +17,11 @@ const STAGE_DEFAULTS = Object.freeze({
 })
 
 // Existing cabinets are migrated upward automatically: old 30/60-minute
-// settings cannot keep polling WB too aggressively.
+// settings cannot keep polling WB too aggressively. Balance is intentionally
+// capped at four hours: it is cheap, user-visible and independent from P&L.
 const MIN_INTERVALS = Object.freeze({
   orders: 7200,
+  balance: 4 * 60 * 60,
   sales: 7200,
   advertising: 3600,
   stocks: 7200,
@@ -25,6 +30,7 @@ const MIN_INTERVALS = Object.freeze({
 
 const OVERNIGHT_MULTIPLIERS = Object.freeze({
   orders: 2,
+  balance: 2,
   sales: 2,
   advertising: 2,
   stocks: 2,
@@ -35,6 +41,7 @@ const WEBHOOK_FALLBACK_MULTIPLIERS = Object.freeze({})
 
 const LIVE_PRIORITY = Object.freeze({
   orders: 10,
+  balance: 15,
   sales: 20,
   advertising: 25,
   sellerStocks: 30,
