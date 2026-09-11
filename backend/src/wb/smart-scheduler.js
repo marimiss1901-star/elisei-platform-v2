@@ -127,14 +127,29 @@ function continuationScore(row = {}) {
 
   // Acquiring is derived from the finance ledger. When it explicitly says it is
   // waiting for finance, treating its already-persisted rows as a continuation
-  // used to let acquiring beat the due finance refresh forever after both rows
-  // crossed the starvation threshold. A blocked dependent is not executable
-  // progress, so keep it behind its prerequisite until finance advances.
+  // must never let it beat the finance prerequisite.
   if (String(row?.stage || '') === 'acquiring' && row?.metadata?.waitingForFinance === true) score -= 10
   return score
 }
 
+function financeDependencyOrder(a = {}, b = {}) {
+  const stageA = String(a?.stage || '')
+  const stageB = String(b?.stage || '')
+  const aBlocked = stageA === 'acquiring' && a?.metadata?.waitingForFinance === true
+  const bBlocked = stageB === 'acquiring' && b?.metadata?.waitingForFinance === true
+  if (stageA === 'finance' && bBlocked) return -1
+  if (stageB === 'finance' && aBlocked) return 1
+  return 0
+}
+
 export function compareSchedulerRows(a = {}, b = {}) {
+  // Dependency ordering is stronger than starvation fairness: an acquiring row
+  // marked waitingForFinance has no executable work until finance advances. If
+  // both become overdue, comparing timestamps first used to let acquiring win
+  // forever by a few milliseconds and starve its own prerequisite.
+  const dependencyOrder = financeDependencyOrder(a,b)
+  if (dependencyOrder) return dependencyOrder
+
   const now = Date.now()
   const starvedA = isStarvedSchedulerRow(a,now)
   const starvedB = isStarvedSchedulerRow(b,now)
