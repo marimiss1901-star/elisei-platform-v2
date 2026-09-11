@@ -38,6 +38,8 @@ assert.match(migration,/DELETE FROM wb_core_marts/,
 assert.ok(pkg.scripts.prestart.includes('apply-paid-storage-signed-pnl.mjs'))
 assert.ok(pkg.scripts.pretest.includes('apply-paid-storage-signed-pnl.mjs'))
 assert.ok(pkg.scripts.prestart.includes('migrate-paid-storage-signed-history.mjs'))
-assert.equal(pkg.version,'2.29.3')
+const [major,minor,patch]=String(pkg.version||'0.0.0').split('.').map(Number)
+assert.ok(major>2 || (major===2 && (minor>29 || (minor===29 && patch>=3))),
+  'signed-storage fix requires backend 2.29.3 or newer; later patch releases must remain valid')
 
 console.log('ELISEI 5.19.13 signed paid-storage product P&L regression: OK')

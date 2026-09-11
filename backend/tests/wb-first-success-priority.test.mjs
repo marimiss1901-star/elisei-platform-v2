@@ -2,10 +2,13 @@ import assert from 'node:assert/strict'
 import { dueLiveStages } from '../src/wb/live-sync.js'
 
 const now=Date.parse('2026-08-26T11:00:00Z') // 14:00 Moscow
+const freshBalance={stage:'balance',status:'success',last_success_at:'2026-08-26T10:30:00Z'}
 
 // Until Order Feed is verified live, orders and sales are independent proven
 // Statistics API streams. A never-successful operational stream gets one fair
-// chance before already-working streams that are merely more overdue.
+// chance before already-working streams that are merely more overdue. Balance
+// is kept fresh in this fixture because this regression is intentionally about
+// the orders/sales first-success policy, not the independent cash-snapshot lane.
 const due=dueLiveStages({
   settings:{enabled:true},
   now,
@@ -16,6 +19,7 @@ const due=dueLiveStages({
     {stage:'advertising',status:'success',last_success_at:'2026-08-26T10:30:00Z'},
     {stage:'stocks',status:'success',last_success_at:'2026-08-26T03:00:00Z'},
     {stage:'sellerStocks',status:'success',last_success_at:'2026-08-26T05:00:00Z'},
+    freshBalance,
   ],
 })
 assert.equal(due[0],'orders','never-successful orders must receive first-run priority once their interval is due')
@@ -33,6 +37,7 @@ const blocked=dueLiveStages({
     {stage:'advertising',status:'success',last_success_at:'2026-08-26T10:30:00Z'},
     {stage:'stocks',status:'success',last_success_at:'2026-08-26T10:30:00Z'},
     {stage:'sellerStocks',status:'success',last_success_at:'2026-08-26T10:30:00Z'},
+    freshBalance,
   ],
 })
 assert.ok(!blocked.includes('orders'),'first-success priority must never bypass WB rate-limit windows')
@@ -49,6 +54,7 @@ const normal=dueLiveStages({
     {stage:'advertising',status:'success',last_success_at:'2026-08-26T10:30:00Z'},
     {stage:'stocks',status:'success',last_success_at:'2026-08-26T08:45:00Z'},
     {stage:'sellerStocks',status:'success',last_success_at:'2026-08-26T08:45:00Z'},
+    freshBalance,
   ],
 })
 assert.equal(normal[0],'sales','after first success the most overdue proven stream must win again')

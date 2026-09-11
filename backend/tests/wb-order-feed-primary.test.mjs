@@ -59,12 +59,14 @@ assert.equal(WB_API_POLICY.orderFeed.scope,'analytics')
 assert.equal(WB_API_POLICY.orderFeed.maxPeriodDays,31)
 
 // Production orders/sales remain on the proven Statistics API path. Advertising
-// is a separate hourly live stream and does not alter the Order Feed shadow contract.
+// and the lightweight current balance are independent live streams and do not
+// alter the Order Feed shadow contract.
 assert.equal(schedulerGroup('orders'),'statistics')
 assert.equal(schedulerGroup('sales'),'statistics')
 const defaults=defaultLiveSyncSettings()
-assert.deepEqual(LIVE_SYNC_STAGES,['orders','sales','advertising','stocks','sellerStocks'])
+assert.deepEqual(LIVE_SYNC_STAGES,['orders','balance','sales','advertising','stocks','sellerStocks'])
 assert.equal(defaults.intervals.orders,7200)
+assert.equal(defaults.intervals.balance,4*60*60)
 assert.equal(defaults.intervals.sales,7200)
 assert.equal(defaults.intervals.advertising,3600)
 assert.equal(normalizeLiveSyncSettings({intervals:{orders:1800,sales:1800}}).intervals.orders,7200)
