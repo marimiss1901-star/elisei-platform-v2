@@ -59,15 +59,34 @@ if(source.includes(identityBefore)){
   fs.writeFileSync(file,source)
 }
 
+const greetingBefore='text:initialElGreeting(greeting, storedSettings.preferredName || displayName, storedSettings),'
+const greetingAfter='text:initialElGreeting(greeting, displayName || storedSettings.preferredName, storedSettings),'
+if(source.includes(greetingBefore)){
+  source=source.replace(greetingBefore,greetingAfter)
+  fs.writeFileSync(file,source)
+}
+
+const requestNameBefore='...(elSettings.preferredName ? { preferredName:elSettings.preferredName } : {}),'
+const requestNameAfter='...(preferredElName ? { preferredName:preferredElName } : {}),'
+if(source.includes(requestNameBefore)){
+  source=source.replace(requestNameBefore,requestNameAfter)
+  fs.writeFileSync(file,source)
+}
+
 const cssFile='src/styles/app.css'
 let css=fs.readFileSync(cssFile,'utf8')
 if(!css.includes('/* ELISEI 5.19.27 — readable El conversation */')){
   css+=`\n\n/* ELISEI 5.19.27 — readable El conversation */
 .el-embedded-chat .chat-stream{max-height:none;min-height:420px;overflow:visible;padding:12px 0 24px}
-.el-embedded-chat .chat-message.el{width:min(860px,82%);max-width:82%;box-sizing:border-box}
+.el-embedded-chat .chat-message.el{align-self:stretch;width:auto;max-width:860px;box-sizing:border-box}
 .el-embedded-chat .chat-message.user{width:auto;max-width:72%;box-sizing:border-box}
 @media(max-width:850px){.el-embedded-chat .chat-message.el,.el-embedded-chat .chat-message.user{width:auto;max-width:94%}}
 `
   fs.writeFileSync(cssFile,css)
 }
+css=css.replace(
+  '.el-embedded-chat .chat-message.el{width:min(860px,82%);max-width:82%;box-sizing:border-box}',
+  '.el-embedded-chat .chat-message.el{align-self:stretch;width:auto;max-width:860px;box-sizing:border-box}',
+)
+fs.writeFileSync(cssFile,css)
 console.log('ELISEI 5.19.27 organic keywords and El chat UI applied')
