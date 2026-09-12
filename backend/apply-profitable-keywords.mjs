@@ -231,4 +231,9 @@ if (!analyst.includes('const asksKeywords = /(?:поисков|ключ|фраз
   analyst=analyst.replace('            productRows,\n            profitableKeywords:', '            productRows,\n            keywordRows:Array.isArray(advertising.keywordRows) ? advertising.keywordRows : [],\n            profitableKeywords:')
 }
 fs.writeFileSync(analystFile,analyst)
-console.log('ELISEI 5.19.26 advertising keywords and El grounding applied')
+
+const routeFile='src/routes/elCore.cjs'
+let route=fs.readFileSync(routeFile,'utf8')
+route=route.replaceAll("version: '5.13.7'","version: '5.19.27'")
+fs.writeFileSync(routeFile,route)
+console.log('ELISEI 5.19.27 advertising keywords, El grounding and engine version applied')

@@ -51,4 +51,23 @@ replaceOnce(
 'El organic suggestion')
 
 fs.writeFileSync(file,source)
-console.log('ELISEI 5.19.25 organic keyword opportunities UI applied')
+
+const identityBefore='  const preferredElName = elSettings.preferredName || displayName'
+const identityAfter='  const preferredElName = displayName || elSettings.preferredName'
+if(source.includes(identityBefore)){
+  source=source.replace(identityBefore,identityAfter)
+  fs.writeFileSync(file,source)
+}
+
+const cssFile='src/styles/app.css'
+let css=fs.readFileSync(cssFile,'utf8')
+if(!css.includes('/* ELISEI 5.19.27 — readable El conversation */')){
+  css+=`\n\n/* ELISEI 5.19.27 — readable El conversation */
+.el-embedded-chat .chat-stream{max-height:none;min-height:420px;overflow:visible;padding:12px 0 24px}
+.el-embedded-chat .chat-message.el{width:min(860px,82%);max-width:82%;box-sizing:border-box}
+.el-embedded-chat .chat-message.user{width:auto;max-width:72%;box-sizing:border-box}
+@media(max-width:850px){.el-embedded-chat .chat-message.el,.el-embedded-chat .chat-message.user{width:auto;max-width:94%}}
+`
+  fs.writeFileSync(cssFile,css)
+}
+console.log('ELISEI 5.19.27 organic keywords and El chat UI applied')
