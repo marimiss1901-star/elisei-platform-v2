@@ -116,10 +116,9 @@ replaceOnce(
     period:selectedPeriod,
   })
 
-  // Search-cluster stats are intentionally piggy-backed on the existing hourly
-  // advertising refresh. The current Base token allows only two calls/hour to
-  // this method, so ELISEI sends exactly one request with at most 100 pairs and
-  // rotates the pair offset between refreshes while preserving prior batches.
+  // Search-cluster stats are piggy-backed on the existing hourly advertising
+  // refresh. One request carries at most 100 campaign/nmID pairs; prior batches
+  // stay cached so a Base token never needs aggressive UI-triggered polling.
   const keywordPairs=advertisingKeywordPairs(campaigns)
   const previousKeywordOffset=Math.max(0,Number(previousForPeriod?.meta?.nextKeywordOffset || period?.nextKeywordOffset || 0))
   const keywordOffset=previousKeywordOffset >= keywordPairs.length ? 0 : previousKeywordOffset
@@ -137,8 +136,6 @@ replaceOnce(
       })
       freshKeywordRows=normalizeKeywordStats(keywordPayload)
     } catch (error) {
-      // Keyword statistics enrich the already valid advertising snapshot. A WB
-      // cluster-rate/availability error must not discard campaign statistics.
       keywordError=String(error?.message || 'WB не отдал поисковые кластеры')
     }
   }
@@ -164,9 +161,7 @@ replaceOnce(
   return {
     value,
     rawPayload:{ campaigns:campaignPayload, stats:statsPayload },
-    validation:{ campaigns:campaigns.length, requestedCampaigns:requestedIds.length, statsResponseCampaigns:statsByAdvertId.size, nextStatsOffset },
-    endpoint:\`${campaignEndpoint} + ${statsEndpoint}\`,
-  }`,
+    validation:{ campaigns:campaigns.length, requestedCampaigns:requestedIds.length, statsResponseCampaigns:statsByAdvertId.size, nextStatsOffset },`,
 `    nextStatsOffset,
     nextKeywordOffset,
     requestedCampaigns:requestedIds.length,
@@ -180,10 +175,13 @@ replaceOnce(
   return {
     value,
     rawPayload:{ campaigns:campaignPayload, stats:statsPayload, keywordStats:keywordPayload },
-    validation:{ campaigns:campaigns.length, requestedCampaigns:requestedIds.length, statsResponseCampaigns:statsByAdvertId.size, nextStatsOffset, keywordPairs:keywordPairs.length, keywordRows:keywordRows.length, keywordRequestedPairs:keywordBatch.length, nextKeywordOffset, keywordError },
-    endpoint:keywordBatch.length ? \`${campaignEndpoint} + ${statsEndpoint} + ${keywordEndpoint}\` : \`${campaignEndpoint} + ${statsEndpoint}\`,
-  }`,
+    validation:{ campaigns:campaigns.length, requestedCampaigns:requestedIds.length, statsResponseCampaigns:statsByAdvertId.size, nextStatsOffset, keywordPairs:keywordPairs.length, keywordRows:keywordRows.length, keywordRequestedPairs:keywordBatch.length, nextKeywordOffset, keywordError },`,
 'keyword advertising metadata')
+
+replaceOnce(
+`    endpoint:\`${campaignEndpoint} + ${statsEndpoint}\`,`,
+`    endpoint:keywordBatch.length ? keywordEndpoint : statsEndpoint,`,
+'keyword endpoint summary')
 
 fs.writeFileSync(file,source)
 console.log('ELISEI 5.19.24 profitable advertising keywords applied')
