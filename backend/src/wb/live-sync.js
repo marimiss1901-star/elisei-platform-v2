@@ -1,31 +1,55 @@
 const DEFAULT_TIME_ZONE = 'Europe/Moscow'
 
-// Seller-day policy: use the proven Statistics API readers for orders and sales
-// until WB Order Feed is verified against a real ELISEI cabinet. Operational
-// seller-day data is intentionally calm: orders, sales and both stock contours
-// refresh no more often than once every two hours. Advertising is refreshed
-// hourly during the active day so current DRR/spend do not lag a full day.
-// Current WB balance is a single light finance call and is refreshed every four
-// hours so the dashboard never carries a multi-day-old cash snapshot.
+// ELISEI live freshness policy.
+// Fast operational streams stay reasonably current without hammering WB.
+// Heavy analytics/report streams are guaranteed a daily check even if the
+// overnight window was missed (deploy/restart/DB interruption). Smart Scheduler
+// still serializes conflicting WB API groups and respects server rate limits.
 const STAGE_DEFAULTS = Object.freeze({
-  orders: 7200,
+  orders: 2 * 60 * 60,
   balance: 4 * 60 * 60,
-  sales: 7200,
-  advertising: 3600,
-  stocks: 7200,
-  sellerStocks: 7200,
+  sales: 2 * 60 * 60,
+  advertising: 60 * 60,
+  stocks: 2 * 60 * 60,
+  sellerStocks: 2 * 60 * 60,
+
+  products: 6 * 60 * 60,
+  reviews: 2 * 60 * 60,
+  questions: 2 * 60 * 60,
+  chats: 2 * 60 * 60,
+
+  paidStorage: 24 * 60 * 60,
+  acceptance: 24 * 60 * 60,
+  goodsReturns: 24 * 60 * 60,
+  tariffs: 24 * 60 * 60,
+  funnel: 24 * 60 * 60,
+  searchQueries: 24 * 60 * 60,
+  stockHistory: 24 * 60 * 60,
+  documents: 24 * 60 * 60,
 })
 
-// Existing cabinets are migrated upward automatically: old 30/60-minute
-// settings cannot keep polling WB too aggressively. Balance is intentionally
-// capped at four hours: it is cheap, user-visible and independent from P&L.
+// Never let saved legacy settings poll faster than these limits.
 const MIN_INTERVALS = Object.freeze({
-  orders: 7200,
+  orders: 2 * 60 * 60,
   balance: 4 * 60 * 60,
-  sales: 7200,
-  advertising: 3600,
-  stocks: 7200,
-  sellerStocks: 7200,
+  sales: 2 * 60 * 60,
+  advertising: 60 * 60,
+  stocks: 2 * 60 * 60,
+  sellerStocks: 2 * 60 * 60,
+
+  products: 6 * 60 * 60,
+  reviews: 2 * 60 * 60,
+  questions: 2 * 60 * 60,
+  chats: 2 * 60 * 60,
+
+  paidStorage: 24 * 60 * 60,
+  acceptance: 24 * 60 * 60,
+  goodsReturns: 24 * 60 * 60,
+  tariffs: 24 * 60 * 60,
+  funnel: 24 * 60 * 60,
+  searchQueries: 24 * 60 * 60,
+  stockHistory: 24 * 60 * 60,
+  documents: 24 * 60 * 60,
 })
 
 const OVERNIGHT_MULTIPLIERS = Object.freeze({
@@ -35,6 +59,10 @@ const OVERNIGHT_MULTIPLIERS = Object.freeze({
   advertising: 2,
   stocks: 2,
   sellerStocks: 2,
+  products: 2,
+  reviews: 2,
+  questions: 2,
+  chats: 2,
 })
 
 const WEBHOOK_FALLBACK_MULTIPLIERS = Object.freeze({})
@@ -46,6 +74,18 @@ const LIVE_PRIORITY = Object.freeze({
   advertising: 25,
   sellerStocks: 30,
   stocks: 40,
+  products: 45,
+  reviews: 55,
+  questions: 60,
+  chats: 65,
+  paidStorage: 70,
+  acceptance: 72,
+  goodsReturns: 74,
+  funnel: 76,
+  searchQueries: 78,
+  stockHistory: 80,
+  tariffs: 82,
+  documents: 84,
 })
 
 export const LIVE_SYNC_STAGES = Object.freeze(Object.keys(STAGE_DEFAULTS))
