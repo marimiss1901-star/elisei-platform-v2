@@ -73,6 +73,20 @@ if(source.includes(requestNameBefore)){
   fs.writeFileSync(file,source)
 }
 
+const advertisingReturnBefore=`    setAdvertisingSnapshot(result.advertising || null)\n    setAdvertisingCoverage(result.coverage || null)\n  }`
+const advertisingReturnAfter=`    setAdvertisingSnapshot(result.advertising || null)\n    setAdvertisingCoverage(result.coverage || null)\n    return result.advertising || null\n  }`
+if(source.includes(advertisingReturnBefore)) source=source.replace(advertisingReturnBefore,advertisingReturnAfter)
+
+const chatAdvertisingBefore=`    try {\n      const period = readElPeriod()`
+const chatAdvertisingAfter=`    try {\n      const period = readElPeriod()\n      const chatAdvertising = advertisingSnapshot\n        || await loadAdvertisingData(connection.connectionId,period).catch(() => null)\n        || coreData?.advertising\n        || null`
+if(source.includes(chatAdvertisingBefore)) source=source.replace(chatAdvertisingBefore,chatAdvertisingAfter)
+
+source=source.replace(
+  '          advertising:advertisingSnapshot ? {\n            totals:advertisingSnapshot.totals || advertisingSnapshot,\n            statsAvailable:Boolean(advertisingSnapshot.statsAvailable),\n            campaigns:Array.isArray(advertisingSnapshot.campaigns) ? advertisingSnapshot.campaigns.slice(0,80) : [],\n            productRows:Array.isArray(advertisingSnapshot.productRows) ? advertisingSnapshot.productRows.slice(0,120) : [],\n            profitableKeywords:buildProfitableKeywordRows(advertisingSnapshot,analyticsBaseProducts).slice(0,120),\n            organicKeywordOpportunities:buildOrganicKeywordOpportunities(organicSearchRows,advertisingSnapshot,analyticsBaseProducts).slice(0,120),\n            keywordStatsAvailable:Boolean(advertisingSnapshot.keywordStatsAvailable),',
+  '          advertising:chatAdvertising ? {\n            totals:chatAdvertising.totals || chatAdvertising,\n            statsAvailable:Boolean(chatAdvertising.statsAvailable),\n            campaigns:Array.isArray(chatAdvertising.campaigns) ? chatAdvertising.campaigns.slice(0,80) : [],\n            productRows:Array.isArray(chatAdvertising.productRows) ? chatAdvertising.productRows.slice(0,120) : [],\n            profitableKeywords:buildProfitableKeywordRows(chatAdvertising,analyticsBaseProducts).slice(0,120),\n            organicKeywordOpportunities:buildOrganicKeywordOpportunities(organicSearchRows,chatAdvertising,analyticsBaseProducts).slice(0,120),\n            keywordStatsAvailable:Boolean(chatAdvertising.keywordStatsAvailable),',
+)
+fs.writeFileSync(file,source)
+
 const cssFile='src/styles/app.css'
 let css=fs.readFileSync(cssFile,'utf8')
 if(!css.includes('/* ELISEI 5.19.27 — readable El conversation */')){
