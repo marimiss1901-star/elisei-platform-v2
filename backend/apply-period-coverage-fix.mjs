@@ -41,5 +41,14 @@ replaceOnce(
 `,
 'finance/advertising availability')
 
+// 5.19.22: any saved finance rows are useful progress, but they do not mean
+// the selected period is fully covered. Only full from/to coverage may expose
+// availability.finance=true for a period-filtered core response.
+replaceOnce(
+`    finance: data?.__periodFiltered ? (periodCoverageConfirms('finance') || financeRows.length > 0) : streamDataAvailable(stageStatus, 'finance', financeRows.length),`,
+`    finance: data?.__periodFiltered ? periodCoverageConfirms('finance') : streamDataAvailable(stageStatus, 'finance', financeRows.length),`,
+'finance full-period truthfulness')
+
 fs.writeFileSync(file,source)
 console.log('Period coverage availability fix applied')
+console.log('ELISEI 5.19.22 finance full-period availability applied')
