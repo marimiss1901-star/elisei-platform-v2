@@ -23,8 +23,6 @@ replaceOnce(
 'default 30-day preset')
 
 // ELISEI 5.19.21 — stock scope truthfulness.
-// A fresh FBS sellerStocks snapshot must not be presented as complete cabinet
-// stock while the FBO WB-warehouse snapshot is unavailable.
 replaceOnce(
 `    const stockAvailable = Boolean(coreData?.availability?.stocks)\n    const stockDetailsAvailable = Boolean(coreData?.availability?.stockDetails)`,
 `    const stockAvailable = Boolean(coreData?.availability?.stocks)\n    const sellerStockAvailable = Boolean(coreData?.availability?.sellerStocks)\n    const fboStockAvailable = Boolean(coreData?.availability?.fboStocks)\n    const stockScopePartial = sellerStockAvailable && !fboStockAvailable\n    const stockDetailsAvailable = Boolean(coreData?.availability?.stockDetails)`,
@@ -36,15 +34,34 @@ replaceOnce(
 'partial stock scope notice')
 
 // ELISEI 5.19.22 — selected-period Finance truthfulness on home/analytics.
-// Old core marts may still contain availability.finance=true from the legacy
-// "any finance rows" rule. Recheck the actual period coverage in the browser
-// before a finance stream can be treated as complete.
 replaceOnce(
 `    const financeEstimateAvailable = Boolean(!ledgerHasMovements && salesAvailableForPeriod && businessSummary.revenue != null)\n    const financeAvailableForPeriod = Boolean(stateAvailable(snapshotFinanceState,analyticsAvailability.finance) || ledgerHasMovements || selectedFinancePeriodCovered || financeEstimateAvailable)`,
 `    const financeEstimateAvailable = Boolean(!ledgerHasMovements && salesAvailableForPeriod && businessSummary.revenue != null)\n    const selectedFinanceCoverage = analyticsCore?.periodCoverage?.finance || null\n    const financeCoverageCompleteForPeriod = Boolean(\n      selectedFinanceCoverage?.from && selectedFinanceCoverage?.to\n      && String(selectedFinanceCoverage.from) <= String(analyticsPeriod.from)\n      && String(selectedFinanceCoverage.to) >= String(analyticsPeriod.to)\n    )\n    const financeStreamCompleteForPeriod = snapshotMode ? snapshotFinanceState === 'ready' : financeCoverageCompleteForPeriod\n    const financeAvailableForPeriod = Boolean((stateAvailable(snapshotFinanceState,analyticsAvailability.finance) && financeStreamCompleteForPeriod) || ledgerHasMovements || selectedFinancePeriodCovered || financeEstimateAvailable)`,
 'home finance full-period guard')
 
+// ELISEI 5.19.23 — stale-mart SKU P&L truthfulness in the browser.
+replaceOnce(
+`  const productRows = useMemo(() => coreProducts.map((p,index) => ({\n    ...p,`,
+`  const productFinanceCoverage = analyticsCore?.periodCoverage?.finance || coreData?.periodCoverage?.finance || null\n  const productFinancePeriodComplete = Boolean(\n    productFinanceCoverage?.from && productFinanceCoverage?.to\n    && String(productFinanceCoverage.from) <= String(analyticsPeriod.from)\n    && String(productFinanceCoverage.to) >= String(analyticsPeriod.to)\n  )\n  const productRows = useMemo(() => coreProducts.map((p,index) => ({\n    ...p,\n    profitProvisional:Boolean(p.profitProvisional || !productFinancePeriodComplete),`,
+'product finance coverage marker')
+
+replaceOnce(
+`  })), [coreProducts])`,
+`  })), [coreProducts,productFinancePeriodComplete])`,
+'product rows coverage dependency')
+
+replaceOnce(
+`            <span className={p.profit != null && p.profit < 0 ? 'negative' : 'positive'}>{formatMoney(p.profit)}</span>`,
+`            <span className={p.profit != null && p.profit < 0 ? 'negative' : 'positive'}><strong>{formatMoney(p.profit)}</strong>{p.profitProvisional && <small>предварительно · Finance не закрыл период</small>}</span>`,
+'product table provisional profit')
+
+replaceOnce(
+`            <span className={p.profit != null && p.profit < 0 ? 'negative' : 'positive'}><strong>{p.profit == null ? 'Нужна себестоимость' : formatMoney(p.profit)}</strong><small>{p.margin == null ? 'маржа не рассчитана' : \`маржа \${formatPercent(p.margin)}\`}</small></span>`,
+`            <span className={p.profit != null && p.profit < 0 ? 'negative' : 'positive'}><strong>{p.profit == null ? 'Нужна себестоимость' : formatMoney(p.profit)}</strong><small>{p.profitProvisional ? 'предварительно · Finance не закрыл период' : p.margin == null ? 'маржа не рассчитана' : \`маржа \${formatPercent(p.margin)}\`}</small></span>`,
+'analytics table provisional profit')
+
 fs.writeFileSync(file,source)
 console.log('ELISEI 5.19.20 completed relative periods applied')
 console.log('ELISEI 5.19.21 stock scope truthfulness applied')
 console.log('ELISEI 5.19.22 frontend finance period guard applied')
+console.log('ELISEI 5.19.23 stale-mart SKU profit guard applied')
