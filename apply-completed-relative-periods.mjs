@@ -35,6 +35,16 @@ replaceOnce(
 `      {renderSharedPeriodControls({ note:stockScopePartial ? 'Сейчас подтверждён FBS-остаток продавца. FBO-остаток на складах WB ожидает доступного снимка и не подменяется старым значением.' : 'Остаток берётся из последнего официального снимка WB, а продажи, скорость и дни запаса пересчитываются по единому выбранному периоду.' })}\n      {stockScopePartial && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Остаток сейчас неполный: подтверждён FBS</strong><p>FBO-остаток на складах WB сейчас недоступен в свежем снимке. Показанные количества относятся только к подтверждённой доступной части; ELISEI не добавляет старый FBO-снимок и не выдаёт его за текущий.</p></div><button onClick={() => setActive('История остатков')}>Открыть историю</button></div>}\n      <div className="workspace-filter-bar">`,
 'partial stock scope notice')
 
+// ELISEI 5.19.22 — selected-period Finance truthfulness on home/analytics.
+// Old core marts may still contain availability.finance=true from the legacy
+// "any finance rows" rule. Recheck the actual period coverage in the browser
+// before a finance stream can be treated as complete.
+replaceOnce(
+`    const financeEstimateAvailable = Boolean(!ledgerHasMovements && salesAvailableForPeriod && businessSummary.revenue != null)\n    const financeAvailableForPeriod = Boolean(stateAvailable(snapshotFinanceState,analyticsAvailability.finance) || ledgerHasMovements || selectedFinancePeriodCovered || financeEstimateAvailable)`,
+`    const financeEstimateAvailable = Boolean(!ledgerHasMovements && salesAvailableForPeriod && businessSummary.revenue != null)\n    const selectedFinanceCoverage = analyticsCore?.periodCoverage?.finance || null\n    const financeCoverageCompleteForPeriod = Boolean(\n      selectedFinanceCoverage?.from && selectedFinanceCoverage?.to\n      && String(selectedFinanceCoverage.from) <= String(analyticsPeriod.from)\n      && String(selectedFinanceCoverage.to) >= String(analyticsPeriod.to)\n    )\n    const financeStreamCompleteForPeriod = snapshotMode ? snapshotFinanceState === 'ready' : financeCoverageCompleteForPeriod\n    const financeAvailableForPeriod = Boolean((stateAvailable(snapshotFinanceState,analyticsAvailability.finance) && financeStreamCompleteForPeriod) || ledgerHasMovements || selectedFinancePeriodCovered || financeEstimateAvailable)`,
+'home finance full-period guard')
+
 fs.writeFileSync(file,source)
 console.log('ELISEI 5.19.20 completed relative periods applied')
 console.log('ELISEI 5.19.21 stock scope truthfulness applied')
+console.log('ELISEI 5.19.22 frontend finance period guard applied')
