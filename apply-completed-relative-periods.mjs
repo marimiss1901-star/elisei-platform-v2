@@ -40,6 +40,8 @@ replaceOnce(
 'home finance full-period guard')
 
 // ELISEI 5.19.23 — stale-mart SKU P&L truthfulness in the browser.
+// Only inject the period-aware provisional flag here. The later canonical
+// apply-product-pnl-truthfulness-ui.mjs patch already owns the Analytics label.
 replaceOnce(
 `  const productRows = useMemo(() => coreProducts.map((p,index) => ({\n    ...p,`,
 `  const productFinanceCoverage = analyticsCore?.periodCoverage?.finance || coreData?.periodCoverage?.finance || null\n  const productFinancePeriodComplete = Boolean(\n    productFinanceCoverage?.from && productFinanceCoverage?.to\n    && String(productFinanceCoverage.from) <= String(analyticsPeriod.from)\n    && String(productFinanceCoverage.to) >= String(analyticsPeriod.to)\n  )\n  const productRows = useMemo(() => coreProducts.map((p,index) => ({\n    ...p,\n    profitProvisional:Boolean(p.profitProvisional || !productFinancePeriodComplete),`,
@@ -54,11 +56,6 @@ replaceOnce(
 `            <span className={p.profit != null && p.profit < 0 ? 'negative' : 'positive'}>{formatMoney(p.profit)}</span>`,
 `            <span className={p.profit != null && p.profit < 0 ? 'negative' : 'positive'}><strong>{formatMoney(p.profit)}</strong>{p.profitProvisional && <small>предварительно · Finance не закрыл период</small>}</span>`,
 'product table provisional profit')
-
-replaceOnce(
-`            <span className={p.profit != null && p.profit < 0 ? 'negative' : 'positive'}><strong>{p.profit == null ? 'Нужна себестоимость' : formatMoney(p.profit)}</strong><small>{p.margin == null ? 'маржа не рассчитана' : \`маржа \${formatPercent(p.margin)}\`}</small></span>`,
-`            <span className={p.profit != null && p.profit < 0 ? 'negative' : 'positive'}><strong>{p.profit == null ? 'Нужна себестоимость' : formatMoney(p.profit)}</strong><small>{p.profitProvisional ? 'предварительно · Finance не закрыл период' : p.margin == null ? 'маржа не рассчитана' : \`маржа \${formatPercent(p.margin)}\`}</small></span>`,
-'analytics table provisional profit')
 
 fs.writeFileSync(file,source)
 console.log('ELISEI 5.19.20 completed relative periods applied')
