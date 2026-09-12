@@ -120,6 +120,15 @@ replaceOnce(
   'product cost source metadata',
 )
 
+// 5.19.23: having some WB finance rows is not enough to confirm SKU profit.
+// The whole requested period must be covered by Finance, otherwise product
+// profit/margin remain provisional even when the partial register has rows.
+replaceOnce(
+`      profitProvisional: financeHasRows !== true || logisticsSource !== 'wb_api' || acquiringSource === 'not_loaded' || storageSource === 'not_loaded' || storageSource === 'paid_storage_report_partial',`,
+`      profitProvisional: financeHasRows !== true || (data?.__periodFiltered && !periodCoverageConfirms('finance')) || logisticsSource !== 'wb_api' || acquiringSource === 'not_loaded' || storageSource === 'not_loaded' || storageSource === 'paid_storage_report_partial',`,
+  'full-period product profit truthfulness',
+)
+
 replaceOnce(
 `      commission: Math.round(totals.commission),
       commissionSource: financeHasRows ? 'wb_api' : 'manual',
@@ -148,3 +157,4 @@ replaceOnce(
 
 fs.writeFileSync(serverUrl, source)
 console.log('ELISEI 5.19.3 product P&L cost truthfulness applied')
+console.log('ELISEI 5.19.23 product profit full-period guard applied')
