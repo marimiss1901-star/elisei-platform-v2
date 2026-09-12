@@ -207,5 +207,28 @@ const replacement=`async function loadAdvertising(token, { deadlineAt = 0, previ
 }`
 
 source=source.slice(0,start)+replacement+source.slice(end)
+
+if (!source.includes("keywordRows: (advertisingPayload?.keywordRows || []).slice(0, 300)")) {
+  source=source.replace(
+    '        productRows: (advertisingPayload?.productRows || core.advertising?.productRows || []).slice(0, 100),',
+    "        productRows: (advertisingPayload?.productRows || core.advertising?.productRows || []).slice(0, 100),\n        keywordRows: (advertisingPayload?.keywordRows || []).slice(0, 300),\n        keywordStatsAvailable:Boolean(advertisingPayload?.keywordStatsAvailable),\n        keywordError:advertisingPayload?.keywordError || null,"
+  )
+}
 fs.writeFileSync(file,source)
-console.log('ELISEI 5.19.24 profitable advertising keywords applied')
+
+const analystFile='src/services/elAnalystEngine.cjs'
+let analyst=fs.readFileSync(analystFile,'utf8')
+if (!analyst.includes('const asksKeywords = /(?:поисков|ключ|фраз|запрос)')) {
+  analyst=analyst.replace(
+    "  const message = String(options.message || tone?.message || '');",
+    "  const message = String(options.message || tone?.message || '');\n  const asksKeywords = /(?:поисков|ключ|фраз|запрос).*(?:реклам|добав|запуст|масштаб)|(?:реклам).*(?:поисков|ключ|фраз|запрос)/i.test(message);\n  const paidKeywords = Array.isArray(ads.profitableKeywords) ? ads.profitableKeywords : [];\n  const rawPaidKeywords = Array.isArray(ads.keywordRows) ? ads.keywordRows : [];\n  const organicKeywords = Array.isArray(ads.organicKeywordOpportunities) ? ads.organicKeywordOpportunities : [];"
+  )
+  analyst=analyst.replace(
+    "  if (ads.snapshotFallback) lines.push('Точного рекламного среза за выбранный период пока нет, поэтому беру последний сохранённый снимок кампаний и не выдаю его за полный факт периода.');",
+    "  if (asksKeywords) {\n    const organic=organicKeywords.filter(item=>['gem','test'].includes(String(item?.opportunity||''))).slice(0,8);\n    const paid=paidKeywords.filter(item=>Number(item?.attributedProfit)>0&&Number(item?.orders||0)>0).slice(0,8);\n    const observed=rawPaidKeywords.filter(item=>Number(item?.orders||0)>0).slice(0,8);\n    if(organic.length){ lines.push('Новые органические запросы, которые стоит проверить для рекламы:'); organic.forEach(item=>lines.push('• '+(item.phrase||item.normQuery||'Запрос')+' — заказов '+number(item.orders)+', переходов '+number(item.openCard)+', потенциал '+money(item.contributionBeforeAds)+(item.provisional?' (предварительно)':'')+'.')); }\n    if(paid.length){ lines.push('Уже работающие прибыльные рекламные ключи:'); paid.forEach(item=>lines.push('• '+(item.normQuery||item.phrase||'Ключ')+' — заказов '+number(item.orders)+', расход '+money(item.spend)+', атрибутированная прибыль '+money(item.attributedProfit)+(item.provisional?' (предварительно)':'')+'.')); }\n    else if(observed.length){ lines.push('Рекламные ключи с подтверждёнными заказами (прибыль пока не подтверждена):'); observed.forEach(item=>lines.push('• '+(item.normQuery||item.phrase||'Ключ')+' — заказов '+number(item.orders)+', расход '+money(item.spend)+', CTR '+percent(item.ctr)+'.')); }\n    if(!organic.length&&!paid.length&&!observed.length) lines.push(ads.keywordStatsAvailable?'По загруженной части ключей пока нет кандидатов с подтверждёнными заказами.':'Поисковые кластеры рекламы WB ещё не загружены; конкретные ключи без данных не придумываю.');\n  }\n  if (ads.snapshotFallback) lines.push('Точного рекламного среза за выбранный период пока нет, поэтому беру последний сохранённый снимок кампаний и не выдаю его за полный факт периода.');"
+  )
+  analyst=analyst.replace('  if (!asksWinners) lines.push(`Вывод:', '  if (!asksWinners && !asksKeywords) lines.push(`Вывод:')
+  analyst=analyst.replace('            productRows,\n            profitableKeywords:', '            productRows,\n            keywordRows:Array.isArray(advertising.keywordRows) ? advertising.keywordRows : [],\n            profitableKeywords:')
+}
+fs.writeFileSync(analystFile,analyst)
+console.log('ELISEI 5.19.26 advertising keywords and El grounding applied')
