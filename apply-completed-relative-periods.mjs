@@ -25,12 +25,12 @@ replaceOnce(
 // ELISEI 5.19.21 — stock scope truthfulness.
 replaceOnce(
 `    const stockAvailable = Boolean(coreData?.availability?.stocks)\n    const stockDetailsAvailable = Boolean(coreData?.availability?.stockDetails)`,
-`    const stockAvailable = Boolean(coreData?.availability?.stocks)\n    const sellerStockAvailable = Boolean(coreData?.availability?.sellerStocks)\n    const fboStockAvailable = Boolean(coreData?.availability?.fboStocks)\n    const stockScopePartial = sellerStockAvailable && !fboStockAvailable\n    const stockDetailsAvailable = Boolean(coreData?.availability?.stockDetails)`,
+`    const stockAvailable = Boolean(coreData?.availability?.stocks)\n    const sellerStockAvailable = Boolean(coreData?.availability?.sellerStocks)\n    const fboStockAvailable = Boolean(coreData?.availability?.fboStocks)\n    const stockScopePartial = sellerStockAvailable && !fboStockAvailable\n    const fboAccessUnsupported = /token does not satisfy additional requirements/i.test(String(stockState?.lastError || ''))\n    const stockDetailsAvailable = Boolean(coreData?.availability?.stockDetails)`,
 'FBS/FBO availability flags')
 
 replaceOnce(
 `      {renderSharedPeriodControls({ note:'Остаток берётся из последнего официального снимка WB, а продажи, скорость и дни запаса пересчитываются по единому выбранному периоду.' })}\n      <div className="workspace-filter-bar">`,
-`      {renderSharedPeriodControls({ note:stockScopePartial ? 'Сейчас подтверждён FBS-остаток продавца. FBO-остаток на складах WB ожидает доступного снимка и не подменяется старым значением.' : 'Остаток берётся из последнего официального снимка WB, а продажи, скорость и дни запаса пересчитываются по единому выбранному периоду.' })}\n      {stockScopePartial && <div className="notice warning"><AlertTriangle size={20}/><div><strong>Остаток сейчас неполный: подтверждён FBS</strong><p>FBO-остаток на складах WB сейчас недоступен в свежем снимке. Показанные количества относятся только к подтверждённой доступной части; ELISEI не добавляет старый FBO-снимок и не выдаёт его за текущий.</p></div><button onClick={() => setActive('История остатков')}>Открыть историю</button></div>}\n      <div className="workspace-filter-bar">`,
+`      {renderSharedPeriodControls({ note:stockScopePartial ? (fboAccessUnsupported ? 'Сейчас подтверждён FBS-остаток. Для свежего FBO-снимка WB нужен Personal или Service токен категории Analytics; текущий токен этому методу не подходит.' : 'Сейчас подтверждён FBS-остаток продавца. FBO-остаток на складах WB ожидает доступного снимка и не подменяется старым значением.') : 'Остаток берётся из последнего официального снимка WB, а продажи, скорость и дни запаса пересчитываются по единому выбранному периоду.' })}\n      {stockScopePartial && <div className="notice warning"><AlertTriangle size={20}/><div><strong>{fboAccessUnsupported ? 'FBO недоступен для текущего типа токена' : 'Остаток сейчас неполный: подтверждён FBS'}</strong><p>{fboAccessUnsupported ? 'WB принимает новый метод текущих остатков на своих складах только с Personal или Service токеном категории Analytics. FBS остаётся подтверждённым; старый FBO-снимок ELISEI не подставляет как текущий.' : 'FBO-остаток на складах WB сейчас недоступен в свежем снимке. Показанные количества относятся только к подтверждённой доступной части; ELISEI не добавляет старый FBO-снимок и не выдаёт его за текущий.'}</p></div><button onClick={() => setActive('История остатков')}>Открыть историю</button></div>}\n      <div className="workspace-filter-bar">`,
 'partial stock scope notice')
 
 // ELISEI 5.19.22 — selected-period Finance truthfulness on home/analytics.
@@ -40,8 +40,6 @@ replaceOnce(
 'home finance full-period guard')
 
 // ELISEI 5.19.23 — stale-mart SKU P&L truthfulness in the browser.
-// Only inject the period-aware provisional flag here. The later canonical
-// apply-product-pnl-truthfulness-ui.mjs patch already owns the Analytics label.
 replaceOnce(
 `  const productRows = useMemo(() => coreProducts.map((p,index) => ({\n    ...p,`,
 `  const productFinanceCoverage = analyticsCore?.periodCoverage?.finance || coreData?.periodCoverage?.finance || null\n  const productFinancePeriodComplete = Boolean(\n    productFinanceCoverage?.from && productFinanceCoverage?.to\n    && String(productFinanceCoverage.from) <= String(analyticsPeriod.from)\n    && String(productFinanceCoverage.to) >= String(analyticsPeriod.to)\n  )\n  const productRows = useMemo(() => coreProducts.map((p,index) => ({\n    ...p,\n    profitProvisional:Boolean(p.profitProvisional || !productFinancePeriodComplete),`,
@@ -62,3 +60,4 @@ console.log('ELISEI 5.19.20 completed relative periods applied')
 console.log('ELISEI 5.19.21 stock scope truthfulness applied')
 console.log('ELISEI 5.19.22 frontend finance period guard applied')
 console.log('ELISEI 5.19.23 stale-mart SKU profit guard applied')
+console.log('ELISEI 5.19.24 FBO token requirement copy applied')
